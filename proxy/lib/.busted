@@ -1,0 +1,42 @@
+return {
+  default = {
+    -- Output format: tap, utfTerminal, json, junit, etc.
+    output = "utfTerminal",
+
+    -- Pattern for test files
+    pattern = "_spec",
+
+    -- Directories to search for tests
+    ROOT = {"spec/"},
+
+    -- Code coverage
+    coverage = false,
+
+    -- Verbosity
+    verbose = true,
+
+    -- Shuffle test execution order
+    shuffle = false,
+
+    -- Lua version
+    lua = "lua5.1"
+  },
+
+  -- Coverage profile
+  coverage = {
+    output = "utfTerminal",
+    pattern = "_spec",
+    ROOT = {"spec/"},
+    coverage = true,
+    verbose = true
+  },
+
+  -- CI profile (machine-readable output)
+  ci = {
+    output = "junit",
+    pattern = "_spec",
+    ROOT = {"spec/"},
+    coverage = false,
+    verbose = false
+  }
+}

@@ -1,0 +1,75 @@
+[project]
+name = "portunus-workspace"
+version = "0.1.0"
+description = ""
+authors = [{ name = "Tom.Catling", email = "Tom.Catling@dsit.gov.uk" }]
+requires-python = ">=3.12.0, <3.13"
+readme = "README.md"
+dependencies = [
+    "portunus",
+]
+
+[dependency-groups]
+dev = [
+    "requests>=2.32.3,<3",
+    "mypy>=1.11.0,<2",
+    "ruff>=0.6.0,<0.7",
+    "boto3-stubs[secretsmanager, kms]>=1.34.149,<2",
+    "types-requests>=2.32.0.20240712,<3",
+    "types-pyyaml>=6.0.12.20240724,<7",
+    "types-aiobotocore>=2.24.1,<3",
+    "types-aws-xray-sdk>=2.14.0.20250708,<3",
+    "pre-commit>=3.7.1,<4",
+    "pytest>=8.4.1,<9",
+    "pytest-asyncio>=1.1.0,<2",
+    "aws-xray-sdk>=2.14.0,<3",
+    "aiobotocore>=2.24.1,<3",
+    "redis>=5.0.0,<6",
+    "moto>=5.1.13,<6",
+    "pandas>=2.3.3,<3",
+    "pandas-stubs>=2.3.0,<3",
+    "pyarrow>=21.0.0,<22",
+    "freezegun>=1.5.0,<2",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+portunus = { path = "portunus", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff.lint]
+select = ["E",   # pycodestyle errors
+          "W",   # pycodestyle warnings
+          "F",   # flake8
+          "D",   # pydocstyle
+          "I",   # isort
+        ]
+ignore = ["E203", "D10", "D212"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.rules]
+# These type: ignore comments are needed for mypy (which CI runs) but
+# ty doesn't recognise mypy error codes and flags them as unused.
+unused-type-ignore-comment = "ignore"
+
+[tool.mypy]
+exclude = [
+    "^\\.venv/.*",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests"
+]
+# Exclude directories from test discovery
+norecursedirs = [
+    ".*",
+    ".venv",
+]
