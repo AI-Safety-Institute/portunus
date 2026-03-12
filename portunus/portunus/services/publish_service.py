@@ -1,20 +1,17 @@
-"""
-Publish service module.
+"""Publish service module.
 
-This module contains the PublishService class, which is responsible for
-publishing log data to Kinesis streams for long-term storage.
+Constructs log records and delegates transport to a pluggable
+StreamPublisher backend.
 """
 
-import asyncio
 import base64
-import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from aws_xray_sdk.core import xray_recorder
 
+from portunus.backends.protocols import StreamPublisher
 from portunus.config import config
-from portunus.exceptions import ServiceError
 from portunus.models import (
     MetadataRecord,
     RequestBodyRecord,
@@ -24,88 +21,28 @@ from portunus.models import (
     ResponseHeadersRecord,
     ResponseTrailersRecord,
 )
-from portunus.services.state_service import StateService
 from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
 
 
 class PublishService:
-    """
-    Service for publishing log events to external streams.
+    """Constructs log records and publishes via a StreamPublisher backend."""
 
-    This service handles publishing to:
-    - Kinesis Data Streams for long-term data storage
+    def __init__(self, publisher: StreamPublisher):
+        self.publisher = publisher
 
-    Attributes:
-        state_service: The StateService for AWS client access
-    """
-
-    def __init__(self, state_service: Optional[StateService] = None):
-        """Initialize the PublishService."""
-        self.state_service = state_service or StateService()
-
-    async def publish_to_kinesis_data_stream(
+    async def _publish_record(
         self,
         stream_name: str,
         record_data: Dict[str, Any],
         partition_key: str,
     ) -> bool:
-        """
-        Publish a single record to a Kinesis Data Stream.
-
-        Args:
-            stream_name: Name of the Kinesis Data Stream (without prefix)
-            record_data: Data to publish
-            partition_key: Partition key for the record
-
-        Returns:
-            True if successful
-
-        Raises:
-            ServiceError: If publishing fails
-        """
+        """Publish a record through the configured backend."""
         if not stream_name:
-            logger.warning(
-                f"Stream name not configured, skipping publish to {stream_name}"
-            )
+            logger.warning("Stream name not configured, skipping publish")
             return False
-
-        # Add throttling in local mode to prevent overwhelming LocalStack
-        # LocalStack's Kinesis implementation can drop requests under high load
-        if config.aws.endpoint_url:
-            await asyncio.sleep(1.0)
-
-        try:
-            async with await self.state_service.get_kinesis_client() as kinesis_client:
-                # Prepare and serialize the record data
-                data_bytes = json.dumps(record_data, default=str).encode("utf-8")
-
-                response = await kinesis_client.put_record(
-                    StreamName=stream_name,
-                    Data=data_bytes,
-                    PartitionKey=partition_key,
-                )
-
-                shard_id = response.get("ShardId")
-                sequence_number = response.get("SequenceNumber")
-                logger.info(
-                    f"Published record to Kinesis Data Stream {stream_name} "
-                    f"with ShardId {shard_id} and SequenceNumber "
-                    f"{sequence_number[:8]}..."
-                )
-                return True
-
-        except TimeoutError as e:
-            logger.exception(
-                f"Timeout while publishing to Kinesis Data Stream {stream_name}: {e}"
-            )
-            raise e
-        except Exception as e:
-            logger.exception(
-                f"Failed to publish to Kinesis Data Stream {stream_name}: {e}"
-            )
-            raise ServiceError(f"Failed to publish to Kinesis Data Stream: {e}")
+        return await self.publisher.publish(stream_name, record_data, partition_key)
 
     @xray_recorder.capture_async()  # type: ignore
     async def publish_metadata(
@@ -114,13 +51,7 @@ class PublishService:
         timestamp: str,
         principal_info: Dict[str, Any],
     ) -> bool:
-        """Publish metadata to Kinesis stream with ISO-8601 timestamps.
-
-        Args:
-            request_id: Unique request ID
-            timestamp: ISO-8601 formatted timestamp
-            principal_info: Principal information dictionary
-        """
+        """Publish metadata to the configured stream."""
         if not config.kinesis.metadata_stream_name:
             logger.warning("Metadata stream not configured, skipping publish")
             return False
@@ -136,10 +67,10 @@ class PublishService:
             session_name=principal_info.get("session_name"),
         )
 
-        # Use the stream name without prefix for the Kinesis Data Stream
-        data_stream_name = config.kinesis.metadata_stream_name
-        return await self.publish_to_kinesis_data_stream(
-            data_stream_name, record.to_dict(), request_id
+        return await self._publish_record(
+            config.kinesis.metadata_stream_name,
+            record.to_dict(),
+            request_id,
         )
 
     @xray_recorder.capture_async()  # type: ignore
@@ -149,15 +80,9 @@ class PublishService:
         headers: Dict[str, str],
         timestamp: str,
     ) -> bool:
-        """Publish request headers to Kinesis stream with ISO-8601 timestamps.
-
-        Args:
-            request_id: Unique request ID
-            headers: Request headers dictionary
-            timestamp: ISO-8601 formatted timestamp
-        """
+        """Publish request headers to the configured stream."""
         if not config.kinesis.request_headers_stream_name:
-            logger.warning("Request headers stream not configured, skipping publish")
+            logger.warning("Request headers stream not configured," " skipping publish")
             return False
 
         record = RequestHeadersRecord(
@@ -167,10 +92,10 @@ class PublishService:
             published_at=generate_iso_timestamp(),
         )
 
-        # Use the stream name without prefix for the Kinesis Data Stream
-        data_stream_name = config.kinesis.request_headers_stream_name
-        return await self.publish_to_kinesis_data_stream(
-            data_stream_name, record.to_dict(), request_id
+        return await self._publish_record(
+            config.kinesis.request_headers_stream_name,
+            record.to_dict(),
+            request_id,
         )
 
     @xray_recorder.capture_async()  # type: ignore
@@ -182,20 +107,10 @@ class PublishService:
         chunk_id: int,
         num_chunks: int,
     ) -> bool:
-        """Publish request body to Kinesis stream with ISO-8601 timestamps.
-
-        Args:
-            request_id: Unique request ID
-            body_bytes: Raw body bytes
-            timestamp: ISO-8601 formatted timestamp
-            chunk_id: Index of this chunk (0-based)
-            num_chunks: Total number of chunks
-        """
+        """Publish request body to the configured stream."""
         if not config.kinesis.request_body_stream_name:
-            logger.warning("Request body stream not configured, skipping publish")
+            logger.warning("Request body stream not configured," " skipping publish")
             return False
-
-        # Base64 encode for JSON serialization
 
         body_b64 = base64.b64encode(body_bytes).decode("ascii")
 
@@ -209,10 +124,10 @@ class PublishService:
             published_at=generate_iso_timestamp(),
         )
 
-        # Use the stream name without prefix for the Kinesis Data Stream
-        data_stream_name = config.kinesis.request_body_stream_name
-        return await self.publish_to_kinesis_data_stream(
-            data_stream_name, record.to_dict(), request_id
+        return await self._publish_record(
+            config.kinesis.request_body_stream_name,
+            record.to_dict(),
+            request_id,
         )
 
     @xray_recorder.capture_async()  # type: ignore
@@ -222,15 +137,11 @@ class PublishService:
         trailers: Dict[str, str],
         timestamp: str,
     ) -> bool:
-        """Publish request trailers to Kinesis stream with ISO-8601 timestamps.
-
-        Args:
-            request_id: Unique request ID
-            trailers: Request trailers dictionary
-            timestamp: ISO-8601 formatted timestamp
-        """
+        """Publish request trailers to the configured stream."""
         if not config.kinesis.request_trailers_stream_name:
-            logger.warning("Request trailers stream not configured, skipping publish")
+            logger.warning(
+                "Request trailers stream not configured," " skipping publish"
+            )
             return False
 
         record = RequestTrailersRecord(
@@ -240,10 +151,10 @@ class PublishService:
             published_at=generate_iso_timestamp(),
         )
 
-        # Use the stream name without prefix for the Kinesis Data Stream
-        data_stream_name = config.kinesis.request_trailers_stream_name
-        return await self.publish_to_kinesis_data_stream(
-            data_stream_name, record.to_dict(), request_id
+        return await self._publish_record(
+            config.kinesis.request_trailers_stream_name,
+            record.to_dict(),
+            request_id,
         )
 
     @xray_recorder.capture_async()  # type: ignore
@@ -253,15 +164,11 @@ class PublishService:
         headers: Dict[str, str],
         timestamp: str,
     ) -> bool:
-        """Publish response headers to Kinesis stream with ISO-8601 timestamps.
-
-        Args:
-            request_id: Unique request ID
-            headers: Response headers dictionary
-            timestamp: ISO-8601 formatted timestamp
-        """
+        """Publish response headers to the configured stream."""
         if not config.kinesis.response_headers_stream_name:
-            logger.warning("Response headers stream not configured, skipping publish")
+            logger.warning(
+                "Response headers stream not configured," " skipping publish"
+            )
             return False
 
         record = ResponseHeadersRecord(
@@ -271,10 +178,10 @@ class PublishService:
             published_at=generate_iso_timestamp(),
         )
 
-        # Use the stream name without prefix for the Kinesis Data Stream
-        data_stream_name = config.kinesis.response_headers_stream_name
-        return await self.publish_to_kinesis_data_stream(
-            data_stream_name, record.to_dict(), request_id
+        return await self._publish_record(
+            config.kinesis.response_headers_stream_name,
+            record.to_dict(),
+            request_id,
         )
 
     @xray_recorder.capture_async()  # type: ignore
@@ -286,20 +193,10 @@ class PublishService:
         chunk_id: int,
         num_chunks: int,
     ) -> bool:
-        """Publish response body to Kinesis stream with ISO-8601 timestamps.
-
-        Args:
-            request_id: Unique request ID
-            body_bytes: Raw body bytes
-            timestamp: ISO-8601 formatted timestamp
-            chunk_id: Index of this chunk (0-based)
-            num_chunks: Total number of chunks
-        """
+        """Publish response body to the configured stream."""
         if not config.kinesis.response_body_stream_name:
-            logger.warning("Response body stream not configured, skipping publish")
+            logger.warning("Response body stream not configured," " skipping publish")
             return False
-
-        # Base64 encode for JSON serialization
 
         body_b64 = base64.b64encode(body_bytes).decode("ascii")
 
@@ -313,10 +210,10 @@ class PublishService:
             published_at=generate_iso_timestamp(),
         )
 
-        # Use the stream name without prefix for the Kinesis Data Stream
-        data_stream_name = config.kinesis.response_body_stream_name
-        return await self.publish_to_kinesis_data_stream(
-            data_stream_name, record.to_dict(), request_id
+        return await self._publish_record(
+            config.kinesis.response_body_stream_name,
+            record.to_dict(),
+            request_id,
         )
 
     @xray_recorder.capture_async()  # type: ignore
@@ -326,15 +223,11 @@ class PublishService:
         trailers: Dict[str, str],
         timestamp: str,
     ) -> bool:
-        """Publish response trailers to Kinesis stream with ISO-8601 timestamps.
-
-        Args:
-            request_id: Unique request ID
-            trailers: Response trailers dictionary
-            timestamp: ISO-8601 formatted timestamp
-        """
+        """Publish response trailers to the configured stream."""
         if not config.kinesis.response_trailers_stream_name:
-            logger.warning("Response trailers stream not configured, skipping publish")
+            logger.warning(
+                "Response trailers stream not configured," " skipping publish"
+            )
             return False
 
         record = ResponseTrailersRecord(
@@ -344,8 +237,8 @@ class PublishService:
             published_at=generate_iso_timestamp(),
         )
 
-        # Use the stream name without prefix for the Kinesis Data Stream
-        data_stream_name = config.kinesis.response_trailers_stream_name
-        return await self.publish_to_kinesis_data_stream(
-            data_stream_name, record.to_dict(), request_id
+        return await self._publish_record(
+            config.kinesis.response_trailers_stream_name,
+            record.to_dict(),
+            request_id,
         )

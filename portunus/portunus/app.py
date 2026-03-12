@@ -15,7 +15,8 @@ from aws_xray_sdk.core.utils import stacktrace
 from fastapi import APIRouter, FastAPI, Request, Response
 from pydantic import BaseModel, ValidationError
 
-# config is used in XRayService
+from portunus.backends import get_auth_backend, get_stream_publisher
+from portunus.config import config
 from portunus.exceptions import (
     AuthenticationError,
     CredentialsError,
@@ -24,18 +25,13 @@ from portunus.exceptions import (
 )
 from portunus.logging import LoggingMiddleware
 from portunus.models import (
-    AuthPayload,
     HeadersPayload,
     TrailersPayload,
 )
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.publish_service import PublishService
-from portunus.services.signing_service import (
-    SignableRequest,
-    SignatureHeaders,
-    sign_request,
-)
+from portunus.services.signing_service import SignableRequest
 from portunus.services.state_service import StateService
 from portunus.services.xray_service import XRayService
 from portunus.util import (
@@ -48,8 +44,10 @@ logger = logging.getLogger("api.access")
 # Initialize services
 state_service = StateService()
 cache_service = CacheService(state_service=state_service)
-publish_service = PublishService(state_service=state_service)
-auth_service = AuthService(cache_service=cache_service)
+auth_backend = get_auth_backend(config)
+stream_publisher = get_stream_publisher(config)
+publish_service = PublishService(publisher=stream_publisher)
+auth_service = AuthService(auth_backend=auth_backend, cache_service=cache_service)
 xray_service = XRayService()
 
 common_router = APIRouter()
@@ -132,23 +130,19 @@ async def authorise(
                 }... for target: {target_host}"
             )
 
-            # Get API key and principal info (from cache or AWS)
-            payload = AuthPayload.from_contents(raw_payload, target_host=None)
+            # Get API key and principal info (from cache or backend)
             auth_result = await auth_service.authenticate(
-                payload, trace_id, target_host
+                raw_payload, trace_id, target_host
             )
 
             # If needed by provider, sign request
-            signature_headers: Optional[SignatureHeaders] = None
+            signature_headers: Optional[dict[str, str]] = None
             try:
                 signable_request_raw = body.get("signable_request", None)
                 signable_request = SignableRequest.model_validate(signable_request_raw)
                 if auth_result.signing_key is not None:
-                    signature_headers = sign_request(
-                        signable_request,
-                        auth_result.signing_key,
-                        auth_result.api_key,
-                        payload.credentials,
+                    signature_headers = await auth_service.sign_request(
+                        raw_payload, signable_request, auth_result
                     )
                     logger.info(
                         f"Signed request for '{signable_request.type}' provider"

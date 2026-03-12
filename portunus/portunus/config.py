@@ -146,6 +146,14 @@ class AwsConfig(BaseModel):
         default=None,
         description="Intended for overriding client urls for testing with LocalStack",
     )
+    identity_role_pattern: str | None = Field(
+        default=None,
+        description=(
+            "Regex with named groups applied to assumed-role name "
+            "for identity extraction. Supported group: 'project'. "
+            "Example: ^UserProfile_[^_]+_(?P<project>.+)$"
+        ),
+    )
 
 
 class PortunusConfig(BaseModel):
@@ -183,6 +191,14 @@ class PortunusConfig(BaseModel):
     api_key_prefix: str = Field(
         default="Bearer ",
         description="Prefix to use for the API key",
+    )
+    auth_backend: str = Field(
+        default="aws",
+        description="Auth backend to use (e.g. 'aws')",
+    )
+    log_backend: str = Field(
+        default="kinesis",
+        description="Log publishing backend (e.g. 'kinesis', 'noop')",
     )
 
     @field_validator("log_level")
@@ -230,6 +246,7 @@ def get_config() -> PortunusConfig:
         xray_extra_log_groups=os.environ.get("AWS_XRAY_EXTRA_LOG_GROUPS", None),
         xray_enabled=os.environ.get("AWS_XRAY_SDK_ENABLED", "true").lower() != "false",
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL", None),
+        identity_role_pattern=os.environ.get("AWS_IDENTITY_ROLE_PATTERN", None),
     )
 
     kinesis = KinesisConfig(
@@ -255,6 +272,8 @@ def get_config() -> PortunusConfig:
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
+        auth_backend=os.environ.get("PORTUNUS_AUTH_BACKEND", "aws"),
+        log_backend=os.environ.get("PORTUNUS_LOG_BACKEND", "kinesis"),
         redis=redis,
         aws=aws,
         kinesis=kinesis,

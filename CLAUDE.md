@@ -6,9 +6,9 @@ This repo implements a secure API key proxy system with two main components:
 - **Portunus**: FastAPI service that handles API key management, authorization, and Redis-based caching
 
 ## Key Functionality
-- Securely retrieve API keys from AWS Secrets Manager
+- Securely retrieve API keys via pluggable auth backends (AWS Secrets Manager by default)
 - Transparently proxy requests to third-party APIs (like OpenAI)
-- Log request and response data for auditing and monitoring
+- Log request and response data via pluggable stream publishers (Kinesis by default)
 - Configurable rate limiting at the proxy level
 - Caching of authorization responses to improve performance
 - TLS support for secure communications
@@ -27,16 +27,13 @@ This repo implements a secure API key proxy system with two main components:
    - Removes the Bearer prefix from the payload
    - Makes a synchronous call to `/authorise` endpoint
    - Passes the extracted payload in the request body: `{"authorization": "<payload>"}`
-3. Portunus (`app.py` → `services.auth_service` → `AuthService.get_api_key_from_payload`):
+3. Portunus (`app.py` → `services.auth_service` → `AuthService.authenticate`):
    - Checks Redis cache first (keyed by SHA-256 of payload)
    - If cached, returns stored API key immediately (faster responses)
-   - If not cached, proceeds with full authentication:
-   - Takes the raw payload (already without the Bearer prefix)
-   - Decodes base64 payload using `decode_payload`
-   - Extracts AWS credentials and secret ARN
-   - Creates AWS session with provided credentials
-   - Retrieves API key from AWS Secrets Manager via `services.aws_service.AwsService`
-   - Publishes metadata (principal info) to Kinesis Data Streams for audit trail
+   - If not cached, delegates to the configured auth backend:
+     - **AWS backend** (`backends/aws/auth.py`): Decodes base64 payload, calls STS for identity, fetches secret from Secrets Manager
+     - Identity parsing uses a configurable regex (`AWS_IDENTITY_ROLE_PATTERN`) for project extraction from role names
+   - Publishes metadata (principal info) via configured stream publisher for audit trail
    - Returns formatted API key with principal info
 4. Proxy replaces original authorization header with actual API key
    - `request_handle:headers():replace(API_KEY_HEADER, api_key)`
@@ -75,6 +72,16 @@ The proxy is designed to handle streaming responses efficiently:
 ## Configuration
 
 ### Environment Variables
+
+#### Backend Selection
+- `PORTUNUS_AUTH_BACKEND`: Auth backend (default: "aws")
+- `PORTUNUS_LOG_BACKEND`: Log publishing backend (default: "kinesis", also: "noop")
+
+#### AWS Backend
+- `AWS_IDENTITY_ROLE_PATTERN`: Regex with named groups for extracting project from role names (e.g. `^UserProfile_[^_]+_(?P<project>.+)$`)
+- `AWS_ENDPOINT_URL`: Override AWS endpoint for LocalStack testing
+
+#### General
 - `API_KEY_HEADER`: Header name to use for API key (default: "authorization")
 - `API_KEY_PREFIX`: Prefix for API key (default: "Bearer ")
 - `RATE_LIMIT_PERCENT_ENABLED`: Enable rate limiting (0-100 percentage of traffic)
@@ -97,12 +104,16 @@ The proxy is designed to handle streaming responses efficiently:
 
 ## Important Files
 - `/portunus/portunus/app.py` - Main FastAPI application with endpoints
-- `/portunus/portunus/services/auth_service.py` - Authentication and authorization logic
-- `/portunus/portunus/services/aws_service.py` - AWS services integration (Secrets Manager, etc.)
-- `/portunus/portunus/services/publish_service.py` - Publishing log events and metadata to Kinesis Data Streams
+- `/portunus/portunus/backends/protocols.py` - Protocol definitions for pluggable backends (AuthBackend, StreamPublisher)
+- `/portunus/portunus/backends/__init__.py` - Backend factory functions
+- `/portunus/portunus/backends/aws/auth.py` - AWS auth backend (STS + Secrets Manager + KMS signing)
+- `/portunus/portunus/backends/aws/identity.py` - Configurable ARN identity parsing
+- `/portunus/portunus/backends/aws/publisher.py` - Kinesis stream publisher
+- `/portunus/portunus/backends/noop/publisher.py` - No-op publisher for development
+- `/portunus/portunus/services/auth_service.py` - Auth orchestrator with caching (delegates to AuthBackend)
+- `/portunus/portunus/services/publish_service.py` - Record construction + delegation to StreamPublisher
 - `/portunus/portunus/util.py` - Utility functions and helpers
-- `/portunus/portunus/models.py` - Data models and schemas, including Pydantic models for logging events and dataclasses for Kinesis records and auth/AWS types
-- `/portunus/portunus/types.py` - Remaining TypedDict classes and utility types (most types migrated to models.py for better validation)
+- `/portunus/portunus/models.py` - Data models and schemas
 - `/portunus/portunus/config.py` - Configuration management
 - `/proxy/lua.lua` - Lua script for request/response interception and modification
 - `/proxy/envoy.yaml` - Envoy proxy configuration

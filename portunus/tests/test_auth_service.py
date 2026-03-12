@@ -5,25 +5,30 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from botocore.exceptions import ClientError
 
+from portunus.backends.aws.auth import AwsAuthBackend
 from portunus.exceptions import CredentialsError
 from portunus.models import AwsCredentials
 from portunus.services.auth_service import AuthService
 
 
 @pytest.fixture
-def auth_service():
-    """Create an AuthService instance with mocked dependencies."""
-    mock_secrets_service = MagicMock()
-    mock_secrets_service.boto_session = MagicMock()
+def aws_backend():
+    """Create an AwsAuthBackend with mocked boto session."""
+    backend = AwsAuthBackend()
+    backend.boto_session = MagicMock()
+    return backend
+
+
+@pytest.fixture
+def auth_service(aws_backend):
+    """Create an AuthService with mocked dependencies."""
     mock_cache_service = MagicMock()
     mock_cache_service.get_cached_auth_result = AsyncMock(return_value=None)
     mock_cache_service.cache_auth_result = AsyncMock(return_value=True)
-    mock_validation_service = MagicMock()
 
     return AuthService(
-        secrets_service=mock_secrets_service,
+        auth_backend=aws_backend,
         cache_service=mock_cache_service,
-        validation_service=mock_validation_service,
     )
 
 
@@ -38,18 +43,21 @@ def valid_credentials():
 
 
 class TestGetAwsIdentity:
-    """Tests for the get_aws_identity method."""
+    """Tests for the AwsAuthBackend._get_aws_identity method."""
 
     @pytest.mark.asyncio
     async def test_expired_token_raises_credentials_error(
-        self, auth_service, valid_credentials
+        self, aws_backend, valid_credentials
     ):
         """Test that ExpiredToken from STS raises CredentialsError."""
         mock_sts_client = AsyncMock()
         mock_sts_client.get_caller_identity = AsyncMock(
             side_effect=ClientError(
                 error_response={
-                    "Error": {"Code": "ExpiredToken", "Message": "Token has expired"}
+                    "Error": {
+                        "Code": "ExpiredToken",
+                        "Message": "Token has expired",
+                    }
                 },
                 operation_name="GetCallerIdentity",
             )
@@ -57,18 +65,16 @@ class TestGetAwsIdentity:
         mock_sts_client.__aenter__ = AsyncMock(return_value=mock_sts_client)
         mock_sts_client.__aexit__ = AsyncMock(return_value=None)
 
-        auth_service.boto_session.create_client = MagicMock(
-            return_value=mock_sts_client
-        )
+        aws_backend.boto_session.create_client = MagicMock(return_value=mock_sts_client)
 
         with pytest.raises(CredentialsError) as exc_info:
-            await auth_service.get_aws_identity(valid_credentials)
+            await aws_backend._get_aws_identity(valid_credentials)
 
         assert "expired" in str(exc_info.value.message).lower()
 
     @pytest.mark.asyncio
     async def test_other_client_error_raises_credentials_error(
-        self, auth_service, valid_credentials
+        self, aws_backend, valid_credentials
     ):
         """Test that other ClientErrors raise CredentialsError."""
         mock_sts_client = AsyncMock()
@@ -86,26 +92,24 @@ class TestGetAwsIdentity:
         mock_sts_client.__aenter__ = AsyncMock(return_value=mock_sts_client)
         mock_sts_client.__aexit__ = AsyncMock(return_value=None)
 
-        auth_service.boto_session.create_client = MagicMock(
-            return_value=mock_sts_client
-        )
+        aws_backend.boto_session.create_client = MagicMock(return_value=mock_sts_client)
 
         with pytest.raises(CredentialsError) as exc_info:
-            await auth_service.get_aws_identity(valid_credentials)
+            await aws_backend._get_aws_identity(valid_credentials)
 
         assert "Failed to get caller identity" in str(exc_info.value.message)
 
     @pytest.mark.asyncio
-    async def test_invalid_credentials_raises_credentials_error(self, auth_service):
+    async def test_invalid_credentials_raises_credentials_error(self, aws_backend):
         """Test that credentials failing is_valid() raise CredentialsError."""
         invalid_credentials = MagicMock(spec=AwsCredentials)
         invalid_credentials.is_valid.return_value = False
 
         with pytest.raises(CredentialsError):
-            await auth_service.get_aws_identity(invalid_credentials)
+            await aws_backend._get_aws_identity(invalid_credentials)
 
     @pytest.mark.asyncio
-    async def test_none_credentials_raises_credentials_error(self, auth_service):
+    async def test_none_credentials_raises_credentials_error(self, aws_backend):
         """Test that None credentials raise CredentialsError."""
         with pytest.raises(CredentialsError):
-            await auth_service.get_aws_identity(None)
+            await aws_backend._get_aws_identity(None)
