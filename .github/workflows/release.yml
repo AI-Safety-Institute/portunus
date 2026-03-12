@@ -1,16 +1,10 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      bump:
-        description: "Version bump type"
-        required: true
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
+  push:
+    branches: [main]
+    paths:
+      - "portunus/pyproject.toml"
 
 jobs:
   release:
@@ -22,45 +16,33 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute new version
+      - name: Read version from pyproject.toml
         id: version
         run: |
-          current=$(python3 -c "
+          version=$(python3 -c "
           import tomllib
           from pathlib import Path
           data = tomllib.loads(Path('portunus/pyproject.toml').read_text())
           print(data['project']['version'])
           ")
-          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
-          IFS='.' read -r major minor patch <<< "$current"
-          case "${{ inputs.bump }}" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
-          esac
-          new="${major}.${minor}.${patch}"
-          echo "new=$new" >> "$GITHUB_OUTPUT"
-          echo "Bumping $current -> $new"
-
-      - name: Update version in pyproject.toml
+      - name: Check if tag already exists
+        id: check
         run: |
-          sed -i "s/^version = \"${{ steps.version.outputs.current }}\"/version = \"${{ steps.version.outputs.new }}\"/" portunus/pyproject.toml
+          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Commit and tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add portunus/pyproject.toml
-          git commit -m "Release v${{ steps.version.outputs.new }}"
-          git tag "v${{ steps.version.outputs.new }}"
-          git push origin main --tags
-
-      - name: Create GitHub release
+      - name: Create release
+        if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v${{ steps.version.outputs.new }}" \
-            --title "v${{ steps.version.outputs.new }}" \
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
             --generate-notes \
             --latest
