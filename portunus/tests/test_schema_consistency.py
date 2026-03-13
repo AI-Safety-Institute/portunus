@@ -284,9 +284,9 @@ class TestGlueJobTransformations:
         metadata_schema = {col["name"] for col in MetadataRecord.glue_schema()}
         joined_schema = {col["name"] for col in JoinedLogRecord.glue_schema()}
 
-        assert "secret_name" in metadata_schema, (
-            "MetadataRecord should have 'secret_name' field"
-        )
+        assert (
+            "secret_name" in metadata_schema
+        ), "MetadataRecord should have 'secret_name' field"
 
         expected_name = "metadata_secret_name"
         assert expected_name in joined_schema, (
