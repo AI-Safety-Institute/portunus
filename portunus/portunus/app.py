@@ -84,7 +84,7 @@ class AuthorizationResponse(BaseModel):
 
 
 def _extract_secret_name(secret_arn: str | None) -> str | None:
-    """Extract the human-readable secret name from an ARN, stripping the AWS suffix."""
+    """Extract the human-readable secret name from an ARN, stripping the AWS prefix."""
     if not secret_arn:
         return None
     if secret_arn.startswith("arn:"):
