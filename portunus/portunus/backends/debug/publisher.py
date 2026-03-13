@@ -1,4 +1,4 @@
-"""No-op stream publisher for development and testing without Kinesis."""
+"""Debug stream publisher for development and testing without Kinesis."""
 
 import logging
 from typing import Any
@@ -6,7 +6,7 @@ from typing import Any
 logger = logging.getLogger("api.access")
 
 
-class NoopPublisher:
+class DebugPublisher:
     """Logs records at DEBUG level and returns True. No external calls."""
 
     async def publish(
@@ -17,7 +17,7 @@ class NoopPublisher:
     ) -> bool:
         """Log the record and return success."""
         logger.debug(
-            f"[noop] Would publish to {stream_name}"
+            f"[debug] Would publish to {stream_name}"
             f" partition={partition_key}"
             f" keys={list(record_data.keys())}"
         )

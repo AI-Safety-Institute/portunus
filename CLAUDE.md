@@ -75,7 +75,7 @@ The proxy is designed to handle streaming responses efficiently:
 
 #### Backend Selection
 - `PORTUNUS_AUTH_BACKEND`: Auth backend (default: "aws")
-- `PORTUNUS_LOG_BACKEND`: Log publishing backend (default: "kinesis", also: "noop")
+- `PORTUNUS_LOG_BACKEND`: Log publishing backend (default: "kinesis", also: "debug")
 
 #### AWS Backend
 - `AWS_IDENTITY_ROLE_PATTERN`: Regex with named groups for extracting project from role names (e.g. `^UserProfile_[^_]+_(?P<project>.+)$`)
@@ -109,7 +109,7 @@ The proxy is designed to handle streaming responses efficiently:
 - `/portunus/portunus/backends/aws/auth.py` - AWS auth backend (STS + Secrets Manager + KMS signing)
 - `/portunus/portunus/backends/aws/identity.py` - Configurable ARN identity parsing
 - `/portunus/portunus/backends/aws/publisher.py` - Kinesis stream publisher
-- `/portunus/portunus/backends/noop/publisher.py` - No-op publisher for development
+- `/portunus/portunus/backends/debug/publisher.py` - Debug publisher for development
 - `/portunus/portunus/services/auth_service.py` - Auth orchestrator with caching (delegates to AuthBackend)
 - `/portunus/portunus/services/publish_service.py` - Record construction + delegation to StreamPublisher
 - `/portunus/portunus/util.py` - Utility functions and helpers

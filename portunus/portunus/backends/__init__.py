@@ -61,8 +61,8 @@ def get_stream_publisher(cfg: PortunusConfig) -> StreamPublisher:
         )
 
         return KinesisPublisher()
-    if backend == "noop":
-        from portunus.backends.noop.publisher import NoopPublisher
+    if backend == "debug":
+        from portunus.backends.debug.publisher import DebugPublisher
 
-        return NoopPublisher()
+        return DebugPublisher()
     raise ValueError(f"Unknown log backend: {backend!r}")

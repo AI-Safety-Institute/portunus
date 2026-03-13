@@ -198,7 +198,7 @@ class PortunusConfig(BaseModel):
     )
     log_backend: str = Field(
         default="kinesis",
-        description="Log publishing backend (e.g. 'kinesis', 'noop')",
+        description="Log publishing backend (e.g. 'kinesis', 'debug')",
     )
 
     @field_validator("log_level")
