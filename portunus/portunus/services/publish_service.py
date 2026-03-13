@@ -113,6 +113,7 @@ class PublishService:
         request_id: str,
         timestamp: str,
         principal_info: Dict[str, Any],
+        secret_name: Optional[str] = None,
     ) -> bool:
         """Publish metadata to Kinesis stream with ISO-8601 timestamps.
 
@@ -120,6 +121,7 @@ class PublishService:
             request_id: Unique request ID
             timestamp: ISO-8601 formatted timestamp
             principal_info: Principal information dictionary
+            secret_name: Parsed name of the secret used for API key (for usage tracking)
         """
         if not config.kinesis.metadata_stream_name:
             logger.warning("Metadata stream not configured, skipping publish")
@@ -134,6 +136,7 @@ class PublishService:
             principal_arn=principal_info.get("arn"),
             project=principal_info.get("project"),
             session_name=principal_info.get("session_name"),
+            secret_name=secret_name,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream
