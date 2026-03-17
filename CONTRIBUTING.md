@@ -35,6 +35,17 @@ uv run pytest tests/
 cd proxy && busted lib/spec/
 ```
 
+## Releasing
+
+Versioning is handled automatically by [hatch-vcs](https://github.com/ofek/hatch-vcs) from git tags. To create a release:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+A GitHub Actions workflow will create a GitHub release with auto-generated notes. If the release already exists (e.g. created via `gh release create`), the workflow skips gracefully.
+
 ## Linting & type checking
 
 ```bash
