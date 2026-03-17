@@ -174,6 +174,7 @@ async def authorise(
                         request_id=trace_id,
                         timestamp=timestamp,
                         principal_info=principal_info,
+                        secret_arn=payload.secret_arn,
                     )
             # There are some synchronous actions happening which can succeed even
             # if the timeout is hit

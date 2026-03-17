@@ -39,6 +39,7 @@ class TestSourceRecordSchemas:
             principal_arn="arn:aws:sts::123456789012:assumed-role/TestRole/session",
             project="test-project",
             session_name="test-session",
+            secret_arn="arn:aws:secretsmanager:eu-west-2:123456789012:secret:projects/test-project/api-key-aB3xY1",
         )
 
         dict_keys = set(record.to_dict().keys())
@@ -276,6 +277,22 @@ class TestGlueJobTransformations:
             f"INCORRECT FIELD: JoinedLogRecord has '{wrong_name}' "
             f"but should have '{expected_name}'.\n"
             f"The source field in MetadataRecord should be 'principal_arn', not 'arn'."
+        )
+
+    def test_metadata_secret_arn_field_naming(self):
+        """Verify secret_arn is preserved as metadata_secret_arn in joined schema."""
+        metadata_schema = {col["name"] for col in MetadataRecord.glue_schema()}
+        joined_schema = {col["name"] for col in JoinedLogRecord.glue_schema()}
+
+        assert (
+            "secret_arn" in metadata_schema
+        ), "MetadataRecord should have 'secret_arn' field"
+
+        expected_name = "metadata_secret_arn"
+        assert expected_name in joined_schema, (
+            f"MISSING FIELD: JoinedLogRecord should have '{expected_name}' "
+            f"but it's not in schema.\nAvailable metadata "
+            f"fields: {[f for f in joined_schema if f.startswith('metadata_')]}"
         )
 
     def test_body_chunk_fields_handling(self):
