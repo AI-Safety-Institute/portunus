@@ -565,8 +565,9 @@ class MetadataRecord:
             if the role doesn't match the pattern or principal info is unavailable.
         session_name: Session name from assumed role ARNs. None if not present or
             principal information is unavailable.
-        secret_name: Parsed name of the AWS Secrets Manager secret used for the API
-            key. None if not available.
+        secret_arn: Full ARN of the AWS Secrets Manager secret used for the API
+            key. None if not available. Downstream consumers parse the name
+            from the ARN when needed.
     """
 
     request_id: str
@@ -577,7 +578,7 @@ class MetadataRecord:
     principal_arn: Optional[str] = None
     project: Optional[str] = None
     session_name: Optional[str] = None
-    secret_name: Optional[str] = None
+    secret_arn: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -591,7 +592,7 @@ class MetadataRecord:
             "principal_arn": self.principal_arn,
             "project": self.project,
             "session_name": self.session_name,
-            "secret_name": self.secret_name,
+            "secret_arn": self.secret_arn,
         }
 
     @classmethod
@@ -607,7 +608,7 @@ class MetadataRecord:
             {"name": "principal_arn", "type": "string"},
             {"name": "project", "type": "string"},
             {"name": "session_name", "type": "string"},
-            {"name": "secret_name", "type": "string"},
+            {"name": "secret_arn", "type": "string"},
         ]
 
 
@@ -1039,7 +1040,7 @@ class JoinedLogRecord:
     metadata_principal_arn: Optional[str]
     metadata_project: Optional[str]
     metadata_session_name: Optional[str]
-    metadata_secret_name: Optional[str]
+    metadata_secret_arn: Optional[str]
 
     # Request headers (from RequestHeadersRecord with request_headers_ prefix)
     request_headers_raw_headers: Union[Dict[str, str], RowLike]
@@ -1157,7 +1158,7 @@ class JoinedLogRecord:
             {"name": "metadata_principal_arn", "type": "string"},
             {"name": "metadata_project", "type": "string"},
             {"name": "metadata_session_name", "type": "string"},
-            {"name": "metadata_secret_name", "type": "string"},
+            {"name": "metadata_secret_arn", "type": "string"},
             # Request headers data
             {"name": "request_headers_raw_headers", "type": "map<string,string>"},
             {"name": "request_headers_decoded", "type": "map<string,string>"},

@@ -7,7 +7,6 @@ It implements the authentication logic and log event publishing to Kinesis.
 
 import asyncio
 import logging
-import re
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -81,18 +80,6 @@ class AuthorizationResponse(BaseModel):
     request_id: str
     signature: Optional[str] = None
     signature_input: Optional[str] = None
-
-
-def _extract_secret_name(secret_arn: str | None) -> str | None:
-    """Extract the human-readable secret name from an ARN, stripping the AWS prefix."""
-    if not secret_arn:
-        return None
-    if secret_arn.startswith("arn:"):
-        parts = secret_arn.split(":", maxsplit=6)
-        if len(parts) >= 7 and parts[5] == "secret":
-            name = parts[6]
-            return re.sub(r"-[A-Za-z0-9]{6}$", "", name)
-    return secret_arn
 
 
 @portunus_router.post("/authorise")
@@ -187,7 +174,7 @@ async def authorise(
                         request_id=trace_id,
                         timestamp=timestamp,
                         principal_info=principal_info,
-                        secret_name=_extract_secret_name(payload.secret_arn),
+                        secret_arn=payload.secret_arn,
                     )
             # There are some synchronous actions happening which can succeed even
             # if the timeout is hit
