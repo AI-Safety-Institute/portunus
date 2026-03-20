@@ -41,6 +41,12 @@ function envoy_on_request(request_handle)
 		return
 	end
 
+	-- Skip Lua processing for WebSocket upgrade requests (handled by Portunus directly)
+	local upgrade_header = request_handle:headers():get("upgrade")
+	if upgrade_header and upgrade_header:lower() == "websocket" then
+		return
+	end
+
 	-- Process the request with error handling
 	local ok, error = pcall(function()
 		-- Get full request body - we need to buffer the entire request

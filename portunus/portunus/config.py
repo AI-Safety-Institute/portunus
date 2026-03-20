@@ -148,6 +148,48 @@ class AwsConfig(BaseModel):
     )
 
 
+class RelayConfig(BaseModel):
+    """WebSocket relay configuration settings.
+
+    target_host, target_port, and use_tls are read from the same TARGET_HOST,
+    TARGET_PORT, and TARGET_HOST_USE_TLS env vars that configure Envoy's
+    upstream cluster. This ensures WS relay connects to the same host as
+    HTTP requests. If TARGET_HOST is not set, WS relay is disabled.
+
+    Attributes:
+        target_host: Upstream WebSocket host (from TARGET_HOST env var)
+        target_port: Upstream WebSocket port (from TARGET_PORT env var)
+        use_tls: Whether to use TLS for upstream connection
+        max_message_size: Maximum WebSocket message size in bytes
+        max_connection_lifetime: Maximum connection lifetime in seconds
+    """
+
+    target_host: Optional[str] = Field(
+        default=None,
+        description="Upstream WebSocket host (from TARGET_HOST env var)",
+    )
+    target_port: int = Field(
+        default=443,
+        description="Upstream WebSocket port",
+        ge=1,
+        le=65535,
+    )
+    use_tls: bool = Field(
+        default=True,
+        description="Whether to use TLS for upstream WebSocket connection",
+    )
+    max_message_size: int = Field(
+        default=10_485_760,
+        description="Maximum WebSocket message size in bytes (10MB)",
+        ge=1024,
+    )
+    max_connection_lifetime: int = Field(
+        default=3300,
+        description="Maximum connection lifetime in seconds (55 min)",
+        ge=60,
+    )
+
+
 class PortunusConfig(BaseModel):
     """Main configuration for the Portunus service.
 
@@ -171,6 +213,10 @@ class PortunusConfig(BaseModel):
     kinesis: KinesisConfig = Field(
         default_factory=KinesisConfig,
         description="Kinesis Firehose configuration",
+    )
+    relay: RelayConfig = Field(
+        default_factory=RelayConfig,
+        description="WebSocket relay configuration",
     )
     log_level: str = Field(
         default="INFO",
@@ -251,6 +297,16 @@ def get_config() -> PortunusConfig:
         max_record_size=int(os.environ.get("KINESIS_MAX_RECORD_SIZE", "1000000")),
     )
 
+    relay = RelayConfig(
+        target_host=os.environ.get("TARGET_HOST", None),
+        target_port=int(os.environ.get("TARGET_PORT", "443")),
+        use_tls=os.environ.get("TARGET_HOST_USE_TLS", "true").lower() == "true",
+        max_message_size=int(os.environ.get("WS_MAX_MESSAGE_SIZE", "10485760")),
+        max_connection_lifetime=int(
+            os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")
+        ),
+    )
+
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -258,6 +314,7 @@ def get_config() -> PortunusConfig:
         redis=redis,
         aws=aws,
         kinesis=kinesis,
+        relay=relay,
     )
 
 

@@ -7,12 +7,13 @@ It implements the authentication logic and log event publishing to Kinesis.
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
 from pydantic import BaseModel, ValidationError
 
 # config is used in XRayService
@@ -28,6 +29,7 @@ from portunus.models import (
     HeadersPayload,
     TrailersPayload,
 )
+from portunus.relay.handler import handle_ws_connection
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.publish_service import PublishService
@@ -439,6 +441,25 @@ async def log_response_trailers(
 
     response.status_code = 200
     return None
+
+
+@portunus_router.websocket("/ws/{path:path}")
+async def ws_relay(websocket: WebSocket, path: str):
+    """WebSocket relay endpoint.
+
+    Authenticates the upgrade request, connects to the upstream WebSocket,
+    and relays messages bidirectionally with per-message Kinesis logging.
+    """
+    segment = xray_service.recorder.current_segment()
+    request_id = segment.trace_id if segment else str(uuid.uuid4())
+
+    await handle_ws_connection(
+        websocket=websocket,
+        path=path,
+        auth_service=auth_service,
+        publish_service=publish_service,
+        request_id=request_id,
+    )
 
 
 @common_router.get("/ping")

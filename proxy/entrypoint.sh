@@ -22,16 +22,8 @@ EOF
   )
 fi
 
-# PORTUNUS_HOST_HTTP2_OPTIONS
-if [ -z "$PORTUNUS_HOST_HTTP2_OPTIONS" ]; then
-  export PORTUNUS_HOST_HTTP2_OPTIONS=$(yq -o json <<EOF
-connection_keepalive:
-  interval: "60s"
-  timeout: "10s"
-  connection_idle_interval: "10s"
-EOF
-  )
-fi
+# PORTUNUS_HOST_HTTP2_OPTIONS is intentionally absent — the Portunus cluster
+# must stay HTTP/1.1 for WebSocket Upgrade support (RFC 7540 §8.1.2.2).
 
 # TARGET_HOST_TRANSPORT_SOCKET
 if [ -z "$TARGET_HOST_TRANSPORT_SOCKET" ]; then

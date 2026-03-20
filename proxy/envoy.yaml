@@ -66,12 +66,23 @@ static_resources:
           # Without this, connections would time out after 5 minutes of inactivity
           # Ref: https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts#stream-timeouts
           stream_idle_timeout: 3600s
+          upgrade_configs:
+          - upgrade_type: websocket
           route_config:
             name: local_route
             virtual_hosts:
             - name: local_service
               domains: ["*"]
               routes:
+              # WebSocket requests route to Portunus (Lua filter skips WS upgrades)
+              - match:
+                  prefix: "/ws/"
+                route:
+                  cluster: ${PORTUNUS_HOST}
+                  timeout: 0s
+                  upgrade_configs:
+                  - upgrade_type: websocket
+              # Default HTTP route through Lua filter
               - match:
                   prefix: "/"
                 route:
@@ -166,7 +177,9 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    http2_protocol_options: ${PORTUNUS_HOST_HTTP2_OPTIONS}
+    # Must stay HTTP/1.1 — WebSocket relay uses the traditional Upgrade mechanism
+    # which is forbidden in HTTP/2 (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441)
+    # would work but uvicorn doesn't support it. Do not add http2_protocol_options here.
     load_assignment:
       cluster_name: ${PORTUNUS_HOST}
       endpoints:
