@@ -20,6 +20,15 @@ from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
 
+# Headers to forward from client upgrade request to upstream.
+# Authorization is handled separately (replaced with real API key).
+# Hop-by-hop headers (Connection, Upgrade, etc.) are excluded.
+_FORWARDED_HEADERS = frozenset({
+    "sec-websocket-protocol",
+    "openai-beta",
+    "user-agent",
+})
+
 
 async def handle_ws_connection(
     websocket: WebSocket,
@@ -44,7 +53,10 @@ async def handle_ws_connection(
 
     if not relay_config.target_host:
         logger.error(f"WS {request_id}: TARGET_HOST not configured, rejecting")
-        await websocket.close(code=1011, reason="WebSocket relay not configured")
+        try:
+            await websocket.close(code=1011, reason="WebSocket relay not configured")
+        except Exception:
+            pass
         return
 
     # Authenticate before accepting
@@ -71,18 +83,26 @@ async def handle_ws_connection(
     except Exception as e:
         logger.error(f"WS {request_id}: Failed to publish metadata: {e}")
 
-    # Build upstream URI
+    # Build upstream URI, preserving query string
     scheme = "wss" if relay_config.use_tls else "ws"
     upstream_uri = (
         f"{scheme}://{relay_config.target_host}:{relay_config.target_port}/{path}"
     )
+    query_string = websocket.scope.get("query_string", b"").decode("utf-8")
+    if query_string:
+        upstream_uri += f"?{query_string}"
 
-    # Connect upstream with real API key
-    extra_headers = {"Authorization": f"Bearer {ws_auth.api_key}"}
+    # Build upstream headers: real API key + forwarded client headers
+    upstream_headers = {"Authorization": f"Bearer {ws_auth.api_key}"}
+    for header_name in _FORWARDED_HEADERS:
+        value = websocket.headers.get(header_name)
+        if value:
+            upstream_headers[header_name] = value
+
     try:
         upstream = await websockets.connect(
             upstream_uri,
-            extra_headers=extra_headers,
+            extra_headers=upstream_headers,
             max_size=relay_config.max_message_size,
             open_timeout=10,
         )
@@ -103,13 +123,21 @@ async def handle_ws_connection(
         try:
             while True:
                 msg = await websocket.receive()
-                if "text" in msg:
-                    data = msg["text"]
-                    message_bytes = data.encode("utf-8")
-                    await upstream.send(data)
-                elif "bytes" in msg and msg["bytes"]:
-                    message_bytes = msg["bytes"]
-                    await upstream.send(message_bytes)
+
+                # Check message type explicitly to handle None values safely
+                msg_type = msg.get("type", "")
+                if msg_type == "websocket.disconnect":
+                    break
+
+                text = msg.get("text")
+                data_bytes = msg.get("bytes")
+
+                if text is not None:
+                    message_bytes = text.encode("utf-8")
+                    await upstream.send(text)
+                elif data_bytes is not None:
+                    message_bytes = data_bytes
+                    await upstream.send(data_bytes)
                 else:
                     break
 

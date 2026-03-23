@@ -19,6 +19,7 @@ def mock_websocket():
     ws.send_text = AsyncMock()
     ws.receive_text = AsyncMock()
     ws.headers = {"authorization": "Bearer test_payload"}
+    ws.scope = {"query_string": b""}
     return ws
 
 
@@ -132,7 +133,7 @@ class TestHandleWsConnection:
 
         from starlette.websockets import WebSocketDisconnect
 
-        mock_websocket.receive_text.side_effect = WebSocketDisconnect(code=1000)
+        mock_websocket.receive.side_effect = WebSocketDisconnect(code=1000)
 
         with (
             patch(

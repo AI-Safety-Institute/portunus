@@ -38,6 +38,18 @@ class WsAuthResult:
     secret_arn: Optional[str] = None
 
 
+async def _close_ws(websocket: WebSocket, code: int, reason: str) -> None:
+    """Close a WebSocket, suppressing errors if the connection is already gone.
+
+    This is needed because close() before accept() can behave differently
+    across ASGI servers.
+    """
+    try:
+        await websocket.close(code=code, reason=reason)
+    except Exception:
+        pass
+
+
 async def authenticate_ws(
     websocket: WebSocket,
     auth_service: AuthService,
@@ -66,7 +78,7 @@ async def authenticate_ws(
 
     if not auth_header:
         logger.warning(f"WS {request_id}: No authorization header")
-        await websocket.close(code=4001, reason="Missing authorization header")
+        await _close_ws(websocket, code=4001, reason="Missing authorization header")
         return None
 
     # Strip Bearer prefix
@@ -79,15 +91,15 @@ async def authenticate_ws(
         auth_result = await auth_service.authenticate(payload, request_id, target_host)
     except (PayloadError, CredentialsError) as e:
         logger.warning(f"WS {request_id}: Auth failed: {e.message}")
-        await websocket.close(code=4001, reason="Invalid authorization")
+        await _close_ws(websocket, code=4001, reason="Invalid authorization")
         return None
     except (AuthenticationError, FetchSecretError) as e:
         logger.warning(f"WS {request_id}: Auth forbidden: {e.message}")
-        await websocket.close(code=4003, reason="Forbidden")
+        await _close_ws(websocket, code=4003, reason="Forbidden")
         return None
     except Exception as e:
         logger.error(f"WS {request_id}: Unexpected auth error: {e}")
-        await websocket.close(code=4001, reason="Authentication error")
+        await _close_ws(websocket, code=4001, reason="Authentication error")
         return None
 
     return WsAuthResult(

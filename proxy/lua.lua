@@ -41,9 +41,12 @@ function envoy_on_request(request_handle)
 		return
 	end
 
-	-- Skip Lua processing for WebSocket upgrade requests (handled by Portunus directly)
+	-- Skip Lua processing for WebSocket upgrade requests on /ws/ paths
+	-- (handled by Portunus directly via the Envoy WS route)
 	local upgrade_header = request_handle:headers():get("upgrade")
-	if upgrade_header and upgrade_header:lower() == "websocket" then
+	local path = request_handle:headers():get(":path")
+	if upgrade_header and upgrade_header:lower() == "websocket"
+		and path and path:sub(1, 4) == "/ws/" then
 		return
 	end
 
