@@ -155,17 +155,6 @@ services:
       TARGET_PORT: 8080
       TARGET_HOST_USE_TLS: "false"
 
-  ws-echo:
-    image: jmalloc/echo-server
-    container_name: ws-echo
-    init: true
-    networks:
-      app_network:
-    environment:
-      PORT: "8080"
-    depends_on:
-      - localstack
-
   http-bin:
     image: sharat87/httpbun
     container_name: http-bun
