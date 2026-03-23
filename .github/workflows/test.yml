@@ -18,3 +18,8 @@ jobs:
 
       - name: Test with pytest
         run: uv run pytest -rA -x --color=yes
+
+      - name: Dump docker logs on failure
+        if: failure()
+        run: |
+          docker compose logs --no-color 2>&1 | tail -200 || true

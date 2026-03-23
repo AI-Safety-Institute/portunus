@@ -70,7 +70,6 @@ services:
       TARGET_HOST_HTTP2_OPTIONS: "null"
       TARGET_HOST_TRANSPORT_SOCKET: "null"
       TARGET_HOST_USE_TLS: "false"
-      PORTUNUS_HOST_HTTP2_OPTIONS: "null"
       PORTUNUS_TRANSPORT_SOCKET: "null"
       DOWNSTREAM_TLS_TRANSPORT_SOCKET: "null"
       API_KEY_HEADER: authorization
@@ -154,6 +153,15 @@ services:
       TARGET_HOST: ws-echo
       TARGET_PORT: 8080
       TARGET_HOST_USE_TLS: "false"
+
+  ws-echo:
+    image: jmalloc/echo-server
+    container_name: ws-echo
+    init: true
+    networks:
+      app_network:
+    environment:
+      PORT: "8080"
 
   http-bin:
     image: sharat87/httpbun
