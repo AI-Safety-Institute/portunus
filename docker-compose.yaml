@@ -162,7 +162,9 @@ services:
     networks:
       app_network:
     environment:
-      PORT: 8080
+      PORT: "8080"
+    depends_on:
+      - localstack
 
   http-bin:
     image: sharat87/httpbun
