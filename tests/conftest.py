@@ -109,7 +109,8 @@ def docker_setup(request, compose_file):
             for name in ["localstack-main", "portunus", "portunus-proxy-1"]:
                 logs = subprocess.run(
                     ["docker", "logs", "--tail=80", name],
-                    capture_output=True, text=True,
+                    capture_output=True,
+                    text=True,
                 )
                 _sys.stderr.write(
                     f"\n=== {name} logs ===\n{logs.stdout}\n{logs.stderr}\n"
