@@ -53,18 +53,26 @@ async def handle_ws_connection(
     """
     relay_config = config.relay
 
-    if not relay_config.target_host:
-        logger.error(f"WS {request_id}: TARGET_HOST not configured, rejecting")
+    # Read upstream target from headers injected by Envoy's request_headers_to_add.
+    # Each proxy injects its own TARGET_HOST so Portunus knows where to connect.
+    target_host = websocket.headers.get("x-portunus-target-host")
+    if not target_host:
+        logger.error(
+            f"WS {request_id}: x-portunus-target-host header missing, rejecting"
+        )
         try:
             await websocket.close(code=1011, reason="WebSocket relay not configured")
         except Exception:
             pass
         return
 
-    # Authenticate before accepting
-    ws_auth = await authenticate_ws(
-        websocket, auth_service, request_id, relay_config.target_host
+    target_port = int(websocket.headers.get("x-portunus-target-port", "443"))
+    use_tls = (
+        websocket.headers.get("x-portunus-target-use-tls", "true").lower() == "true"
     )
+
+    # Authenticate before accepting
+    ws_auth = await authenticate_ws(websocket, auth_service, request_id, target_host)
     if ws_auth is None:
         return
 
@@ -86,10 +94,8 @@ async def handle_ws_connection(
         logger.error(f"WS {request_id}: Failed to publish metadata: {e}")
 
     # Build upstream URI, preserving query string
-    scheme = "wss" if relay_config.use_tls else "ws"
-    upstream_uri = (
-        f"{scheme}://{relay_config.target_host}:{relay_config.target_port}/{path}"
-    )
+    scheme = "wss" if use_tls else "ws"
+    upstream_uri = f"{scheme}://{target_host}:{target_port}/{path}"
     query_string = websocket.scope.get("query_string", b"").decode("utf-8")
     if query_string:
         upstream_uri += f"?{query_string}"

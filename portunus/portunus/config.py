@@ -151,33 +151,15 @@ class AwsConfig(BaseModel):
 class RelayConfig(BaseModel):
     """WebSocket relay configuration settings.
 
-    target_host, target_port, and use_tls are read from the same TARGET_HOST,
-    TARGET_PORT, and TARGET_HOST_USE_TLS env vars that configure Envoy's
-    upstream cluster. This ensures WS relay connects to the same host as
-    HTTP requests. If TARGET_HOST is not set, WS relay is disabled.
+    The upstream target (host, port, TLS) is provided per-connection via
+    headers injected by each proxy's Envoy (x-portunus-target-host, etc.).
+    This config only holds Portunus-level settings that apply to all connections.
 
     Attributes:
-        target_host: Upstream WebSocket host (from TARGET_HOST env var)
-        target_port: Upstream WebSocket port (from TARGET_PORT env var)
-        use_tls: Whether to use TLS for upstream connection
         max_message_size: Maximum WebSocket message size in bytes
         max_connection_lifetime: Maximum connection lifetime in seconds
     """
 
-    target_host: Optional[str] = Field(
-        default=None,
-        description="Upstream WebSocket host (from TARGET_HOST env var)",
-    )
-    target_port: int = Field(
-        default=443,
-        description="Upstream WebSocket port",
-        ge=1,
-        le=65535,
-    )
-    use_tls: bool = Field(
-        default=True,
-        description="Whether to use TLS for upstream WebSocket connection",
-    )
     max_message_size: int = Field(
         default=10_485_760,
         description="Maximum WebSocket message size in bytes (10MB)",
@@ -298,9 +280,6 @@ def get_config() -> PortunusConfig:
     )
 
     relay = RelayConfig(
-        target_host=os.environ.get("TARGET_HOST", None),
-        target_port=int(os.environ.get("TARGET_PORT", "443")),
-        use_tls=os.environ.get("TARGET_HOST_USE_TLS", "true").lower() == "true",
         max_message_size=int(os.environ.get("WS_MAX_MESSAGE_SIZE", "10485760")),
         max_connection_lifetime=int(
             os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")

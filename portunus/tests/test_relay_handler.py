@@ -17,7 +17,12 @@ def mock_websocket():
     ws.close = AsyncMock()
     ws.send_text = AsyncMock()
     ws.receive_text = AsyncMock()
-    ws.headers = {"authorization": "Bearer test_payload"}
+    ws.headers = {
+        "authorization": "Bearer test_payload",
+        "x-portunus-target-host": "localhost",
+        "x-portunus-target-port": "8080",
+        "x-portunus-target-use-tls": "false",
+    }
     ws.scope = {"query_string": b""}
     return ws
 
@@ -95,9 +100,6 @@ class TestHandleWsConnection:
                 side_effect=Exception("Connection refused"),
             ),
         ):
-            mock_config.relay.use_tls = False
-            mock_config.relay.target_host = "localhost"
-            mock_config.relay.target_port = 9999
             mock_config.relay.max_message_size = 10485760
             mock_config.relay.max_connection_lifetime = 60
 
@@ -143,9 +145,6 @@ class TestHandleWsConnection:
                 return_value=mock_upstream,
             ),
         ):
-            mock_config.relay.use_tls = False
-            mock_config.relay.target_host = "localhost"
-            mock_config.relay.target_port = 80
             mock_config.relay.max_message_size = 10485760
             mock_config.relay.max_connection_lifetime = 5
 

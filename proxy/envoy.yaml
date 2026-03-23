@@ -74,9 +74,24 @@ static_resources:
             - name: local_service
               domains: ["*"]
               routes:
-              # WebSocket requests route to Portunus (Lua filter skips WS upgrades)
+              # WebSocket requests route to Portunus (Lua filter skips WS upgrades).
+              # Envoy injects the proxy's target host so Portunus knows where to
+              # connect upstream. OVERWRITE prevents clients from spoofing the target.
               - match:
                   prefix: "/ws/"
+                request_headers_to_add:
+                - header:
+                    key: "x-portunus-target-host"
+                    value: "${WS_TARGET_HOST}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header:
+                    key: "x-portunus-target-port"
+                    value: "${TARGET_PORT}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header:
+                    key: "x-portunus-target-use-tls"
+                    value: "${TARGET_HOST_USE_TLS}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
                 route:
                   cluster: ${PORTUNUS_HOST}
                   timeout: 0s
