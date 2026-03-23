@@ -23,11 +23,13 @@ logger = logging.getLogger("api.access")
 # Headers to forward from client upgrade request to upstream.
 # Authorization is handled separately (replaced with real API key).
 # Hop-by-hop headers (Connection, Upgrade, etc.) are excluded.
-_FORWARDED_HEADERS = frozenset({
-    "sec-websocket-protocol",
-    "openai-beta",
-    "user-agent",
-})
+_FORWARDED_HEADERS = frozenset(
+    {
+        "sec-websocket-protocol",
+        "openai-beta",
+        "user-agent",
+    }
+)
 
 
 async def handle_ws_connection(

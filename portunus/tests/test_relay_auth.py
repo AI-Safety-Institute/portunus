@@ -1,6 +1,5 @@
 """Tests for WebSocket authentication."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -34,9 +33,7 @@ class TestAuthenticateWs:
         """Missing authorization header closes with 4001."""
         mock_websocket.headers = {}
 
-        result = await authenticate_ws(
-            mock_websocket, mock_auth_service, "test-req-id"
-        )
+        result = await authenticate_ws(mock_websocket, mock_auth_service, "test-req-id")
 
         assert result is None
         mock_websocket.close.assert_called_once_with(
@@ -50,9 +47,7 @@ class TestAuthenticateWs:
         """Empty authorization header closes with 4001."""
         mock_websocket.headers = {"authorization": ""}
 
-        result = await authenticate_ws(
-            mock_websocket, mock_auth_service, "test-req-id"
-        )
+        result = await authenticate_ws(mock_websocket, mock_auth_service, "test-req-id")
 
         assert result is None
         mock_websocket.close.assert_called_once_with(
@@ -60,9 +55,7 @@ class TestAuthenticateWs:
         )
 
     @pytest.mark.asyncio
-    async def test_invalid_payload_closes_4001(
-        self, mock_websocket, mock_auth_service
-    ):
+    async def test_invalid_payload_closes_4001(self, mock_websocket, mock_auth_service):
         """Invalid payload closes with 4001."""
         mock_websocket.headers = {"authorization": "Bearer invalid_payload"}
 
@@ -90,9 +83,7 @@ class TestAuthenticateWs:
             "portunus.relay.auth.AuthPayload.from_contents"
         ) as mock_from_contents:
             mock_from_contents.return_value = MagicMock()
-            mock_auth_service.authenticate.side_effect = CredentialsError(
-                "bad creds"
-            )
+            mock_auth_service.authenticate.side_effect = CredentialsError("bad creds")
 
             result = await authenticate_ws(
                 mock_websocket, mock_auth_service, "test-req-id"
@@ -123,9 +114,7 @@ class TestAuthenticateWs:
             )
 
         assert result is None
-        mock_websocket.close.assert_called_once_with(
-            code=4003, reason="Forbidden"
-        )
+        mock_websocket.close.assert_called_once_with(code=4003, reason="Forbidden")
 
     @pytest.mark.asyncio
     async def test_successful_auth_returns_result(
@@ -175,9 +164,7 @@ class TestAuthenticateWs:
             mock_from_contents.return_value = MagicMock()
             mock_auth_service.authenticate.return_value = auth_result
 
-            await authenticate_ws(
-                mock_websocket, mock_auth_service, "test-req-id"
-            )
+            await authenticate_ws(mock_websocket, mock_auth_service, "test-req-id")
 
             # Verify Bearer was stripped
             mock_from_contents.assert_called_once_with(

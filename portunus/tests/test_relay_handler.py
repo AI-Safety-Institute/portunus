@@ -1,6 +1,5 @@
 """Tests for WebSocket relay handler."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -65,9 +64,7 @@ class TestHandleWsConnection:
         self, mock_websocket, mock_auth_service, mock_publish_service
     ):
         """If auth fails, connection is not accepted."""
-        with patch(
-            "portunus.relay.handler.authenticate_ws", return_value=None
-        ):
+        with patch("portunus.relay.handler.authenticate_ws", return_value=None):
             await handle_ws_connection(
                 mock_websocket,
                 "v1/responses",

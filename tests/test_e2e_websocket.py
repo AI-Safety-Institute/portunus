@@ -1,4 +1,4 @@
-# ruff: noqa: E501
+# ruff: noqa: E501, E402
 """End-to-end tests for WebSocket relay through Envoy -> Portunus.
 
 These tests require Docker Compose to be running with the ws-echo container.
@@ -73,15 +73,27 @@ def read_kinesis_records(stream_name: str) -> list[dict]:
     """Read all records from a Kinesis stream in localstack."""
     shard_result = subprocess.run(
         [
-            "docker", "exec", "localstack-main", "awslocal", "kinesis",
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "kinesis",
             "get-shard-iterator",
-            "--stream-name", stream_name,
-            "--shard-id", "shardId-000000000000",
-            "--shard-iterator-type", "TRIM_HORIZON",
-            "--region", "eu-west-2",
-            "--query", "ShardIterator", "--output", "text",
+            "--stream-name",
+            stream_name,
+            "--shard-id",
+            "shardId-000000000000",
+            "--shard-iterator-type",
+            "TRIM_HORIZON",
+            "--region",
+            "eu-west-2",
+            "--query",
+            "ShardIterator",
+            "--output",
+            "text",
         ],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if shard_result.returncode != 0:
         return []
@@ -89,12 +101,19 @@ def read_kinesis_records(stream_name: str) -> list[dict]:
     shard_iterator = shard_result.stdout.strip()
     records_result = subprocess.run(
         [
-            "docker", "exec", "localstack-main", "awslocal", "kinesis",
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "kinesis",
             "get-records",
-            "--shard-iterator", shard_iterator,
-            "--region", "eu-west-2",
+            "--shard-iterator",
+            shard_iterator,
+            "--region",
+            "eu-west-2",
         ],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if records_result.returncode != 0:
         return []
@@ -202,7 +221,8 @@ class TestWebSocketRelay:
 
         # Find our test message in request-body
         client_msgs = [
-            r for r in req_records
+            r
+            for r in req_records
             if r["record_type"] == "request_body"
             and base64.b64decode(r["body"]).decode() == test_msg
         ]
@@ -221,13 +241,14 @@ class TestWebSocketRelay:
         # Echo response should appear in response-body stream
         resp_records = read_kinesis_records("portunus-stream-response-body")
         echo_msgs = [
-            r for r in resp_records
+            r
+            for r in resp_records
             if r["record_type"] == "response_body"
             and base64.b64decode(r["body"]).decode() == test_msg
         ]
-        assert len(echo_msgs) >= 1, (
-            f"Echo of '{test_msg}' not found in response-body stream."
-        )
+        assert (
+            len(echo_msgs) >= 1
+        ), f"Echo of '{test_msg}' not found in response-body stream."
 
     @pytest.mark.asyncio
     async def test_metadata_published_on_ws_connect(self, ws_docker_setup):
@@ -270,9 +291,14 @@ class TestEnvoyWebSocketRouting:
             try:
                 await asyncio.wait_for(ws.recv(), timeout=3)
             except ConnectionClosed as e:
-                assert get_close_code(e) == 4001, f"Unexpected close code: {get_close_code(e)}"
+                assert (
+                    get_close_code(e) == 4001
+                ), f"Unexpected close code: {get_close_code(e)}"
         except InvalidStatusCode as e:
-            assert e.status_code in (401, 403), f"Expected auth rejection, got {e.status_code}"
+            assert e.status_code in (
+                401,
+                403,
+            ), f"Expected auth rejection, got {e.status_code}"
 
     @pytest.mark.asyncio
     async def test_non_ws_path_still_routes_to_target(self, ws_docker_setup):

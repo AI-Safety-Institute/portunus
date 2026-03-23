@@ -20,9 +20,7 @@ class TestLogWsMessage:
     """Tests for log_ws_message function."""
 
     @pytest.mark.asyncio
-    async def test_client_message_publishes_to_request_body(
-        self, mock_publish_service
-    ):
+    async def test_client_message_publishes_to_request_body(self, mock_publish_service):
         """Client-to-upstream messages go to request-body stream."""
         await log_ws_message(
             mock_publish_service,
