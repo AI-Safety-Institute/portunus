@@ -46,12 +46,17 @@ EOF
 fi
 
 # PORTUNUS_TRANSPORT_SOCKET
+# Force HTTP/1.1 via ALPN — WebSocket Upgrade requires HTTP/1.1 and will
+# silently fail if the TLS connection negotiates HTTP/2.
 if [ -z "$PORTUNUS_TRANSPORT_SOCKET" ]; then
   export PORTUNUS_TRANSPORT_SOCKET=$(yq -o json <<EOF
 name: envoy.transport_sockets.tls
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
   sni: $PORTUNUS_HOST
+  common_tls_context:
+    alpn_protocols:
+      - http/1.1
 EOF
   )
 fi
