@@ -82,8 +82,7 @@ services:
       WS_TARGET_HOST: ws-echo  # Override for local WS testing (defaults to TARGET_HOST in prod)
       ENVOY_LOG_LEVEL: info
       AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
-      # Uncomment to enable CORS for browser-origin requests
-      # CORS_ALLOWED_ORIGINS: "http://localhost:3000,https://example.com"
+      CORS_ALLOWED_ORIGINS: ""  # set to comma-separated origins to enable (supports wildcards, e.g. "*.example.com")
       # Uncomment the three env vars below to
       # enable rate-limiting
       # RATE_LIMIT_PERCENT_ENABLED: 100
