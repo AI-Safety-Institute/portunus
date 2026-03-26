@@ -18,16 +18,23 @@ local config = {
 	cors_allowed_origins = "${CORS_ALLOWED_ORIGINS}",
 }
 
--- Parse CORS allowed origins into a lookup table.
+-- Parse CORS allowed origins. Supports exact origins and wildcard domains
+-- (e.g. "*.aisi.org.uk" matches "https://hub.apps.aisi.org.uk").
 -- Empty string means CORS is disabled (backwards compatible).
-local cors_origins = {}
+local cors_exact = {}
+local cors_wildcard_suffixes = {}
 local cors_enabled = false
 if config.cors_allowed_origins ~= "" then
 	for origin in config.cors_allowed_origins:gmatch("[^,]+") do
 		local trimmed = origin:match("^%s*(.-)%s*$")
 		if trimmed ~= "" then
-			cors_origins[trimmed] = true
 			cors_enabled = true
+			if trimmed:sub(1, 2) == "*." then
+				-- "*.example.com" → match any origin whose host ends with ".example.com"
+				cors_wildcard_suffixes[#cors_wildcard_suffixes + 1] = trimmed:sub(2)  -- ".example.com"
+			else
+				cors_exact[trimmed] = true
+			end
 		end
 	end
 end
@@ -38,8 +45,20 @@ local function get_allowed_origin(request_handle)
 		return nil
 	end
 	local origin = request_handle:headers():get("origin")
-	if origin and cors_origins[origin] then
+	if not origin then
+		return nil
+	end
+	if cors_exact[origin] then
 		return origin
+	end
+	-- Extract host from origin (e.g. "https://hub.apps.aisi.org.uk" → "hub.apps.aisi.org.uk")
+	local host = origin:match("^https?://([^:/]+)")
+	if host then
+		for _, suffix in ipairs(cors_wildcard_suffixes) do
+			if host:sub(-#suffix) == suffix then
+				return origin
+			end
+		end
 	end
 	return nil
 end
