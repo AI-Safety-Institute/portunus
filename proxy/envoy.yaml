@@ -81,6 +81,10 @@ static_resources:
                   prefix: "/ws/"
                 request_headers_to_add:
                 - header:
+                    key: "${PORTUNUS_API_KEY_HEADER}"
+                    value: "${PORTUNUS_API_KEY}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header:
                     key: "x-portunus-target-host"
                     value: "${WS_TARGET_HOST}"
                   append_action: OVERWRITE_IF_EXISTS_OR_ADD
