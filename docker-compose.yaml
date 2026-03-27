@@ -151,7 +151,7 @@ services:
       KINESIS_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
 
   ws-echo:
-    image: jmalloc/echo-server
+    build: ws-echo
     container_name: ws-echo
     init: true
     networks:

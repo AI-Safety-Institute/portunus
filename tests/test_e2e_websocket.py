@@ -175,10 +175,6 @@ class TestWebSocketRelay:
             open_timeout=5,
         )
         try:
-            # ws-echo sends a greeting first — consume it
-            greeting = await asyncio.wait_for(ws.recv(), timeout=5)
-            assert "Request served by" in greeting
-
             # Send and receive echo
             await ws.send("hello portunus")
             echo = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -201,9 +197,6 @@ class TestWebSocketRelay:
             open_timeout=5,
         )
         try:
-            # Consume greeting
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
             # Send a unique message so we can find it in Kinesis
             test_msg = f"kinesis-test-{time.time()}"
             await ws.send(test_msg)
