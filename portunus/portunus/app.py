@@ -16,7 +16,7 @@ from aws_xray_sdk.core.utils import stacktrace
 from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
 from pydantic import BaseModel, ValidationError
 
-# config is used in XRayService
+from portunus.config import config  # noqa: E402 — also used by XRayService
 from portunus.exceptions import (
     AuthenticationError,
     CredentialsError,
@@ -456,7 +456,14 @@ async def ws_relay(websocket: WebSocket, path: str):
 
     Authenticates the upgrade request, connects to the upstream WebSocket,
     and relays messages bidirectionally with per-message Kinesis logging.
+    Rejects with 1013 (Try Again Later) if per-instance connection limit is reached.
     """
+    max_conns = config.relay.max_connections_per_instance
+    if len(_active_ws_connections) >= max_conns:
+        logger.warning(f"WS connection limit reached ({max_conns}), rejecting")
+        await websocket.close(code=1013, reason="Try again later")
+        return
+
     segment = xray_service.recorder.current_segment()
     request_id = segment.trace_id if segment else str(uuid.uuid4())
 

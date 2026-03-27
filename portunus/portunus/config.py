@@ -170,6 +170,11 @@ class RelayConfig(BaseModel):
         description="Maximum connection lifetime in seconds (55 min)",
         ge=60,
     )
+    max_connections_per_instance: int = Field(
+        default=25,
+        description="Maximum concurrent WebSocket connections per instance",
+        ge=1,
+    )
 
 
 class PortunusConfig(BaseModel):
