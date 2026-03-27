@@ -7,13 +7,14 @@ and per-message logging to the existing Kinesis body streams.
 
 import asyncio
 import logging
+import time
 
 import websockets
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from portunus.config import config
 from portunus.relay.auth import authenticate_ws
-from portunus.relay.logger import fire_and_forget_log
+from portunus.relay.logger import fire_and_forget_log, log_ws_headers, log_ws_summary
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_service import PublishService
 from portunus.util import generate_iso_timestamp
@@ -66,7 +67,15 @@ async def handle_ws_connection(
             pass
         return
 
-    target_port = int(websocket.headers.get("x-portunus-target-port", "443"))
+    try:
+        target_port = int(websocket.headers.get("x-portunus-target-port", "443"))
+    except ValueError:
+        logger.error(f"WS {request_id}: Invalid target port, rejecting")
+        try:
+            await websocket.close(code=1011, reason="Invalid target port")
+        except Exception:
+            pass
+        return
     use_tls = (
         websocket.headers.get("x-portunus-target-use-tls", "true").lower() == "true"
     )
@@ -78,7 +87,16 @@ async def handle_ws_connection(
 
     # Accept the client connection
     await websocket.accept()
+    connection_start = time.monotonic()
     logger.info(f"WS {request_id}: Connection accepted, connecting upstream to /{path}")
+
+    # Log upgrade request headers (parity with HTTP header logging)
+    upgrade_headers = {
+        k: v
+        for k, v in websocket.headers.items()
+        if not k.startswith("x-portunus-")  # strip internal headers
+    }
+    asyncio.create_task(log_ws_headers(publish_service, request_id, upgrade_headers))
 
     # Publish metadata
     try:
@@ -209,6 +227,16 @@ async def handle_ws_connection(
             f"({relay_config.max_connection_lifetime}s)"
         )
 
+    # Log connection summary (parity with HTTP response header logging)
+    duration = time.monotonic() - connection_start
+    await log_ws_summary(
+        publish_service,
+        request_id,
+        client_msg_index,
+        upstream_msg_index,
+        duration,
+    )
+
     # Clean up
     try:
         await upstream.close()
@@ -220,6 +248,6 @@ async def handle_ws_connection(
         pass
 
     logger.info(
-        f"WS {request_id}: Connection closed. "
+        f"WS {request_id}: Connection closed after {duration:.1f}s. "
         f"Messages: {client_msg_index} client, {upstream_msg_index} upstream"
     )

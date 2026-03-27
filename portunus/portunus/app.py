@@ -443,6 +443,13 @@ async def log_response_trailers(
     return None
 
 
+# Active WebSocket connections tracked for graceful shutdown.
+# On SIGTERM, the lifespan handler sets _ws_shutdown and waits briefly
+# for connections to drain before the process exits.
+_active_ws_connections: set[asyncio.Task] = set()
+_ws_shutdown = asyncio.Event()
+
+
 @portunus_router.websocket("/ws/{path:path}")
 async def ws_relay(websocket: WebSocket, path: str):
     """WebSocket relay endpoint.
@@ -453,13 +460,20 @@ async def ws_relay(websocket: WebSocket, path: str):
     segment = xray_service.recorder.current_segment()
     request_id = segment.trace_id if segment else str(uuid.uuid4())
 
-    await handle_ws_connection(
-        websocket=websocket,
-        path=path,
-        auth_service=auth_service,
-        publish_service=publish_service,
-        request_id=request_id,
-    )
+    task = asyncio.current_task()
+    if task is not None:
+        _active_ws_connections.add(task)
+    try:
+        await handle_ws_connection(
+            websocket=websocket,
+            path=path,
+            auth_service=auth_service,
+            publish_service=publish_service,
+            request_id=request_id,
+        )
+    finally:
+        if task is not None:
+            _active_ws_connections.discard(task)
 
 
 @common_router.get("/ping")
@@ -487,8 +501,28 @@ async def ping(request: Request) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifecycle — clean up Redis on shutdown."""
+    """Manage application lifecycle.
+
+    Drains active WS connections and cleans up Redis on shutdown.
+    """
     yield
+
+    # Signal active WebSocket connections to shut down
+    if _active_ws_connections:
+        logger.info(
+            f"Draining {len(_active_ws_connections)} active WebSocket connections"
+        )
+        _ws_shutdown.set()
+        # Give connections a grace period to close cleanly (send 1001 Going Away)
+        for task in list(_active_ws_connections):
+            task.cancel()
+        # Wait up to 10s for connections to drain
+        if _active_ws_connections:
+            await asyncio.sleep(10)
+        logger.info(
+            f"WebSocket drain complete, {len(_active_ws_connections)} remaining"
+        )
+
     logger.info("Shutting down Redis connections")
     await state_service.close_redis_client()
     logger.info("Redis connections closed")
