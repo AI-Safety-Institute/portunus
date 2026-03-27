@@ -521,11 +521,11 @@ async def lifespan(app: FastAPI):
         )
         _ws_shutdown.set()
         # Give connections a grace period to close cleanly (send 1001 Going Away)
+        drain_timeout = config.relay.drain_timeout
         for task in list(_active_ws_connections):
             task.cancel()
-        # Wait up to 10s for connections to drain
         if _active_ws_connections:
-            await asyncio.sleep(10)
+            await asyncio.sleep(drain_timeout)
         logger.info(
             f"WebSocket drain complete, {len(_active_ws_connections)} remaining"
         )

@@ -206,6 +206,7 @@ async def handle_ws_connection(
             logger.error(f"WS {request_id}: Upstream->client error: {e}")
 
     # Run both relay tasks with a lifetime timeout
+    close_code = 1000  # Normal closure
     try:
         async with asyncio.timeout(relay_config.max_connection_lifetime):
             tasks = [
@@ -222,10 +223,14 @@ async def handle_ws_connection(
                 except asyncio.CancelledError:
                     pass
     except TimeoutError:
+        close_code = 1001  # Going Away — lifetime limit
         logger.info(
             f"WS {request_id}: Connection lifetime limit reached "
             f"({relay_config.max_connection_lifetime}s)"
         )
+    except asyncio.CancelledError:
+        close_code = 1001  # Going Away — server shutting down
+        logger.info(f"WS {request_id}: Connection cancelled (server draining)")
 
     # Log connection summary (parity with HTTP response header logging)
     duration = time.monotonic() - connection_start
@@ -243,7 +248,7 @@ async def handle_ws_connection(
     except Exception:
         pass
     try:
-        await websocket.close(code=1000)
+        await websocket.close(code=close_code)
     except Exception:
         pass
 

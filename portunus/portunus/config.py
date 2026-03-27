@@ -175,6 +175,11 @@ class RelayConfig(BaseModel):
         description="Maximum concurrent WebSocket connections per instance",
         ge=1,
     )
+    drain_timeout: int = Field(
+        default=10,
+        description="Seconds to wait for WS connections to drain on shutdown",
+        ge=0,
+    )
 
 
 class PortunusConfig(BaseModel):
