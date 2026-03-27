@@ -95,6 +95,9 @@ static_resources:
                 route:
                   cluster: ${PORTUNUS_HOST}
                   timeout: 0s
+                  # Rewrite Host so the shared ALB routes to the Portunus service,
+                  # not back to this proxy (which would loop until XFF hits 30 IPs → 463).
+                  host_rewrite_literal: "${PORTUNUS_HOST}"
                   upgrade_configs:
                   - upgrade_type: websocket
               # Default HTTP route through Lua filter
