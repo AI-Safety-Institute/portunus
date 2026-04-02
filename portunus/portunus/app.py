@@ -29,6 +29,7 @@ from portunus.models import (
     HeadersPayload,
     TrailersPayload,
 )
+from portunus.relay import WsCloseCode
 from portunus.relay.handler import handle_ws_connection
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
@@ -458,10 +459,10 @@ async def ws_relay(websocket: WebSocket, path: str):
     and relays messages bidirectionally with per-message Kinesis logging.
     Rejects with 1013 (Try Again Later) if per-instance connection limit is reached.
     """
-    max_conns = config.relay.max_connections_per_instance
+    max_conns = config.relay.max_connections
     if len(_active_ws_connections) >= max_conns:
         logger.warning(f"WS connection limit reached ({max_conns}), rejecting")
-        await websocket.close(code=1013, reason="Try again later")
+        await websocket.close(code=WsCloseCode.TRY_AGAIN_LATER, reason="Try again later")
         return
 
     segment = xray_service.recorder.current_segment()

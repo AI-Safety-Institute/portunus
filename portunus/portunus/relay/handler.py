@@ -13,6 +13,7 @@ import websockets
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from portunus.config import config
+from portunus.relay import WsCloseCode
 from portunus.relay.auth import authenticate_ws
 from portunus.relay.logger import fire_and_forget_log, log_ws_headers, log_ws_summary
 from portunus.services.auth_service import AuthService
@@ -20,6 +21,7 @@ from portunus.services.publish_service import PublishService
 from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
+
 
 # Headers to forward from client upgrade request to upstream.
 # Authorization is handled separately (replaced with real API key).
@@ -62,7 +64,7 @@ async def handle_ws_connection(
             f"WS {request_id}: x-portunus-target-host header missing, rejecting"
         )
         try:
-            await websocket.close(code=1011, reason="WebSocket relay not configured")
+            await websocket.close(code=WsCloseCode.INTERNAL_ERROR, reason="WebSocket relay not configured")
         except Exception:
             pass
         return
@@ -72,7 +74,7 @@ async def handle_ws_connection(
     except ValueError:
         logger.error(f"WS {request_id}: Invalid target port, rejecting")
         try:
-            await websocket.close(code=1011, reason="Invalid target port")
+            await websocket.close(code=WsCloseCode.INTERNAL_ERROR, reason="Invalid target port")
         except Exception:
             pass
         return
@@ -134,7 +136,7 @@ async def handle_ws_connection(
         )
     except Exception as e:
         logger.error(f"WS {request_id}: Failed to connect upstream: {e}")
-        await websocket.close(code=1011, reason="Upstream connection failed")
+        await websocket.close(code=WsCloseCode.INTERNAL_ERROR, reason="Upstream connection failed")
         return
 
     logger.info(f"WS {request_id}: Upstream connected to {upstream_uri}")
@@ -206,7 +208,7 @@ async def handle_ws_connection(
             logger.error(f"WS {request_id}: Upstream->client error: {e}")
 
     # Run both relay tasks with a lifetime timeout
-    close_code = 1000  # Normal closure
+    close_code = WsCloseCode.NORMAL
     try:
         async with asyncio.timeout(relay_config.max_connection_lifetime):
             tasks = [
@@ -223,13 +225,13 @@ async def handle_ws_connection(
                 except asyncio.CancelledError:
                     pass
     except TimeoutError:
-        close_code = 1001  # Going Away — lifetime limit
+        close_code = WsCloseCode.GOING_AWAY
         logger.info(
             f"WS {request_id}: Connection lifetime limit reached "
             f"({relay_config.max_connection_lifetime}s)"
         )
     except asyncio.CancelledError:
-        close_code = 1001  # Going Away — server shutting down
+        close_code = WsCloseCode.GOING_AWAY
         logger.info(f"WS {request_id}: Connection cancelled (server draining)")
 
     # Log connection summary (parity with HTTP response header logging)

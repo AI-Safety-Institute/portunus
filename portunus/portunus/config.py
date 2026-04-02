@@ -170,7 +170,7 @@ class RelayConfig(BaseModel):
         description="Maximum connection lifetime in seconds (55 min)",
         ge=60,
     )
-    max_connections_per_instance: int = Field(
+    max_connections: int = Field(
         default=25,
         description="Maximum concurrent WebSocket connections per instance",
         ge=1,
@@ -294,6 +294,8 @@ def get_config() -> PortunusConfig:
         max_connection_lifetime=int(
             os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")
         ),
+        max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "25")),
+        drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
     )
 
     return PortunusConfig(
