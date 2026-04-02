@@ -158,6 +158,8 @@ class RelayConfig(BaseModel):
     Attributes:
         max_message_size: Maximum WebSocket message size in bytes
         max_connection_lifetime: Maximum connection lifetime in seconds
+        max_connections: Maximum concurrent WebSocket connections per instance
+        drain_timeout: Seconds to wait for WS connections to drain on shutdown
     """
 
     max_message_size: int = Field(

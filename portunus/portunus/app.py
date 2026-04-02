@@ -446,10 +446,7 @@ async def log_response_trailers(
 
 
 # Active WebSocket connections tracked for graceful shutdown.
-# On SIGTERM, the lifespan handler sets _ws_shutdown and waits briefly
-# for connections to drain before the process exits.
 _active_ws_connections: set[asyncio.Task] = set()
-_ws_shutdown = asyncio.Event()
 
 
 @portunus_router.websocket("/ws/{path:path}")
@@ -524,16 +521,11 @@ async def lifespan(app: FastAPI):
     await start_log_queue(num_workers=config.relay.max_connections)
     yield
 
-    # Stop log queue (drains pending items)
-    await stop_log_queue()
-
-    # Signal active WebSocket connections to shut down
+    # Cancel WS connections first so they stop producing log items
     if _active_ws_connections:
         logger.info(
             f"Draining {len(_active_ws_connections)} active WebSocket connections"
         )
-        _ws_shutdown.set()
-        # Give connections a grace period to close cleanly (send 1001 Going Away)
         drain_timeout = config.relay.drain_timeout
         for task in list(_active_ws_connections):
             task.cancel()
@@ -542,6 +534,9 @@ async def lifespan(app: FastAPI):
         logger.info(
             f"WebSocket drain complete, {len(_active_ws_connections)} remaining"
         )
+
+    # Then drain the log queue (no new items will arrive)
+    await stop_log_queue()
 
     logger.info("Shutting down Redis connections")
     await state_service.close_redis_client()

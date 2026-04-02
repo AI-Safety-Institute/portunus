@@ -151,8 +151,8 @@ async def log_ws_message(
 ) -> None:
     """Log a WebSocket message to the appropriate Kinesis body stream.
 
-    Kept for direct-await usage (e.g. tests). For relay hot path,
-    use fire_and_forget_log() which enqueues instead.
+    Kept for direct-await usage (e.g. tests). For the relay hot path,
+    use enqueue_log() which enqueues to the worker pool instead.
     """
     await _publish_message(
         _LogItem(

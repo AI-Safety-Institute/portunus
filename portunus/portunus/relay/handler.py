@@ -38,6 +38,11 @@ _BLOCKED_HEADERS = frozenset(
         "authorization",
         # Routing (specific to this proxy, not the upstream)
         "host",
+        # Proxy headers (could spoof source identity at upstream)
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
     }
 )
 _BLOCKED_HEADER_PREFIXES = ("x-portunus-",)
@@ -137,11 +142,14 @@ async def _publish_connection_metadata(
     request_id: str,
 ) -> None:
     """Log upgrade headers and publish metadata on connection open."""
-    # Log upgrade request headers (parity with HTTP header logging)
+    # Log upgrade request headers (parity with HTTP header logging).
+    # Strip internal headers and authorization (contains encoded AWS credentials).
     upgrade_headers = {
-        k: v for k, v in websocket.headers.items() if not k.startswith("x-portunus-")
+        k: v
+        for k, v in websocket.headers.items()
+        if not k.startswith("x-portunus-") and k != "authorization"
     }
-    asyncio.create_task(log_ws_headers(publish_service, request_id, upgrade_headers))
+    await log_ws_headers(publish_service, request_id, upgrade_headers)
 
     # Publish metadata
     try:
