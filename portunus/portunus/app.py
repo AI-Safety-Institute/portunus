@@ -452,13 +452,17 @@ _active_ws_connections: set[asyncio.Task] = set()
 _ws_shutdown = asyncio.Event()
 
 
-@portunus_router.websocket("/ws/{path:path}")
+@portunus_router.websocket("/{path:path}")
 async def ws_relay(websocket: WebSocket, path: str):
     """WebSocket relay endpoint.
 
+    Clients use the same URL for HTTP and WS — Envoy routes WS upgrades
+    here based on the Upgrade header, not the path. The path is forwarded
+    to the upstream as-is (e.g., /v1/responses).
+
     Authenticates the upgrade request, connects to the upstream WebSocket,
     and relays messages bidirectionally with per-message Kinesis logging.
-    Rejects with 1013 (Try Again Later) if per-instance connection limit is reached.
+    Rejects with 1013 (Try Again Later) if connection limit is reached.
     """
     max_conns = config.relay.max_connections
     if len(_active_ws_connections) >= max_conns:

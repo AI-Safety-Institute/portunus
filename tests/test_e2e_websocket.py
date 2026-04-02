@@ -29,8 +29,9 @@ os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
 from conftest import encode_base64
 
-# Use .ws path — jmalloc/echo-server's WebSocket echo endpoint
-PROXY_WS_URL = "ws://localhost:8888/ws/.ws"
+# ws-echo serves on any path — Envoy routes WS upgrades to Portunus
+# based on the Upgrade header, and Portunus forwards the path to upstream.
+PROXY_WS_URL = "ws://localhost:8888/echo"
 
 
 @pytest.fixture(scope="module")

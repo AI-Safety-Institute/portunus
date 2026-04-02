@@ -74,11 +74,16 @@ static_resources:
             - name: local_service
               domains: ["*"]
               routes:
-              # WebSocket requests route to Portunus (Lua filter skips WS upgrades).
+              # WebSocket upgrades route to Portunus (Lua filter skips WS upgrades).
+              # Matched by the Upgrade header, not by path — clients use the same
+              # base URL for HTTP and WS (e.g., wss://proxy/v1/responses).
               # Envoy injects the proxy's target host so Portunus knows where to
               # connect upstream. OVERWRITE prevents clients from spoofing the target.
               - match:
-                  prefix: "/ws/"
+                  prefix: "/"
+                  headers:
+                  - name: "upgrade"
+                    exact_match: "websocket"
                 request_headers_to_add:
                 - header:
                     key: "${PORTUNUS_API_KEY_HEADER}"
