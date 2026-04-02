@@ -79,7 +79,10 @@ async def authenticate_ws(
 
     if not auth_header:
         logger.warning(f"WS {request_id}: No authorization header")
-        await _close_ws(websocket, code=WsCloseCode.AUTH_FAILED, reason="Missing authorization header")
+        await _close_ws(
+            websocket, code=WsCloseCode.AUTH_FAILED,
+            reason="Missing authorization header",
+        )
         return None
 
     # Strip Bearer prefix
@@ -92,7 +95,10 @@ async def authenticate_ws(
         auth_result = await auth_service.authenticate(payload, request_id, target_host)
     except (PayloadError, CredentialsError) as e:
         logger.warning(f"WS {request_id}: Auth failed: {e.message}")
-        await _close_ws(websocket, code=WsCloseCode.AUTH_FAILED, reason="Invalid authorization")
+        await _close_ws(
+            websocket, code=WsCloseCode.AUTH_FAILED,
+            reason="Invalid authorization",
+        )
         return None
     except (AuthenticationError, FetchSecretError) as e:
         logger.warning(f"WS {request_id}: Auth forbidden: {e.message}")
@@ -100,7 +106,10 @@ async def authenticate_ws(
         return None
     except Exception as e:
         logger.error(f"WS {request_id}: Unexpected auth error: {e}")
-        await _close_ws(websocket, code=WsCloseCode.AUTH_FAILED, reason="Authentication error")
+        await _close_ws(
+            websocket, code=WsCloseCode.AUTH_FAILED,
+            reason="Authentication error",
+        )
         return None
 
     return WsAuthResult(

@@ -64,7 +64,10 @@ async def handle_ws_connection(
             f"WS {request_id}: x-portunus-target-host header missing, rejecting"
         )
         try:
-            await websocket.close(code=WsCloseCode.INTERNAL_ERROR, reason="WebSocket relay not configured")
+            await websocket.close(
+                code=WsCloseCode.INTERNAL_ERROR,
+                reason="WebSocket relay not configured",
+            )
         except Exception:
             pass
         return
@@ -74,7 +77,10 @@ async def handle_ws_connection(
     except ValueError:
         logger.error(f"WS {request_id}: Invalid target port, rejecting")
         try:
-            await websocket.close(code=WsCloseCode.INTERNAL_ERROR, reason="Invalid target port")
+            await websocket.close(
+                code=WsCloseCode.INTERNAL_ERROR,
+                reason="Invalid target port",
+            )
         except Exception:
             pass
         return
@@ -136,7 +142,10 @@ async def handle_ws_connection(
         )
     except Exception as e:
         logger.error(f"WS {request_id}: Failed to connect upstream: {e}")
-        await websocket.close(code=WsCloseCode.INTERNAL_ERROR, reason="Upstream connection failed")
+        await websocket.close(
+            code=WsCloseCode.INTERNAL_ERROR,
+            reason="Upstream connection failed",
+        )
         return
 
     logger.info(f"WS {request_id}: Upstream connected to {upstream_uri}")
