@@ -8,20 +8,20 @@ and per-message logging to the existing Kinesis body streams.
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 
 import websockets
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from portunus.config import config
 from portunus.relay import WsCloseCode
-from portunus.relay.auth import authenticate_ws
+from portunus.relay.auth import WsAuthResult, authenticate_ws
 from portunus.relay.logger import enqueue_log, log_ws_headers, log_ws_summary
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_service import PublishService
 from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
-
 
 # Headers NOT forwarded from client upgrade request to upstream.
 # Everything else passes through — avoids maintaining an allowlist
@@ -43,135 +43,137 @@ _BLOCKED_HEADERS = frozenset(
 _BLOCKED_HEADER_PREFIXES = ("x-portunus-",)
 
 
-async def handle_ws_connection(
-    websocket: WebSocket,
-    path: str,
-    auth_service: AuthService,
-    publish_service: PublishService,
-    request_id: str,
-) -> None:
-    """Handle a WebSocket relay connection.
+@dataclass
+class UpstreamTarget:
+    """Parsed upstream target from Envoy-injected headers."""
 
-    Authenticates the client, connects to the upstream WebSocket,
-    and relays messages bidirectionally with per-message logging.
+    host: str
+    port: int
+    use_tls: bool
 
-    Args:
-        websocket: Client WebSocket connection (not yet accepted).
-        path: The request path to forward upstream.
-        auth_service: AuthService for authentication.
-        publish_service: PublishService for Kinesis logging.
-        request_id: Unique request/connection ID.
+
+def _parse_target(websocket: WebSocket, request_id: str) -> UpstreamTarget | None:
+    """Extract upstream target from Envoy-injected headers.
+
+    Returns None and closes the WebSocket if headers are missing/invalid.
     """
-    relay_config = config.relay
-
-    # Read upstream target from headers injected by Envoy's request_headers_to_add.
-    # Each proxy injects its own TARGET_HOST so Portunus knows where to connect.
-    target_host = websocket.headers.get("x-portunus-target-host")
-    if not target_host:
-        logger.error(
-            f"WS {request_id}: x-portunus-target-host header missing, rejecting"
-        )
-        try:
-            await websocket.close(
-                code=WsCloseCode.INTERNAL_ERROR,
-                reason="WebSocket relay not configured",
-            )
-        except Exception:
-            pass
-        return
+    host = websocket.headers.get("x-portunus-target-host")
+    if not host:
+        logger.error(f"WS {request_id}: x-portunus-target-host header missing")
+        return None
 
     try:
-        target_port = int(websocket.headers.get("x-portunus-target-port", "443"))
+        port = int(websocket.headers.get("x-portunus-target-port", "443"))
     except ValueError:
-        logger.error(f"WS {request_id}: Invalid target port, rejecting")
-        try:
-            await websocket.close(
-                code=WsCloseCode.INTERNAL_ERROR,
-                reason="Invalid target port",
-            )
-        except Exception:
-            pass
-        return
+        logger.error(f"WS {request_id}: Invalid target port")
+        return None
+
     use_tls = (
         websocket.headers.get("x-portunus-target-use-tls", "true").lower() == "true"
     )
+    return UpstreamTarget(host=host, port=port, use_tls=use_tls)
 
-    # Authenticate before accepting
-    ws_auth = await authenticate_ws(websocket, auth_service, request_id, target_host)
-    if ws_auth is None:
-        return
 
-    # Accept the client connection
-    await websocket.accept()
-    connection_start = time.monotonic()
-    logger.info(f"WS {request_id}: Connection accepted, connecting upstream to /{path}")
+def _build_upstream_headers(websocket: WebSocket, api_key: str) -> dict[str, str]:
+    """Build headers for the upstream connection.
 
-    # Log upgrade request headers (parity with HTTP header logging)
-    upgrade_headers = {
-        k: v
-        for k, v in websocket.headers.items()
-        if not k.startswith("x-portunus-")  # strip internal headers
-    }
-    asyncio.create_task(log_ws_headers(publish_service, request_id, upgrade_headers))
-
-    # Publish metadata
-    try:
-        timestamp = generate_iso_timestamp()
-        principal_info = ws_auth.auth_result.principal_info.to_dict()
-        await publish_service.publish_metadata(
-            request_id=request_id,
-            timestamp=timestamp,
-            principal_info=principal_info,
-            secret_arn=ws_auth.secret_arn,
-        )
-    except Exception as e:
-        logger.error(f"WS {request_id}: Failed to publish metadata: {e}")
-
-    # Build upstream URI, preserving query string
-    scheme = "wss" if use_tls else "ws"
-    upstream_uri = f"{scheme}://{target_host}:{target_port}/{path}"
-    query_string = websocket.scope.get("query_string", b"").decode("utf-8")
-    if query_string:
-        upstream_uri += f"?{query_string}"
-
-    # Build upstream headers: real API key + all client headers except blocked
-    upstream_headers = {"Authorization": f"Bearer {ws_auth.api_key}"}
+    Forwards all client headers except blocked ones, and replaces
+    the Authorization header with the real API key.
+    """
+    headers = {"Authorization": f"Bearer {api_key}"}
     for key, value in websocket.headers.items():
         if key in _BLOCKED_HEADERS:
             continue
         if any(key.startswith(p) for p in _BLOCKED_HEADER_PREFIXES):
             continue
-        upstream_headers[key] = value
+        headers[key] = value
+    return headers
+
+
+def _build_upstream_uri(target: UpstreamTarget, path: str, websocket: WebSocket) -> str:
+    """Build the upstream WebSocket URI with query string."""
+    scheme = "wss" if target.use_tls else "ws"
+    uri = f"{scheme}://{target.host}:{target.port}/{path}"
+    query_string = websocket.scope.get("query_string", b"").decode("utf-8")
+    if query_string:
+        uri += f"?{query_string}"
+    return uri
+
+
+async def _connect_upstream(
+    target: UpstreamTarget,
+    path: str,
+    websocket: WebSocket,
+    api_key: str,
+    request_id: str,
+    max_message_size: int,
+) -> websockets.WebSocketClientProtocol | None:
+    """Connect to the upstream WebSocket.
+
+    Returns None if the connection fails.
+    """
+    uri = _build_upstream_uri(target, path, websocket)
+    headers = _build_upstream_headers(websocket, api_key)
 
     try:
         upstream = await websockets.connect(
-            upstream_uri,
-            extra_headers=upstream_headers,
-            max_size=relay_config.max_message_size,
+            uri,
+            extra_headers=headers,
+            max_size=max_message_size,
             open_timeout=10,
         )
     except Exception as e:
         logger.error(f"WS {request_id}: Failed to connect upstream: {e}")
-        await websocket.close(
-            code=WsCloseCode.INTERNAL_ERROR,
-            reason="Upstream connection failed",
+        return None
+
+    logger.info(f"WS {request_id}: Upstream connected to {uri}")
+    return upstream
+
+
+async def _publish_connection_metadata(
+    publish_service: PublishService,
+    websocket: WebSocket,
+    ws_auth: WsAuthResult,
+    request_id: str,
+) -> None:
+    """Log upgrade headers and publish metadata on connection open."""
+    # Log upgrade request headers (parity with HTTP header logging)
+    upgrade_headers = {
+        k: v for k, v in websocket.headers.items() if not k.startswith("x-portunus-")
+    }
+    asyncio.create_task(log_ws_headers(publish_service, request_id, upgrade_headers))
+
+    # Publish metadata
+    try:
+        await publish_service.publish_metadata(
+            request_id=request_id,
+            timestamp=generate_iso_timestamp(),
+            principal_info=ws_auth.auth_result.principal_info.to_dict(),
+            secret_arn=ws_auth.secret_arn,
         )
-        return
+    except Exception as e:
+        logger.error(f"WS {request_id}: Failed to publish metadata: {e}")
 
-    logger.info(f"WS {request_id}: Upstream connected to {upstream_uri}")
 
-    # Relay messages bidirectionally
+async def _relay(
+    websocket: WebSocket,
+    upstream: websockets.WebSocketClientProtocol,
+    publish_service: PublishService,
+    request_id: str,
+    max_lifetime: int,
+) -> tuple[int, int, WsCloseCode]:
+    """Run bidirectional message relay with per-message logging.
+
+    Returns (client_msg_count, upstream_msg_count, close_code).
+    """
     client_msg_index = 0
     upstream_msg_index = 0
 
     async def client_to_upstream() -> None:
-        """Relay messages from client to upstream."""
         nonlocal client_msg_index
         try:
             while True:
                 msg = await websocket.receive()
-
-                # Check message type explicitly to handle None values safely
                 msg_type = msg.get("type", "")
                 if msg_type == "websocket.disconnect":
                     break
@@ -202,7 +204,6 @@ async def handle_ws_connection(
             logger.error(f"WS {request_id}: Client->upstream error: {e}")
 
     async def upstream_to_client() -> None:
-        """Relay messages from upstream to client."""
         nonlocal upstream_msg_index
         try:
             async for raw_message in upstream:
@@ -226,10 +227,9 @@ async def handle_ws_connection(
         except Exception as e:
             logger.error(f"WS {request_id}: Upstream->client error: {e}")
 
-    # Run both relay tasks with a lifetime timeout
     close_code = WsCloseCode.NORMAL
     try:
-        async with asyncio.timeout(relay_config.max_connection_lifetime):
+        async with asyncio.timeout(max_lifetime):
             tasks = [
                 asyncio.create_task(client_to_upstream()),
                 asyncio.create_task(upstream_to_client()),
@@ -246,24 +246,89 @@ async def handle_ws_connection(
     except TimeoutError:
         close_code = WsCloseCode.GOING_AWAY
         logger.info(
-            f"WS {request_id}: Connection lifetime limit reached "
-            f"({relay_config.max_connection_lifetime}s)"
+            f"WS {request_id}: Connection lifetime limit reached " f"({max_lifetime}s)"
         )
     except asyncio.CancelledError:
         close_code = WsCloseCode.GOING_AWAY
         logger.info(f"WS {request_id}: Connection cancelled (server draining)")
 
-    # Log connection summary (parity with HTTP response header logging)
+    return client_msg_index, upstream_msg_index, close_code
+
+
+async def handle_ws_connection(
+    websocket: WebSocket,
+    path: str,
+    auth_service: AuthService,
+    publish_service: PublishService,
+    request_id: str,
+) -> None:
+    """Handle a WebSocket relay connection.
+
+    Orchestrates the connection lifecycle: parse target, authenticate,
+    connect upstream, relay messages, log, and clean up.
+    """
+    relay_config = config.relay
+
+    # Parse target from Envoy-injected headers
+    target = _parse_target(websocket, request_id)
+    if target is None:
+        try:
+            await websocket.close(
+                code=WsCloseCode.INTERNAL_ERROR,
+                reason="WebSocket relay not configured",
+            )
+        except Exception:
+            pass
+        return
+
+    # Authenticate before accepting
+    ws_auth = await authenticate_ws(websocket, auth_service, request_id, target.host)
+    if ws_auth is None:
+        return
+
+    # Accept and connect upstream
+    await websocket.accept()
+    connection_start = time.monotonic()
+    logger.info(
+        f"WS {request_id}: Connection accepted, connecting upstream " f"to /{path}"
+    )
+
+    await _publish_connection_metadata(publish_service, websocket, ws_auth, request_id)
+
+    upstream = await _connect_upstream(
+        target,
+        path,
+        websocket,
+        ws_auth.api_key,
+        request_id,
+        relay_config.max_message_size,
+    )
+    if upstream is None:
+        await websocket.close(
+            code=WsCloseCode.INTERNAL_ERROR,
+            reason="Upstream connection failed",
+        )
+        return
+
+    # Relay messages
+    client_msgs, upstream_msgs, close_code = await _relay(
+        websocket,
+        upstream,
+        publish_service,
+        request_id,
+        relay_config.max_connection_lifetime,
+    )
+
+    # Log summary and clean up
     duration = time.monotonic() - connection_start
     await log_ws_summary(
         publish_service,
         request_id,
-        client_msg_index,
-        upstream_msg_index,
+        client_msgs,
+        upstream_msgs,
         duration,
     )
 
-    # Clean up
     try:
         await upstream.close()
     except Exception:
@@ -275,5 +340,5 @@ async def handle_ws_connection(
 
     logger.info(
         f"WS {request_id}: Connection closed after {duration:.1f}s. "
-        f"Messages: {client_msg_index} client, {upstream_msg_index} upstream"
+        f"Messages: {client_msgs} client, {upstream_msgs} upstream"
     )
