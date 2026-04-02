@@ -239,9 +239,9 @@ class TestWebSocketRelay:
             if r["record_type"] == "response_body"
             and base64.b64decode(r["body"]).decode() == test_msg
         ]
-        assert (
-            len(echo_msgs) >= 1
-        ), f"Echo of '{test_msg}' not found in response-body stream."
+        assert len(echo_msgs) >= 1, (
+            f"Echo of '{test_msg}' not found in response-body stream."
+        )
 
     @pytest.mark.asyncio
     async def test_metadata_published_on_ws_connect(self, ws_docker_setup):
@@ -284,9 +284,9 @@ class TestEnvoyWebSocketRouting:
             try:
                 await asyncio.wait_for(ws.recv(), timeout=3)
             except ConnectionClosed as e:
-                assert (
-                    get_close_code(e) == 4001
-                ), f"Unexpected close code: {get_close_code(e)}"
+                assert get_close_code(e) == 4001, (
+                    f"Unexpected close code: {get_close_code(e)}"
+                )
         except InvalidStatusCode as e:
             assert e.status_code in (
                 401,

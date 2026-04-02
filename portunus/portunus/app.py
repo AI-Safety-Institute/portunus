@@ -463,7 +463,9 @@ async def ws_relay(websocket: WebSocket, path: str):
     max_conns = config.relay.max_connections
     if len(_active_ws_connections) >= max_conns:
         logger.warning(f"WS connection limit reached ({max_conns}), rejecting")
-        await websocket.close(code=WsCloseCode.TRY_AGAIN_LATER, reason="Try again later")
+        await websocket.close(
+            code=WsCloseCode.TRY_AGAIN_LATER, reason="Try again later"
+        )
         return
 
     segment = xray_service.recorder.current_segment()
