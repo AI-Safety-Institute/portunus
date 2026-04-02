@@ -29,9 +29,8 @@ os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
 from conftest import encode_base64
 
-# ws-echo serves on any path — Envoy routes WS upgrades to Portunus
-# based on the Upgrade header, and Portunus forwards the path to upstream.
-PROXY_WS_URL = "ws://localhost:8888/echo"
+# Envoy routes /ws/* to Portunus, which relays to ws-echo upstream.
+PROXY_WS_URL = "ws://localhost:8888/ws/echo"
 
 
 @pytest.fixture(scope="module")

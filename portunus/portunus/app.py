@@ -452,13 +452,13 @@ _active_ws_connections: set[asyncio.Task] = set()
 _ws_shutdown = asyncio.Event()
 
 
-@portunus_router.websocket("/{path:path}")
+@portunus_router.websocket("/ws/{path:path}")
 async def ws_relay(websocket: WebSocket, path: str):
     """WebSocket relay endpoint.
 
-    Clients use the same URL for HTTP and WS — Envoy routes WS upgrades
-    here based on the Upgrade header, not the path. The path is forwarded
-    to the upstream as-is (e.g., /v1/responses).
+    Envoy routes /ws/* paths to Portunus. The /ws/ prefix is stripped
+    and the remaining path is forwarded to the upstream
+    (e.g., /ws/v1/responses -> upstream /v1/responses).
 
     Authenticates the upgrade request, connects to the upstream WebSocket,
     and relays messages bidirectionally with per-message Kinesis logging.
