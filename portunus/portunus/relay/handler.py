@@ -23,16 +23,24 @@ from portunus.util import generate_iso_timestamp
 logger = logging.getLogger("api.access")
 
 
-# Headers to forward from client upgrade request to upstream.
-# Authorization is handled separately (replaced with real API key).
-# Hop-by-hop headers (Connection, Upgrade, etc.) are excluded.
-_FORWARDED_HEADERS = frozenset(
+# Headers NOT forwarded from client upgrade request to upstream.
+# Everything else passes through — avoids maintaining an allowlist
+# that would need updating for every new client/provider.
+_BLOCKED_HEADERS = frozenset(
     {
-        "sec-websocket-protocol",
-        "openai-beta",
-        "user-agent",
+        # Hop-by-hop (handled by websockets library on new connection)
+        "connection",
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        # Auth (replaced with real API key)
+        "authorization",
+        # Routing (specific to this proxy, not the upstream)
+        "host",
     }
 )
+_BLOCKED_HEADER_PREFIXES = ("x-portunus-",)
 
 
 async def handle_ws_connection(
@@ -126,12 +134,14 @@ async def handle_ws_connection(
     if query_string:
         upstream_uri += f"?{query_string}"
 
-    # Build upstream headers: real API key + forwarded client headers
+    # Build upstream headers: real API key + all client headers except blocked
     upstream_headers = {"Authorization": f"Bearer {ws_auth.api_key}"}
-    for header_name in _FORWARDED_HEADERS:
-        value = websocket.headers.get(header_name)
-        if value:
-            upstream_headers[header_name] = value
+    for key, value in websocket.headers.items():
+        if key in _BLOCKED_HEADERS:
+            continue
+        if any(key.startswith(p) for p in _BLOCKED_HEADER_PREFIXES):
+            continue
+        upstream_headers[key] = value
 
     try:
         upstream = await websockets.connect(
