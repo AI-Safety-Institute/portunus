@@ -117,9 +117,9 @@ async def test_generate_cache_key():
     payload = '{"credentials": {"access_key": "AKIA123", "secret_key": "SECRET"}, "secret_arn": "arn:aws:..."}'  # noqa: E501
     expected_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     generated_key = _cache_service.generate_cache_key(payload)
-    assert generated_key == expected_key, (
-        "Cache key generation failed for complex payload"
-    )
+    assert (
+        generated_key == expected_key
+    ), "Cache key generation failed for complex payload"
 
 
 @pytest.mark.asyncio
