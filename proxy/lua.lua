@@ -41,14 +41,8 @@ function envoy_on_request(request_handle)
 		return
 	end
 
-	-- Skip Lua processing for WebSocket upgrade requests.
-	-- These are routed to Portunus by Envoy's header-based route match
-	-- (Upgrade: websocket). Without this bypass, Lua would try to buffer
-	-- the request body and call /authorise, blocking the WS handshake.
-	local upgrade_header = request_handle:headers():get("upgrade")
-	if upgrade_header and upgrade_header:lower() == "websocket" then
-		return
-	end
+	-- Note: WebSocket upgrades never reach this filter — they are excluded
+	-- via typed_per_filter_config in envoy.yaml (disabled: true on the WS route).
 
 	-- Process the request with error handling
 	local ok, error = pcall(function()

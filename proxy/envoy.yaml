@@ -84,6 +84,12 @@ static_resources:
                   headers:
                   - name: "upgrade"
                     exact_match: "websocket"
+                # Disable Lua filter for WS — auth is handled by Portunus directly.
+                # Without this, Lua would buffer the body and block the WS handshake.
+                typed_per_filter_config:
+                  envoy.filters.http.lua:
+                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                    disabled: true
                 request_headers_to_add:
                 - header:
                     key: "${PORTUNUS_API_KEY_HEADER}"
