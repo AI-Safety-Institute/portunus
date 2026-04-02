@@ -109,19 +109,21 @@ function portunus_client:authorise(handle, auth_payload, content_digest)
 	)
 end
 
---- Logs request body to Portunus
--- @param handle Request handle
--- @param request_id Request ID
--- @param body Request body (raw bytes)
-function portunus_client:log_request_body(handle, request_id, body)
-	pcall(function()
+--- Makes an async log call to Portunus, logging errors instead of silently swallowing them.
+-- @param handle Request/response handle
+-- @param request_id Request ID for error context
+-- @param path URL path for the log endpoint
+-- @param content_type Content-Type header value
+-- @param body Request body (string or bytes)
+function portunus_client:_async_log(handle, request_id, path, content_type, body)
+	local ok, err = pcall(function()
 		handle:httpCall(
 			self.host,
 			{
 				[":method"] = "POST",
-				[":path"] = "/log/" .. request_id .. "/request/body",
+				[":path"] = path,
 				[":authority"] = self.host,
-				["content-type"] = "application/octet-stream",
+				["content-type"] = content_type,
 				[self.api_key_header] = self.api_key,
 			},
 			body,
@@ -129,6 +131,17 @@ function portunus_client:log_request_body(handle, request_id, body)
 			true -- async
 		)
 	end)
+	if not ok then
+		handle:logErr("[portunus] " .. request_id .. ": failed to log to " .. path .. ": " .. tostring(err))
+	end
+end
+
+--- Logs request body to Portunus
+-- @param handle Request handle
+-- @param request_id Request ID
+-- @param body Request body (raw bytes)
+function portunus_client:log_request_body(handle, request_id, body)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/body", "application/octet-stream", body)
 end
 
 --- Logs request headers to Portunus
@@ -140,21 +153,7 @@ function portunus_client:log_request_headers(handle, request_id, headers)
 		timestamp = os.time(),
 		headers = headers,
 	}
-	pcall(function()
-		handle:httpCall(
-			self.host,
-			{
-				[":method"] = "POST",
-				[":path"] = "/log/" .. request_id .. "/request/headers",
-				[":authority"] = self.host,
-				["content-type"] = "application/json",
-				[self.api_key_header] = self.api_key,
-			},
-			dkjson.encode(payload),
-			10000,
-			true -- async
-		)
-	end)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/headers", "application/json", dkjson.encode(payload))
 end
 
 --- Logs request trailers to Portunus
@@ -166,21 +165,7 @@ function portunus_client:log_request_trailers(handle, request_id, trailers)
 		timestamp = os.time(),
 		trailers = trailers,
 	}
-	pcall(function()
-		handle:httpCall(
-			self.host,
-			{
-				[":method"] = "POST",
-				[":path"] = "/log/" .. request_id .. "/request/trailers",
-				[":authority"] = self.host,
-				["content-type"] = "application/json",
-				[self.api_key_header] = self.api_key,
-			},
-			dkjson.encode(payload),
-			10000,
-			true -- async
-		)
-	end)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/trailers", "application/json", dkjson.encode(payload))
 end
 
 --- Logs response body to Portunus
@@ -188,21 +173,7 @@ end
 -- @param request_id Request ID
 -- @param body Response body (raw bytes)
 function portunus_client:log_response_body(handle, request_id, body)
-	pcall(function()
-		handle:httpCall(
-			self.host,
-			{
-				[":method"] = "POST",
-				[":path"] = "/log/" .. request_id .. "/response/body",
-				[":authority"] = self.host,
-				["content-type"] = "application/octet-stream",
-				[self.api_key_header] = self.api_key,
-			},
-			body,
-			10000,
-			true -- async
-		)
-	end)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/body", "application/octet-stream", body)
 end
 
 --- Logs response headers to Portunus
@@ -214,21 +185,7 @@ function portunus_client:log_response_headers(handle, request_id, headers)
 		timestamp = os.time(),
 		headers = headers,
 	}
-	pcall(function()
-		handle:httpCall(
-			self.host,
-			{
-				[":method"] = "POST",
-				[":path"] = "/log/" .. request_id .. "/response/headers",
-				[":authority"] = self.host,
-				["content-type"] = "application/json",
-				[self.api_key_header] = self.api_key,
-			},
-			dkjson.encode(payload),
-			10000,
-			true -- async
-		)
-	end)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/headers", "application/json", dkjson.encode(payload))
 end
 
 --- Logs response trailers to Portunus
@@ -240,21 +197,7 @@ function portunus_client:log_response_trailers(handle, request_id, trailers)
 		timestamp = os.time(),
 		trailers = trailers,
 	}
-	pcall(function()
-		handle:httpCall(
-			self.host,
-			{
-				[":method"] = "POST",
-				[":path"] = "/log/" .. request_id .. "/response/trailers",
-				[":authority"] = self.host,
-				["content-type"] = "application/json",
-				[self.api_key_header] = self.api_key,
-			},
-			dkjson.encode(payload),
-			10000,
-			true -- async
-		)
-	end)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/trailers", "application/json", dkjson.encode(payload))
 end
 
 --- Parses an ErrorResponse from Portunus service
