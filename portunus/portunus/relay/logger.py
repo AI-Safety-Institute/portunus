@@ -79,9 +79,7 @@ class LogQueue:
             try:
                 await _publish_message(item)
             except Exception as e:
-                logger.error(
-                    f"WS {item.request_id}: Log worker {worker_id} error: {e}"
-                )
+                logger.error(f"WS {item.request_id}: Log worker {worker_id} error: {e}")
             finally:
                 self._queue.task_done()
 
