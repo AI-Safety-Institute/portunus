@@ -15,7 +15,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from portunus.config import config
 from portunus.relay import WsCloseCode
 from portunus.relay.auth import authenticate_ws
-from portunus.relay.logger import fire_and_forget_log, log_ws_headers, log_ws_summary
+from portunus.relay.logger import enqueue_log, log_ws_headers, log_ws_summary
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_service import PublishService
 from portunus.util import generate_iso_timestamp
@@ -169,7 +169,7 @@ async def handle_ws_connection(
                 else:
                     break
 
-                fire_and_forget_log(
+                await enqueue_log(
                     publish_service,
                     request_id,
                     "client_to_upstream",
@@ -194,7 +194,7 @@ async def handle_ws_connection(
                     message_bytes = raw_message.encode("utf-8")
                     await websocket.send_text(raw_message)
 
-                fire_and_forget_log(
+                await enqueue_log(
                     publish_service,
                     request_id,
                     "upstream_to_client",

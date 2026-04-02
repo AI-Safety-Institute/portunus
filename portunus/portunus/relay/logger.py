@@ -61,18 +61,13 @@ class LogQueue:
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
-    def enqueue(self, item: _LogItem) -> None:
-        """Enqueue a log item without blocking the relay loop.
+    async def enqueue(self, item: _LogItem) -> None:
+        """Enqueue a log item.
 
-        Drops the item if the queue is full (better than blocking the relay).
+        If the queue is full, blocks until space is available. This applies
+        backpressure to the relay loop rather than dropping log data.
         """
-        try:
-            self._queue.put_nowait(item)
-        except asyncio.QueueFull:
-            logger.warning(
-                f"WS {item.request_id}: Log queue full, dropping message "
-                f"{item.message_index}"
-            )
+        await self._queue.put(item)
 
     async def _worker(self, worker_id: int) -> None:
         """Process log items from the queue."""
@@ -222,20 +217,21 @@ async def log_ws_summary(
         logger.error(f"WS {request_id}: Failed to log connection summary: {e}")
 
 
-def fire_and_forget_log(
+async def enqueue_log(
     publish_service: PublishService,
     request_id: str,
     direction: WsDirection,
     message_data: bytes,
     message_index: int,
 ) -> None:
-    """Enqueue message logging without blocking the relay loop.
+    """Enqueue message logging.
 
-    If the log queue isn't running (e.g. in tests), falls back to
-    creating an asyncio task directly.
+    If the queue is full, applies backpressure (blocks until space
+    is available) rather than dropping log data. If the log queue
+    isn't running (e.g. in tests), publishes directly.
     """
     if _log_queue is not None:
-        _log_queue.enqueue(
+        await _log_queue.enqueue(
             _LogItem(
                 publish_service=publish_service,
                 request_id=request_id,
@@ -245,8 +241,6 @@ def fire_and_forget_log(
             )
         )
     else:
-        asyncio.create_task(
-            log_ws_message(
-                publish_service, request_id, direction, message_data, message_index
-            )
+        await log_ws_message(
+            publish_service, request_id, direction, message_data, message_index
         )
