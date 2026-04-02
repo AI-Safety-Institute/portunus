@@ -31,6 +31,7 @@ from portunus.models import (
 )
 from portunus.relay import WsCloseCode
 from portunus.relay.handler import handle_ws_connection
+from portunus.relay.logger import start_log_queue, stop_log_queue
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.publish_service import PublishService
@@ -511,9 +512,14 @@ async def ping(request: Request) -> dict:
 async def lifespan(app: FastAPI):
     """Manage application lifecycle.
 
-    Drains active WS connections and cleans up Redis on shutdown.
+    Starts the WS log queue on startup, drains active WS connections
+    and cleans up Redis on shutdown.
     """
+    await start_log_queue(num_workers=config.relay.max_connections)
     yield
+
+    # Stop log queue (drains pending items)
+    await stop_log_queue()
 
     # Signal active WebSocket connections to shut down
     if _active_ws_connections:
