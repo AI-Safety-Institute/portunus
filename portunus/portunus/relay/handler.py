@@ -140,6 +140,7 @@ async def _publish_connection_metadata(
     websocket: WebSocket,
     ws_auth: WsAuthResult,
     request_id: str,
+    upstream_host: str,
 ) -> None:
     """Log upgrade headers and publish metadata on connection open."""
     # Log upgrade request headers (parity with HTTP header logging).
@@ -149,6 +150,9 @@ async def _publish_connection_metadata(
         for k, v in websocket.headers.items()
         if not k.startswith("x-portunus-") and k != "authorization"
     }
+    # Include upstream authority so downstream consumers can identify
+    # which API provider handled the request.
+    upgrade_headers["authority"] = upstream_host
     await log_ws_headers(publish_service, request_id, upgrade_headers)
 
     # Publish metadata
@@ -301,7 +305,9 @@ async def handle_ws_connection(
         f"WS {request_id}: Connection accepted, connecting upstream " f"to /{path}"
     )
 
-    await _publish_connection_metadata(publish_service, websocket, ws_auth, request_id)
+    await _publish_connection_metadata(
+        publish_service, websocket, ws_auth, request_id, target.host
+    )
 
     upstream = await _connect_upstream(
         target,
