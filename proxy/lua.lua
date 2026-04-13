@@ -41,6 +41,14 @@ function envoy_on_request(request_handle)
 		return
 	end
 
+	-- Skip Lua processing for WebSocket upgrade requests.
+	-- The WS route also disables Lua via typed_per_filter_config in envoy.yaml,
+	-- but this check is kept as a safety net.
+	local upgrade_header = request_handle:headers():get("upgrade")
+	if upgrade_header and upgrade_header:lower() == "websocket" then
+		return
+	end
+
 	-- Process the request with error handling
 	local ok, error = pcall(function()
 		-- Get full request body - we need to buffer the entire request

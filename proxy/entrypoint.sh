@@ -22,16 +22,13 @@ EOF
   )
 fi
 
-# PORTUNUS_HOST_HTTP2_OPTIONS
-if [ -z "$PORTUNUS_HOST_HTTP2_OPTIONS" ]; then
-  export PORTUNUS_HOST_HTTP2_OPTIONS=$(yq -o json <<EOF
-connection_keepalive:
-  interval: "60s"
-  timeout: "10s"
-  connection_idle_interval: "10s"
-EOF
-  )
-fi
+# PORTUNUS_HOST_HTTP2_OPTIONS is intentionally absent — the Portunus cluster
+# must stay HTTP/1.1 for WebSocket Upgrade support (RFC 7540 §8.1.2.2).
+
+# WS_TARGET_HOST defaults to TARGET_HOST — in production they're the same
+# (e.g., api.openai.com handles both HTTP and WS). Override in local dev
+# to point WS to a separate echo server.
+export WS_TARGET_HOST=${WS_TARGET_HOST:-$TARGET_HOST}
 
 # TARGET_HOST_TRANSPORT_SOCKET
 if [ -z "$TARGET_HOST_TRANSPORT_SOCKET" ]; then
@@ -49,12 +46,17 @@ EOF
 fi
 
 # PORTUNUS_TRANSPORT_SOCKET
+# Force HTTP/1.1 via ALPN — WebSocket Upgrade requires HTTP/1.1 and will
+# silently fail if the TLS connection negotiates HTTP/2.
 if [ -z "$PORTUNUS_TRANSPORT_SOCKET" ]; then
   export PORTUNUS_TRANSPORT_SOCKET=$(yq -o json <<EOF
 name: envoy.transport_sockets.tls
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
   sni: $PORTUNUS_HOST
+  common_tls_context:
+    alpn_protocols:
+      - http/1.1
 EOF
   )
 fi

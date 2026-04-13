@@ -260,13 +260,18 @@ describe("proxy_utils.portunus", function()
 
 	describe("error handling", function()
 		it("should not throw errors if httpCall fails for async log methods", function()
+			local logged_errors = {}
 			local handle = {
 				httpCall = function()
 					error("Network failure")
 				end,
+				logErr = function(_, msg)
+					table.insert(logged_errors, msg)
+				end,
 			}
 
 			-- All async log methods should handle errors gracefully via pcall
+			-- and log the error via handle:logErr
 			assert.has_no_errors(function()
 				portunus_client:log_request_body(handle, "req-1", "body")
 			end)
@@ -276,6 +281,12 @@ describe("proxy_utils.portunus", function()
 			assert.has_no_errors(function()
 				portunus_client:log_response_body(handle, "req-3", "body")
 			end)
+
+			-- Errors should be logged, not silently swallowed
+			assert.is_true(#logged_errors == 3, "Expected 3 logged errors, got " .. #logged_errors)
+			for _, msg in ipairs(logged_errors) do
+				assert.is_truthy(msg:find("failed to log"))
+			end
 		end)
 
 		it("should propagate errors from synchronous authorise method", function()

@@ -66,12 +66,53 @@ static_resources:
           # Without this, connections would time out after 5 minutes of inactivity
           # Ref: https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts#stream-timeouts
           stream_idle_timeout: 3600s
+          upgrade_configs:
+          - upgrade_type: websocket
           route_config:
             name: local_route
             virtual_hosts:
             - name: local_service
               domains: ["*"]
               routes:
+              # WebSocket requests route to Portunus via /ws/ prefix.
+              # Envoy injects the proxy's target host so Portunus knows where to
+              # connect upstream. OVERWRITE prevents clients from spoofing the target.
+              # Note: header-based matching (Upgrade: websocket) would be cleaner
+              # but requires ALB/nginx WebSocket support on all paths. Using /ws/
+              # prefix for now as it's proven to work with the current infra.
+              - match:
+                  prefix: "/ws/"
+                # Disable Lua filter for WS — auth is handled by Portunus directly.
+                typed_per_filter_config:
+                  envoy.filters.http.lua:
+                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                    disabled: true
+                request_headers_to_add:
+                - header:
+                    key: "${PORTUNUS_API_KEY_HEADER}"
+                    value: "${PORTUNUS_API_KEY}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header:
+                    key: "x-portunus-target-host"
+                    value: "${WS_TARGET_HOST}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header:
+                    key: "x-portunus-target-port"
+                    value: "${TARGET_PORT}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header:
+                    key: "x-portunus-target-use-tls"
+                    value: "${TARGET_HOST_USE_TLS}"
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                route:
+                  cluster: ${PORTUNUS_HOST}
+                  timeout: 0s
+                  # Rewrite Host so the shared ALB routes to the Portunus service,
+                  # not back to this proxy (which would loop until XFF hits 30 IPs → 463).
+                  host_rewrite_literal: "${PORTUNUS_HOST}"
+                  upgrade_configs:
+                  - upgrade_type: websocket
+              # Default HTTP route through Lua filter
               - match:
                   prefix: "/"
                 route:
@@ -166,7 +207,9 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    http2_protocol_options: ${PORTUNUS_HOST_HTTP2_OPTIONS}
+    # Must stay HTTP/1.1 — WebSocket relay uses the traditional Upgrade mechanism
+    # which is forbidden in HTTP/2 (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441)
+    # would work but uvicorn doesn't support it. Do not add http2_protocol_options here.
     load_assignment:
       cluster_name: ${PORTUNUS_HOST}
       endpoints:

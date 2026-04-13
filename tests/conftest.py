@@ -102,6 +102,19 @@ def docker_setup(request, compose_file):
     time.sleep(5)  # Add extra time for services to initialize
 
     if result.returncode != 0:
+        # Dump localstack logs for debugging before failing
+        if os.environ.get("DUMP_DOCKER_LOGS_ON_FAILURE"):
+            import sys as _sys
+
+            for name in ["localstack-main", "portunus", "portunus-proxy-1"]:
+                logs = subprocess.run(
+                    ["docker", "logs", "--tail=80", name],
+                    capture_output=True,
+                    text=True,
+                )
+                _sys.stderr.write(
+                    f"\n=== {name} logs ===\n{logs.stdout}\n{logs.stderr}\n"
+                )
         pytest.fail(f"Failed to start Docker containers: {result.stderr}")  # type: ignore[invalid-argument-type]
 
     # If a custom secret value was specified, update it in LocalStack

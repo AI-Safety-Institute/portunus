@@ -18,3 +18,5 @@ jobs:
 
       - name: Test with pytest
         run: uv run pytest -rA -x --color=yes
+        env:
+          DUMP_DOCKER_LOGS_ON_FAILURE: "true"
