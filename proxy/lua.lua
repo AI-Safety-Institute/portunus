@@ -18,8 +18,9 @@ local config = {
 	cors_allowed_origins = "${CORS_ALLOWED_ORIGINS}",
 }
 
--- Parse CORS allowed origins. Supports exact origins and wildcard domains
--- (e.g. "*.aisi.org.uk" matches "https://hub.apps.aisi.org.uk").
+-- Parse CORS allowed origins. Supports exact origins and prefix wildcard domains
+-- (e.g. "*.example.com" matches "https://hub.apps.example.com").
+-- Only "*.domain" wildcards are supported — wildcards in other positions are treated as literals.
 -- Empty string means CORS is disabled (backwards compatible).
 local cors_exact = {}
 local cors_wildcard_suffixes = {}
@@ -51,8 +52,8 @@ local function get_allowed_origin(request_handle)
 	if cors_exact[origin] then
 		return origin
 	end
-	-- Extract host from origin (e.g. "https://hub.apps.aisi.org.uk" → "hub.apps.aisi.org.uk")
-	local host = origin:match("^https?://([^:/]+)")
+	-- Extract host from origin (e.g. "https://hub.apps.example.com" → "hub.apps.example.com")
+	local host = origin:match("^https://([^:/]+)")
 	if host then
 		for _, suffix in ipairs(cors_wildcard_suffixes) do
 			if host:sub(-#suffix) == suffix then
@@ -98,12 +99,14 @@ function envoy_on_request(request_handle)
 	-- Handle CORS preflight (OPTIONS) requests
 	local allowed_origin = get_allowed_origin(request_handle)
 	if request_handle:headers():get(":method") == "OPTIONS" and allowed_origin then
+		local requested_headers = request_handle:headers():get("access-control-request-headers") or ""
 		request_handle:respond({
 			[":status"] = "204",
 			["access-control-allow-origin"] = allowed_origin,
 			["access-control-allow-methods"] = "GET, POST, PUT, DELETE, OPTIONS",
-			["access-control-allow-headers"] = "authorization, content-type",
+			["access-control-allow-headers"] = requested_headers,
 			["access-control-max-age"] = "3600",
+			["vary"] = "Origin",
 		}, "")
 		return
 	end
@@ -235,7 +238,8 @@ function envoy_on_response(response_handle)
 
 		-- Add CORS headers if the request origin was allowed
 		if cors_origin then
-			response_handle:headers():add("access-control-allow-origin", cors_origin)
+			response_handle:headers():replace("access-control-allow-origin", cors_origin)
+			response_handle:headers():replace("vary", "Origin")
 		end
 
 		if not request_id then

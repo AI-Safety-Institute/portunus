@@ -45,6 +45,7 @@ function portunus_client:send_error_response(request_handle, status_code, messag
 	}
 	if cors_origin then
 		headers["access-control-allow-origin"] = cors_origin
+		headers["vary"] = "Origin"
 	end
 	request_handle:respond(
 		headers,
