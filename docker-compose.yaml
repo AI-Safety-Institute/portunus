@@ -70,7 +70,6 @@ services:
       TARGET_HOST_HTTP2_OPTIONS: "null"
       TARGET_HOST_TRANSPORT_SOCKET: "null"
       TARGET_HOST_USE_TLS: "false"
-      PORTUNUS_HOST_HTTP2_OPTIONS: "null"
       PORTUNUS_TRANSPORT_SOCKET: "null"
       DOWNSTREAM_TLS_TRANSPORT_SOCKET: "null"
       API_KEY_HEADER: authorization
@@ -80,6 +79,7 @@ services:
       PORTUNUS_PORT: 8080
       TARGET_HOST: http-bun
       TARGET_PORT: 80
+      WS_TARGET_HOST: ws-echo  # Override for local WS testing (defaults to TARGET_HOST in prod)
       ENVOY_LOG_LEVEL: info
       AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
       # Uncomment the three env vars below to
@@ -149,6 +149,15 @@ services:
       KINESIS_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
       KINESIS_RESPONSE_BODY_STREAM: portunus-stream-response-body
       KINESIS_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
+
+  ws-echo:
+    build: ws-echo
+    container_name: ws-echo
+    init: true
+    networks:
+      app_network:
+    environment:
+      PORT: "80"
 
   http-bin:
     image: sharat87/httpbun

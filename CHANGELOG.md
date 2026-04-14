@@ -3,6 +3,22 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0]
+
+### Changed
+- WebSocket routing uses `Upgrade: websocket` header matching instead of
+  `/ws/` path prefix. Clients can now upgrade on any path (e.g.,
+  `/v1/responses`) without a special prefix.
+
+## [0.3.0]
+
+### Added
+- WebSocket relay endpoint (`/ws/*`) with auth and per-message Kinesis logging.
+- `ws-echo` echo server for load testing.
+
+### Changed
+- Lua filter now logs async errors instead of swallowing them.
+
 ## [0.2.0]
 
 ### Added
@@ -33,6 +49,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
+[0.4.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/UKGovernmentBEIS/portunus/releases/tag/v0.1.0
