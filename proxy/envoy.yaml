@@ -74,14 +74,16 @@ static_resources:
             - name: local_service
               domains: ["*"]
               routes:
-              # WebSocket requests route to Portunus via /ws/ prefix.
-              # Envoy injects the proxy's target host so Portunus knows where to
-              # connect upstream. OVERWRITE prevents clients from spoofing the target.
-              # Note: header-based matching (Upgrade: websocket) would be cleaner
-              # but requires ALB/nginx WebSocket support on all paths. Using /ws/
-              # prefix for now as it's proven to work with the current infra.
+              # WebSocket upgrades on any path route to the Portunus WS relay.
+              # Envoy matches the Upgrade header before falling through to the
+              # default HTTP route. Portunus handles auth and relays messages
+              # to the upstream target with per-message Kinesis logging.
               - match:
-                  prefix: "/ws/"
+                  prefix: "/"
+                  headers:
+                  - name: "upgrade"
+                    string_match:
+                      exact: "websocket"
                 # Disable Lua filter for WS — auth is handled by Portunus directly.
                 typed_per_filter_config:
                   envoy.filters.http.lua:
