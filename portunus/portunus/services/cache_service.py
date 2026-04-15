@@ -272,6 +272,30 @@ class CacheService:
             return False
 
     @xray_recorder.capture_async()  # type: ignore
+    async def flush_all(self) -> bool:
+        """
+        Flush the entire auth cache.
+
+        Returns:
+            True if successfully flushed, False on error.
+
+        Raises:
+            CacheError: If there's an error flushing the cache.
+        """
+        client = await self.state_service.acquire_redis_connection()
+        if not client:
+            logger.warning("Redis client unavailable for cache flush")
+            return False
+
+        try:
+            await client.flushdb()
+            logger.info("Flushed all auth cache entries")
+            return True
+        except Exception as e:
+            logger.error(f"Error flushing cache: {e}")
+            raise CacheError(f"Failed to flush cache: {e}")
+
+    @xray_recorder.capture_async()  # type: ignore
     async def health_check(self) -> bool:
         """
         Check if Redis cache is available.
