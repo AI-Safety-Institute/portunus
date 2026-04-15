@@ -15,7 +15,54 @@ local config = {
 	target_host = "${TARGET_HOST}",
 	target_host_use_tls = "${TARGET_HOST_USE_TLS}",
 	header_prefix = "${PORTUNUS_HEADER_PREFIX}",
+	cors_allowed_origins = "${CORS_ALLOWED_ORIGINS}",
 }
+
+-- Parse CORS allowed origins. Supports exact origins and prefix wildcard domains
+-- (e.g. "*.example.com" matches "https://hub.apps.example.com").
+-- Only "*.domain" wildcards are supported — wildcards in other positions are treated as literals.
+-- Empty string means CORS is disabled (backwards compatible).
+local cors_exact = {}
+local cors_wildcard_suffixes = {}
+local cors_enabled = false
+if config.cors_allowed_origins ~= "" then
+	for origin in config.cors_allowed_origins:gmatch("[^,]+") do
+		local trimmed = origin:match("^%s*(.-)%s*$")
+		if trimmed ~= "" then
+			cors_enabled = true
+			if trimmed:sub(1, 2) == "*." then
+				-- "*.example.com" → match any origin whose host ends with ".example.com"
+				cors_wildcard_suffixes[#cors_wildcard_suffixes + 1] = trimmed:sub(2)  -- ".example.com"
+			else
+				cors_exact[trimmed] = true
+			end
+		end
+	end
+end
+
+--- Returns the origin if it is allowed, or nil if not.
+local function get_allowed_origin(request_handle)
+	if not cors_enabled then
+		return nil
+	end
+	local origin = request_handle:headers():get("origin")
+	if not origin then
+		return nil
+	end
+	if cors_exact[origin] then
+		return origin
+	end
+	-- Extract host from origin (e.g. "https://hub.apps.example.com" → "hub.apps.example.com")
+	local host = origin:match("^https://([^:/]+)")
+	if host then
+		for _, suffix in ipairs(cors_wildcard_suffixes) do
+			if host:sub(-#suffix) == suffix then
+				return origin
+			end
+		end
+	end
+	return nil
+end
 
 -- Instantiate Portunus client with configuration
 local portunus = proxy_utils.portunus.new(config)
@@ -49,6 +96,28 @@ function envoy_on_request(request_handle)
 		return
 	end
 
+	-- Handle CORS preflight (OPTIONS) requests
+	local allowed_origin = get_allowed_origin(request_handle)
+	if request_handle:headers():get(":method") == "OPTIONS" and allowed_origin then
+		local requested_headers = request_handle:headers():get("access-control-request-headers") or ""
+		request_handle:respond({
+			[":status"] = "204",
+			["access-control-allow-origin"] = allowed_origin,
+			["access-control-allow-methods"] = "GET, POST, PUT, DELETE, OPTIONS",
+			["access-control-allow-headers"] = requested_headers,
+			["access-control-max-age"] = "3600",
+			["vary"] = "Origin",
+		}, "")
+		return
+	end
+
+	-- Store allowed origin in metadata for the response handler
+	if allowed_origin then
+		request_handle:streamInfo():dynamicMetadata():set(
+			"envoy.filters.http.lua", "cors_origin", allowed_origin
+		)
+	end
+
 	-- Process the request with error handling
 	local ok, error = pcall(function()
 		-- Get full request body - we need to buffer the entire request
@@ -76,7 +145,7 @@ function envoy_on_request(request_handle)
 		if err then
 			-- If no valid authorization header, return 401
 			-- No trace ID is available at this point
-			portunus:send_error_response(request_handle, 401, err, "unknown")
+			portunus:send_error_response(request_handle, 401, err, "unknown", allowed_origin)
 			return
 		end
 
@@ -85,7 +154,7 @@ function envoy_on_request(request_handle)
 
 		-- If headers are nil, then there was some kind of network error
 		if not headers then
-			portunus:send_error_response(request_handle, 502, "Authorization service unreachable", "unknown")
+			portunus:send_error_response(request_handle, 502, "Authorization service unreachable", "unknown", allowed_origin)
 			return
 		end
 
@@ -93,14 +162,14 @@ function envoy_on_request(request_handle)
 		if headers[":status"] ~= "200" then
 			-- Pass through auth service errors with appropriate status code
 			local error_message, request_id = portunus:parse_error_response(body)
-			portunus:send_error_response(request_handle, headers[":status"], error_message, request_id)
+			portunus:send_error_response(request_handle, headers[":status"], error_message, request_id, allowed_origin)
 			return
 		end
 
 		-- Otherwise, parse successful authorization response
 		local auth_response, err = portunus:parse_authorization_response(body)
 		if err then
-			portunus:send_error_response(request_handle, 500, err, "unknown")
+			portunus:send_error_response(request_handle, 500, err, "unknown", allowed_origin)
 			return
 		end
 
@@ -145,7 +214,7 @@ function envoy_on_request(request_handle)
 
 	if not ok then
 		logging.err(request_handle, "ERROR: " .. error)
-		portunus:send_error_response(request_handle, 500, "Internal proxy error", "unknown")
+		portunus:send_error_response(request_handle, 500, "Internal proxy error", "unknown", allowed_origin)
 	end
 end
 
@@ -158,11 +227,19 @@ function envoy_on_response(response_handle)
 	-- 5. Logs response body, headers, and trailers
 
 	local ok, error = pcall(function()
-		-- Get the request_id that was stored after successful authorization
+		-- Get metadata stored during request processing
 		local metadata = response_handle:streamInfo():dynamicMetadata():get("envoy.filters.http.lua")
 		local request_id = nil
-		if metadata and metadata["request_id"] then
+		local cors_origin = nil
+		if metadata then
 			request_id = metadata["request_id"]
+			cors_origin = metadata["cors_origin"]
+		end
+
+		-- Add CORS headers if the request origin was allowed
+		if cors_origin then
+			response_handle:headers():replace("access-control-allow-origin", cors_origin)
+			response_handle:headers():replace("vary", "Origin")
 		end
 
 		if not request_id then
