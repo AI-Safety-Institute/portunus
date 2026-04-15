@@ -53,9 +53,7 @@ class TestCacheFlush:
     @pytest.mark.asyncio
     async def test_flush_redis_error(self, client, mock_xray):
         with patch("portunus.app.cache_service") as mock_cache:
-            mock_cache.flush_all = AsyncMock(
-                side_effect=CacheError("connection reset")
-            )
+            mock_cache.flush_all = AsyncMock(side_effect=CacheError("connection reset"))
             resp = await client.post("/cache/flush")
 
         assert resp.status_code == 500
@@ -65,9 +63,7 @@ class TestCacheFlush:
     @pytest.mark.asyncio
     async def test_flush_returns_debug_id(self, client, mock_xray):
         with patch("portunus.app.cache_service") as mock_cache:
-            mock_cache.flush_all = AsyncMock(
-                side_effect=CacheError("boom")
-            )
+            mock_cache.flush_all = AsyncMock(side_effect=CacheError("boom"))
             resp = await client.post("/cache/flush")
 
         assert resp.status_code == 500
