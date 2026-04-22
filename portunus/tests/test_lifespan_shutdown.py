@@ -261,6 +261,6 @@ async def test_stragglers_are_logged_at_warning(reset_active_connections, caplog
         await _run_lifespan(drain_timeout=0.1)
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("Force-closing" in r.getMessage() for r in warnings), (
-        f"expected a WARNING about force-closing stragglers, got {warnings}"
-    )
+    assert any(
+        "Force-closing" in r.getMessage() for r in warnings
+    ), f"expected a WARNING about force-closing stragglers, got {warnings}"

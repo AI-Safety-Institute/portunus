@@ -629,8 +629,7 @@ async def lifespan(app: FastAPI):
                     )
 
             logger.info(
-                f"WebSocket drain complete, {len(_active_ws_connections)} "
-                f"remaining"
+                f"WebSocket drain complete, {len(_active_ws_connections)} " f"remaining"
             )
     finally:
         # Always drain the log queue — if Phase 1's asyncio.wait itself

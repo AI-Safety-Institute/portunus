@@ -241,12 +241,8 @@ async def _relay(
 
     close_code = WsCloseCode.NORMAL
     tasks: list[asyncio.Task] = [
-        asyncio.create_task(
-            client_to_upstream(), name=f"ws-{request_id}-c2u"
-        ),
-        asyncio.create_task(
-            upstream_to_client(), name=f"ws-{request_id}-u2c"
-        ),
+        asyncio.create_task(client_to_upstream(), name=f"ws-{request_id}-c2u"),
+        asyncio.create_task(upstream_to_client(), name=f"ws-{request_id}-u2c"),
     ]
     try:
         async with asyncio.timeout(max_lifetime):
@@ -391,9 +387,7 @@ async def handle_ws_connection(
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        logger.debug(
-            f"WS {request_id}: client close error (expected on drain): {e!r}"
-        )
+        logger.debug(f"WS {request_id}: client close error (expected on drain): {e!r}")
 
     logger.info(
         f"WS {request_id}: Connection closed after {duration:.1f}s. "
