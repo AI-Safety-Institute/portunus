@@ -178,8 +178,13 @@ class RelayConfig(BaseModel):
         ge=1,
     )
     drain_timeout: int = Field(
-        default=10,
-        description="Seconds to wait for WS connections to drain on shutdown",
+        default=25,
+        description=(
+            "Seconds to wait for active WS connections to finish naturally "
+            "on shutdown before force-cancelling. Must fit comfortably "
+            "within the container stop_timeout (ECS default 30s) with room "
+            "for the force-close window and log queue drain."
+        ),
         ge=0,
     )
 

@@ -3,6 +3,23 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- Graceful WebSocket drain on shutdown. Active relay tasks are now
+  given `drain_timeout` seconds to finish on their own — an in-flight
+  LLM response streaming through the relay will complete at its natural
+  `response.completed` boundary instead of being cut short by an
+  immediate `task.cancel()`. Only tasks still holding an open socket
+  after the deadline are force-cancelled, and their cleanup path still
+  sends a 1001 GOING_AWAY close frame plus a summary Kinesis record.
+- `drain_timeout` default raised from 10s to 25s to give typical
+  LLM responses time to finish within the ECS stop grace period.
+- `_relay` now guarantees that its inner `client_to_upstream` /
+  `upstream_to_client` tasks are cancelled and awaited in a `finally`
+  block, so an outer cancel (e.g. during shutdown) can never orphan
+  them against a closing socket.
+
 ## [0.5.0]
 
 ### Added

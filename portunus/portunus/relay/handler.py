@@ -240,29 +240,47 @@ async def _relay(
             logger.error(f"WS {request_id}: Upstream->client error: {e}")
 
     close_code = WsCloseCode.NORMAL
+    tasks: list[asyncio.Task] = [
+        asyncio.create_task(
+            client_to_upstream(), name=f"ws-{request_id}-c2u"
+        ),
+        asyncio.create_task(
+            upstream_to_client(), name=f"ws-{request_id}-u2c"
+        ),
+    ]
     try:
         async with asyncio.timeout(max_lifetime):
-            tasks = [
-                asyncio.create_task(client_to_upstream()),
-                asyncio.create_task(upstream_to_client()),
-            ]
-            done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     except TimeoutError:
         close_code = WsCloseCode.GOING_AWAY
         logger.info(
-            f"WS {request_id}: Connection lifetime limit reached " f"({max_lifetime}s)"
+            f"WS {request_id}: Connection lifetime limit reached ({max_lifetime}s)"
         )
     except asyncio.CancelledError:
         close_code = WsCloseCode.GOING_AWAY
         logger.info(f"WS {request_id}: Connection cancelled (server draining)")
+    finally:
+        # Always cancel any still-running relay task so it cannot
+        # continue to read/write after we return. Without this, an
+        # outer cancel (e.g. lifespan drain) would orphan the inner
+        # tasks and they'd keep running against a closing socket.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # `gather(return_exceptions=True)` absorbs EVERYTHING; surface
+        # non-cancellation errors so a genuine bug in the inner tasks
+        # isn't invisible. The inner coroutines already log their own
+        # expected exceptions (WebSocketDisconnect, ConnectionClosed),
+        # so anything reaching here is unexpected.
+        for task, result in zip(tasks, results):
+            if isinstance(result, (asyncio.CancelledError, type(None))):
+                continue
+            if isinstance(result, BaseException):
+                logger.error(
+                    f"WS {request_id}: {task.get_name()} raised unexpectedly: "
+                    f"{result!r}"
+                )
 
     return client_msg_index, upstream_msg_index, close_code
 
@@ -335,22 +353,47 @@ async def handle_ws_connection(
 
     # Log summary and clean up
     duration = time.monotonic() - connection_start
-    await log_ws_summary(
-        publish_service,
-        request_id,
-        client_msgs,
-        upstream_msgs,
-        duration,
-    )
+
+    # Shield the summary publish so that if the outer task is cancelled
+    # at this point (e.g. during the lifespan Phase-2 force-close),
+    # the Kinesis summary record still lands. aisitok uses this record
+    # as the session row for WS traffic — dropping it would orphan all
+    # the per-message body chunks published during the session.
+    try:
+        await asyncio.shield(
+            log_ws_summary(
+                publish_service,
+                request_id,
+                client_msgs,
+                upstream_msgs,
+                duration,
+            )
+        )
+    except asyncio.CancelledError:
+        # The shield absorbed our cancel; the summary publish is still
+        # running in the background and will complete (log queue is
+        # drained last in lifespan). Re-raise so the task still ends.
+        logger.info(f"WS {request_id}: summary publish shielded past cancel")
+        raise
+    except Exception as e:  # defensive — log_ws_summary already catches
+        logger.error(f"WS {request_id}: summary publish failed: {e}")
 
     try:
         await upstream.close()
-    except Exception:
-        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug(
+            f"WS {request_id}: upstream close error (expected on drain): {e!r}"
+        )
     try:
         await websocket.close(code=close_code)
-    except Exception:
-        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug(
+            f"WS {request_id}: client close error (expected on drain): {e!r}"
+        )
 
     logger.info(
         f"WS {request_id}: Connection closed after {duration:.1f}s. "
