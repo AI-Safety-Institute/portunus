@@ -35,14 +35,20 @@ end
 -- @param status_code HTTP status code to return
 -- @param message Error message to include in response
 -- @param request_id Request ID for tracing
-function portunus_client:send_error_response(request_handle, status_code, message, request_id)
+-- @param cors_origin Optional allowed CORS origin to include in response headers
+function portunus_client:send_error_response(request_handle, status_code, message, request_id, cors_origin)
+	local headers = {
+		[":status"] = tostring(status_code),
+		["content-type"] = "application/json; charset=utf-8",
+		["x-" .. self.header_prefix .. "-error"] = "true",
+		["X-Amzn-Trace-Id"] = request_id,
+	}
+	if cors_origin then
+		headers["access-control-allow-origin"] = cors_origin
+		headers["vary"] = "Origin"
+	end
 	request_handle:respond(
-		{
-			[":status"] = tostring(status_code),
-			["content-type"] = "application/json; charset=utf-8",
-			["x-" .. self.header_prefix .. "-error"] = "true",
-			["X-Amzn-Trace-Id"] = request_id,
-		},
+		headers,
 		dkjson.encode({
 			error = {
 				message = message,
