@@ -3,6 +3,21 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.0]
+
+### Added
+- `POST /cache/flush` endpoint that invalidates all cached auth responses
+  via Redis `FLUSHDB`, for use when an API key is suspected compromised.
+- Opt-in CORS support via `CORS_ALLOWED_ORIGINS`. Supports exact origins
+  and wildcard suffix matching (e.g. `*.example.com`). Implemented in the
+  Envoy Lua filter — handles OPTIONS preflight directly and adds
+  `Access-Control-Allow-Origin` to proxied and error responses. When
+  unset, behaviour is unchanged.
+
+### Fixed
+- Switch CI to `localstack/localstack:community-archive`; the default
+  image now requires an auth token.
+
 ## [0.4.0]
 
 ### Changed
@@ -49,6 +64,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
+[0.5.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.1.1...v0.2.0

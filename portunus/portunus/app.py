@@ -488,6 +488,59 @@ async def ws_relay(websocket: WebSocket, path: str):
             _active_ws_connections.discard(task)
 
 
+class CacheFlushResponse(BaseModel):
+    """Response model for cache flush operations.
+
+    Attributes:
+        message: Status message
+        success: Whether the flush succeeded
+    """
+
+    message: str
+    success: bool
+
+
+@portunus_router.post("/cache/flush")
+async def flush_cache(
+    response: Response,
+) -> CacheFlushResponse | ErrorResponse:
+    """
+    Flush the entire auth cache.
+
+    This endpoint removes all cached authentication responses from Redis,
+    forcing all subsequent requests to re-authenticate via AWS. Use this
+    when a cached API key may have been compromised.
+
+    Returns:
+        CacheFlushResponse on success, ErrorResponse on failure.
+    """
+    segment = xray_service.recorder.current_segment()
+    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    logger.info(f"Cache flush requested, trace_id: {trace_id}")
+
+    try:
+        success = await cache_service.flush_all()
+        if success:
+            logger.info(f"Cache flush completed successfully, trace_id: {trace_id}")
+            return CacheFlushResponse(
+                message="Auth cache flushed successfully",
+                success=True,
+            )
+        else:
+            response.status_code = 503
+            return ErrorResponse(
+                message="Redis unavailable for cache flush",
+                debug_id=trace_id,
+            )
+    except Exception as e:
+        logger.error(f"Cache flush failed: {e}, trace_id: {trace_id}")
+        response.status_code = 500
+        return ErrorResponse(
+            message="Failed to flush cache",
+            debug_id=trace_id,
+        )
+
+
 @common_router.get("/ping")
 async def ping(request: Request) -> dict:
     """
