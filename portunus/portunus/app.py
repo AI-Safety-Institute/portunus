@@ -577,70 +577,109 @@ async def lifespan(app: FastAPI):
     Drain strategy: wait up to ``drain_timeout`` for each relay task to
     finish on its own. An in-flight LLM response reaching its natural
     end (upstream closes after ``response.completed``) is the fast path
-    — the task exits, a clean close frame goes to the client, and the
-    summary record lands in Kinesis. Only tasks that are still holding
-    an open connection after the deadline are cancelled; cancellation
-    still produces a 1001 GOING_AWAY close frame via the handler's
-    cleanup, but the client's in-flight response is truncated.
+    — the task exits, a clean close frame is sent to the client, and
+    the summary record is published to Kinesis. Tasks still holding an
+    open connection after the deadline are force-cancelled; their
+    cleanup path then has up to ``force_close_timeout`` seconds to send
+    the 1001 GOING_AWAY close frame and publish the summary record
+    before the log queue is stopped.
     """
     await start_log_queue(num_workers=config.relay.max_connections)
-    yield
-
     try:
-        if _active_ws_connections:
-            drain_timeout = config.relay.drain_timeout
-            active = list(_active_ws_connections)
-            logger.info(
-                f"Gracefully draining {len(active)} WebSocket connections "
-                f"(timeout {drain_timeout}s)"
-            )
-
-            # Phase 1: wait for relay tasks to finish on their own.
-            # Responses currently streaming will complete when the
-            # upstream closes.
-            _, pending = await asyncio.wait(active, timeout=drain_timeout)
-
-            # Phase 2: cancel tasks still holding an open connection.
-            # Their cleanup path sends a 1001 GOING_AWAY close frame
-            # to the client. Truncating client responses is the thing
-            # we're trying to avoid — so log at WARNING so it surfaces
-            # in operational alarms, not quietly at INFO.
-            if pending:
-                logger.warning(
-                    f"Force-closing {len(pending)} WebSocket connections "
-                    f"still open after {drain_timeout}s drain timeout; "
-                    f"client responses may be truncated. Tasks: "
-                    f"{[t.get_name() for t in pending]}"
-                )
-                for task in pending:
-                    task.cancel()
-                # Give cancelled tasks a short window to finish their
-                # cleanup (close frames, summary log record) before we
-                # stop the log queue. If they're still pending after
-                # this, escalate — the process will SIGKILL shortly
-                # anyway and their summary records are at risk.
-                _, still_pending = await asyncio.wait(pending, timeout=5)
-                if still_pending:
-                    logger.error(
-                        f"{len(still_pending)} WebSocket relay task(s) did "
-                        f"not respond to cancellation within 5s; their "
-                        f"Kinesis summary records may be dropped. Tasks: "
-                        f"{[t.get_name() for t in still_pending]}"
-                    )
-
-            logger.info(
-                f"WebSocket drain complete, {len(_active_ws_connections)} " f"remaining"
-            )
+        yield
     finally:
-        # Always drain the log queue — if Phase 1's asyncio.wait itself
-        # is cancelled (e.g. second SIGTERM), we still want whatever is
-        # already enqueued to reach Kinesis so aisitok doesn't see
-        # orphaned body chunks.
-        await stop_log_queue()
+        await _shutdown()
 
-    logger.info("Shutting down Redis connections")
-    await state_service.close_redis_client()
-    logger.info("Redis connections closed")
+
+async def _shutdown() -> None:
+    """Graceful shutdown sequence.
+
+    Each step runs in its own try/finally so a failure in one phase does
+    not skip the next. In particular ``close_redis_client`` must run
+    even if the WS drain or log queue stop raises, otherwise Redis
+    connections leak silently across container restarts.
+    """
+    try:
+        await _drain_websocket_connections()
+    finally:
+        try:
+            await _stop_log_queue_with_timeout()
+        finally:
+            logger.info("Shutting down Redis connections")
+            await state_service.close_redis_client()
+            logger.info("Redis connections closed")
+
+
+async def _drain_websocket_connections() -> None:
+    """Gracefully drain active WebSocket relay tasks.
+
+    Phase 1: wait up to ``drain_timeout`` for relay tasks to finish on
+    their own — the upstream closing after ``response.completed`` is
+    the fast path.
+
+    Phase 2: force-cancel stragglers and give them
+    ``force_close_timeout`` seconds to flush their close frame and
+    summary record. Tasks still pending after that escalate to ERROR.
+    """
+    if not _active_ws_connections:
+        return
+
+    relay = config.relay
+    drain_timeout = relay.drain_timeout
+    force_close_timeout = relay.force_close_timeout
+    active = list(_active_ws_connections)
+    logger.info(
+        f"Gracefully draining {len(active)} WebSocket connections "
+        f"(timeout {drain_timeout}s)"
+    )
+
+    _, pending = await asyncio.wait(active, timeout=drain_timeout)
+
+    if pending:
+        # Truncating in-flight client responses is the thing we're
+        # trying to avoid. Surface at WARNING so operators see it.
+        logger.warning(
+            f"Force-closing {len(pending)} WebSocket connections still "
+            f"open after {drain_timeout}s drain timeout; client "
+            f"responses may be truncated. Tasks: "
+            f"{[t.get_name() for t in pending]}"
+        )
+        for task in pending:
+            task.cancel()
+        _, still_pending = await asyncio.wait(pending, timeout=force_close_timeout)
+        if still_pending:
+            logger.error(
+                f"{len(still_pending)} WebSocket relay task(s) did not "
+                f"respond to cancellation within {force_close_timeout}s; "
+                f"their Kinesis summary records may be dropped. Tasks: "
+                f"{[t.get_name() for t in still_pending]}"
+            )
+
+    finished = sum(1 for t in active if t.done())
+    logger.info(f"WebSocket drain complete, {len(active) - finished} unfinished")
+
+
+async def _stop_log_queue_with_timeout() -> None:
+    """Drain the log queue, bounded by ``log_queue_stop_timeout``.
+
+    Without a timeout, a wedged Kinesis worker would block lifespan
+    shutdown until ECS SIGKILLs the container. Better to give up on a
+    handful of records than hang the whole shutdown.
+
+    Exceptions are caught and logged rather than re-raised so a failure
+    here cannot skip the remaining cleanup steps (notably the Redis
+    connection close).
+    """
+    timeout = config.relay.log_queue_stop_timeout
+    try:
+        await asyncio.wait_for(stop_log_queue(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error(
+            f"Log queue did not drain within {timeout}s; in-flight log "
+            f"records may be dropped"
+        )
+    except Exception:
+        logger.exception("Log queue stop failed; continuing with shutdown")
 
 
 portunus = FastAPI(title="Portunus", lifespan=lifespan)

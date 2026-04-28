@@ -264,15 +264,17 @@ async def _relay(
             if not task.done():
                 task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        # `gather(return_exceptions=True)` absorbs EVERYTHING; surface
-        # non-cancellation errors so a genuine bug in the inner tasks
-        # isn't invisible. The inner coroutines already log their own
-        # expected exceptions (WebSocketDisconnect, ConnectionClosed),
-        # so anything reaching here is unexpected.
+        # `gather(return_exceptions=True)` absorbs everything; surface
+        # non-cancellation Exceptions so a genuine bug in the inner
+        # tasks isn't invisible. The inner coroutines already log their
+        # own expected exceptions (WebSocketDisconnect, ConnectionClosed),
+        # so anything reaching here is unexpected. We deliberately do
+        # not catch BaseException — KeyboardInterrupt / SystemExit
+        # should propagate.
         for task, result in zip(tasks, results):
-            if isinstance(result, (asyncio.CancelledError, type(None))):
+            if result is None or isinstance(result, asyncio.CancelledError):
                 continue
-            if isinstance(result, BaseException):
+            if isinstance(result, Exception):
                 logger.error(
                     f"WS {request_id}: {task.get_name()} raised unexpectedly: "
                     f"{result!r}"
@@ -350,11 +352,13 @@ async def handle_ws_connection(
     # Log summary and clean up
     duration = time.monotonic() - connection_start
 
-    # Shield the summary publish so that if the outer task is cancelled
-    # at this point (e.g. during the lifespan Phase-2 force-close),
-    # the Kinesis summary record still lands. aisitok uses this record
-    # as the session row for WS traffic — dropping it would orphan all
-    # the per-message body chunks published during the session.
+    # Shield the summary publish against re-cancellation. In the normal
+    # Phase-2 flow `_relay` already absorbed the single cancel, so this
+    # shield is a no-op. It only matters under uvicorn-level escalation
+    # (a second cancel after the lifespan returns), where we still want
+    # the session summary row to reach the response-headers Kinesis
+    # stream — downstream consumers key WS sessions on that row, so
+    # dropping it would orphan every per-message body chunk.
     try:
         await asyncio.shield(
             log_ws_summary(
@@ -366,9 +370,6 @@ async def handle_ws_connection(
             )
         )
     except asyncio.CancelledError:
-        # The shield absorbed our cancel; the summary publish is still
-        # running in the background and will complete (log queue is
-        # drained last in lifespan). Re-raise so the task still ends.
         logger.info(f"WS {request_id}: summary publish shielded past cancel")
         raise
     except Exception as e:  # defensive — log_ws_summary already catches
@@ -376,16 +377,12 @@ async def handle_ws_connection(
 
     try:
         await upstream.close()
-    except asyncio.CancelledError:
-        raise
     except Exception as e:
         logger.debug(
             f"WS {request_id}: upstream close error (expected on drain): {e!r}"
         )
     try:
         await websocket.close(code=close_code)
-    except asyncio.CancelledError:
-        raise
     except Exception as e:
         logger.debug(f"WS {request_id}: client close error (expected on drain): {e!r}")
 

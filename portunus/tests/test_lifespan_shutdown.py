@@ -7,6 +7,7 @@ their own (so an in-flight LLM response can stream to its natural
 """
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -22,22 +23,32 @@ def reset_active_connections():
     app_module._active_ws_connections.clear()
 
 
-async def _run_lifespan(drain_timeout: float) -> None:
+async def _run_lifespan(
+    drain_timeout: float,
+    force_close_timeout: float = 0.5,
+    stop_log_queue=None,
+) -> AsyncMock:
     """Run the lifespan shutdown phase with patched side-effects.
 
     Enters the lifespan context manager, then exits it immediately so
     only the shutdown code runs. Redis, log queue, and start/stop are
     stubbed out so the test stays purely focused on WS drain.
+    Returns the patched ``state_service`` so callers can assert on it.
     """
+    stop_mock = AsyncMock(side_effect=stop_log_queue) if stop_log_queue else AsyncMock()
     with (
         patch.object(app_module, "start_log_queue", new=AsyncMock()),
-        patch.object(app_module, "stop_log_queue", new=AsyncMock()),
+        patch.object(app_module, "stop_log_queue", new=stop_mock),
         patch.object(app_module, "state_service") as mock_state,
         patch.object(app_module.config.relay, "drain_timeout", drain_timeout),
+        patch.object(
+            app_module.config.relay, "force_close_timeout", force_close_timeout
+        ),
     ):
         mock_state.close_redis_client = AsyncMock()
         async with app_module.lifespan(app_module.portunus):
             pass
+    return mock_state
 
 
 @pytest.mark.asyncio
@@ -148,9 +159,10 @@ async def test_no_active_connections_skips_drain(reset_active_connections):
 async def test_log_queue_stopped_after_ws_drain(reset_active_connections):
     """Log queue stop is called AFTER WS drain completes.
 
-    Order matters for aisitok log integrity: the summary record is
-    written by the handler's cleanup path as the relay task exits,
-    and the log queue must still be running to publish that record.
+    Order matters for downstream log-aggregation integrity: the summary
+    record is written by the handler's cleanup path as the relay task
+    exits, and the log queue must still be running to publish that
+    record.
 
     To make this check meaningful the task performs an explicit
     "summary publish" step AFTER being cancelled by Phase 2 — if the
@@ -247,9 +259,9 @@ async def test_stragglers_are_logged_at_warning(reset_active_connections, caplog
 
     Truncated responses are the exact user-visible symptom we're
     trying to reduce — operators need them to show up in alarms, not
-    disappear at INFO.
+    disappear at INFO. The straggler log includes task names so
+    operators can grep by request_id.
     """
-    import logging
 
     async def stuck() -> None:
         await asyncio.Event().wait()
@@ -261,6 +273,126 @@ async def test_stragglers_are_logged_at_warning(reset_active_connections, caplog
         await _run_lifespan(drain_timeout=0.1)
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    msgs = [r.getMessage() for r in warnings]
     assert any(
-        "Force-closing" in r.getMessage() for r in warnings
-    ), f"expected a WARNING about force-closing stragglers, got {warnings}"
+        "Force-closing" in m for m in msgs
+    ), f"expected a WARNING about force-closing stragglers, got {msgs}"
+    assert any(
+        "ws-relay-test-req-id" in m for m in msgs
+    ), f"expected task name in straggler log, got {msgs}"
+
+
+@pytest.mark.asyncio
+async def test_unresponsive_cancellation_logs_error(reset_active_connections, caplog):
+    """Tasks that ignore cancellation past force_close_timeout log at ERROR.
+
+    Pins the loudest operator signal — if a relay task swallows its
+    cancel and won't exit, we want a clear error with the task name so
+    it's debuggable from logs alone.
+    """
+
+    async def ignores_cancel() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Simulate a task whose cleanup hangs longer than force_close_timeout.
+            await asyncio.sleep(2)
+
+    task = asyncio.create_task(ignores_cancel(), name="ws-relay-stuck-cleanup")
+    app_module._active_ws_connections.add(task)
+
+    with caplog.at_level(logging.ERROR, logger="api.access"):
+        await _run_lifespan(drain_timeout=0.05, force_close_timeout=0.1)
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    msgs = [r.getMessage() for r in errors]
+    assert any(
+        "did not respond to cancellation" in m for m in msgs
+    ), f"expected an ERROR about unresponsive cancellation, got {msgs}"
+    assert any(
+        "ws-relay-stuck-cleanup" in m for m in msgs
+    ), f"expected task name in error log, got {msgs}"
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_drain_timeout_zero_is_immediate_cancel(reset_active_connections):
+    """drain_timeout=0 skips Phase 1 and force-cancels immediately.
+
+    A deployment that wants to disable graceful drain (e.g. for tests)
+    should be able to set WS_DRAIN_TIMEOUT=0 without breaking.
+    """
+
+    async def stuck() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(stuck(), name="ws-relay-zero-timeout")
+    app_module._active_ws_connections.add(task)
+
+    await _run_lifespan(drain_timeout=0, force_close_timeout=0.5)
+
+    assert task.cancelled() or task.done()
+
+
+@pytest.mark.asyncio
+async def test_redis_closed_even_if_drain_raises(reset_active_connections):
+    """close_redis_client must run even if log queue stop raises.
+
+    Regression pin for a previously latent bug where close_redis_client
+    sat outside the try/finally chain — a stop_log_queue failure would
+    leak Redis connections silently.
+    """
+
+    async def boom() -> None:
+        raise RuntimeError("simulated log queue failure")
+
+    task = asyncio.create_task(asyncio.sleep(0.01))
+    app_module._active_ws_connections.add(task)
+
+    mock_state = await _run_lifespan(
+        drain_timeout=0.5,
+        stop_log_queue=boom,
+    )
+
+    mock_state.close_redis_client.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_log_queue_stop_timeout_does_not_hang_lifespan(
+    reset_active_connections, caplog
+):
+    """A wedged log queue worker doesn't hang the whole shutdown.
+
+    Without ``log_queue_stop_timeout`` a stuck Kinesis publish would
+    block lifespan until ECS SIGKILL.
+    """
+
+    async def hang_forever() -> None:
+        await asyncio.Event().wait()
+
+    with (
+        patch.object(app_module, "start_log_queue", new=AsyncMock()),
+        patch.object(
+            app_module, "stop_log_queue", new=AsyncMock(side_effect=hang_forever)
+        ),
+        patch.object(app_module, "state_service") as mock_state,
+        patch.object(app_module.config.relay, "drain_timeout", 0.05),
+        patch.object(app_module.config.relay, "force_close_timeout", 0.05),
+        patch.object(app_module.config.relay, "log_queue_stop_timeout", 1),
+        caplog.at_level(logging.ERROR, logger="api.access"),
+    ):
+        mock_state.close_redis_client = AsyncMock()
+        async with app_module.lifespan(app_module.portunus):
+            pass
+
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(
+        "Log queue did not drain" in m for m in msgs
+    ), f"expected timeout error, got {msgs}"
+    # Critical: Redis must still close even though the log queue hung.
+    mock_state.close_redis_client.assert_awaited_once()

@@ -181,11 +181,28 @@ class RelayConfig(BaseModel):
         default=25,
         description=(
             "Seconds to wait for active WS connections to finish naturally "
-            "on shutdown before force-cancelling. Must fit comfortably "
-            "within the container stop_timeout (ECS default 30s) with room "
-            "for the force-close window and log queue drain."
+            "on shutdown before force-cancelling. Must fit within the "
+            "container stop grace period with room for force_close_timeout "
+            "and the log queue drain."
         ),
         ge=0,
+    )
+    force_close_timeout: int = Field(
+        default=5,
+        description=(
+            "After drain_timeout, seconds to wait for force-cancelled WS "
+            "tasks to finish their cleanup (close frame + summary publish) "
+            "before giving up and stopping the log queue."
+        ),
+        ge=0,
+    )
+    log_queue_stop_timeout: int = Field(
+        default=10,
+        description=(
+            "Maximum seconds to wait for log queue workers to drain on "
+            "shutdown before giving up. Bounds total shutdown time."
+        ),
+        ge=1,
     )
 
 
@@ -302,7 +319,9 @@ def get_config() -> PortunusConfig:
             os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")
         ),
         max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "200")),
-        drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
+        drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "25")),
+        force_close_timeout=int(os.environ.get("WS_FORCE_CLOSE_TIMEOUT", "5")),
+        log_queue_stop_timeout=int(os.environ.get("WS_LOG_QUEUE_STOP_TIMEOUT", "10")),
     )
 
     return PortunusConfig(
