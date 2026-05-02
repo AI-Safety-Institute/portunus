@@ -44,6 +44,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   1013 TRY_AGAIN_LATER, 1009 MESSAGE_TOO_BIG) and gives operators the
   diagnostic signal they need in the per-connection log line, which
   now includes `code=…` and `reason=…`.
+- Disable websockets-library keepalive pings on the upstream connect
+  (`ping_interval=None`). LLM upstreams (OpenAI Responses API in
+  particular) can spend tens of seconds on a single reasoning step
+  without sending application bytes; the library's default 20s
+  ping_timeout was closing the upstream connection with code 1011
+  during reasoning, which the relay then forwarded as a mid-stream
+  close to the codex client. Codex's retry path (one suppressed +
+  visible `Reconnecting... 2/5`, `3/5`, `4/5`) made this look like
+  flaky upstreams when it was actually our own keepalive timing out.
+  The bidirectional relay loop still detects a dead upstream via the
+  recv iterator returning, and `max_connection_lifetime` bounds the
+  worst-case silent-dead-peer at 55 minutes.
 
 ## [0.5.0]
 

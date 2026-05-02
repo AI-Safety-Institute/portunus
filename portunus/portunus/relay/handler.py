@@ -126,11 +126,27 @@ async def _connect_upstream(
     safe_target = f"{target.host}:{target.port}/{path}"
 
     try:
+        # Override the websockets library's keepalive defaults
+        # (ping_interval=20s, ping_timeout=20s). LLM upstreams (OpenAI
+        # Responses API in particular) can spend tens of seconds on a
+        # single reasoning step without sending any application bytes,
+        # and the python websockets library will close the connection
+        # with code 1011 ("keepalive ping timeout") if a pong doesn't
+        # arrive within ping_timeout. That manifested in production as
+        # codex sessions hitting "websocket closed by server before
+        # response.completed" and burning their retry budget on
+        # high-reasoning prompts.
+        #
+        # Disabling pings entirely is fine here: the bidirectional
+        # relay loop already detects a dead upstream via the recv
+        # iterator returning, and ``max_connection_lifetime`` bounds
+        # the worst-case "silent dead peer" case at 55 minutes.
         upstream = await websockets.connect(
             uri,
             extra_headers=headers,
             max_size=max_message_size,
             open_timeout=10,
+            ping_interval=None,
         )
     except Exception as e:
         logger.error(
