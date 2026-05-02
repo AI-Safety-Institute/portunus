@@ -326,7 +326,10 @@ class AuthPayload:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
         except Exception as e:
-            msg = f"Failed to decode authorization payload: {e}, payload: {raw_payload}"
+            # Do NOT include `raw_payload` here — it's the post-Bearer
+            # base64 blob containing AWS credentials. PayloadError
+            # messages reach CloudWatch via the relay's auth path.
+            msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
 
     def to_dict(self) -> Dict[str, Any]:

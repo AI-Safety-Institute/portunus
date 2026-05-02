@@ -306,6 +306,7 @@ class TestRelayIntegration:
         ):
             mock_config.relay.max_message_size = 10_485_760
             mock_config.relay.max_connection_lifetime = 1  # 1 second
+            mock_config.relay.auth_timeout = 5.0
 
             await handle_ws_connection(
                 client_ws,

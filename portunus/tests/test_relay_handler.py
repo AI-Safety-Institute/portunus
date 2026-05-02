@@ -102,6 +102,7 @@ class TestHandleWsConnection:
         ):
             mock_config.relay.max_message_size = 10485760
             mock_config.relay.max_connection_lifetime = 60
+            mock_config.relay.auth_timeout = 5.0
 
             await handle_ws_connection(
                 mock_websocket,
@@ -147,6 +148,7 @@ class TestHandleWsConnection:
         ):
             mock_config.relay.max_message_size = 10485760
             mock_config.relay.max_connection_lifetime = 5
+            mock_config.relay.auth_timeout = 5.0
 
             await handle_ws_connection(
                 mock_websocket,

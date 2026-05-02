@@ -182,6 +182,20 @@ class RelayConfig(BaseModel):
         description="Seconds to wait for WS connections to drain on shutdown",
         ge=0,
     )
+    auth_timeout: float = Field(
+        default=5.0,
+        description=(
+            "Hard cap on the auth phase of a new WS upgrade, including "
+            "STS AssumeRole + Secrets Manager GetSecretValue. botocore "
+            "defaults each call to ~60s; this caps the overall auth "
+            "phase below that so a hung region cannot consume a "
+            "max_connections slot for the full default. Bounds the "
+            "client side too — a client that opens the TCP connection "
+            "but stalls before sending its Authorization header is "
+            "dropped at this deadline."
+        ),
+        ge=0.1,
+    )
 
 
 class PortunusConfig(BaseModel):
@@ -298,6 +312,7 @@ def get_config() -> PortunusConfig:
         ),
         max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "200")),
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
+        auth_timeout=float(os.environ.get("WS_AUTH_TIMEOUT", "5.0")),
     )
 
     return PortunusConfig(

@@ -79,7 +79,14 @@ class LogQueue:
             try:
                 await _publish_message(item)
             except Exception as e:
-                logger.error(f"WS {item.request_id}: Log worker {worker_id} error: {e}")
+                # boto3 / Kinesis exceptions can include the request body
+                # in str(e). The body here IS the relayed user message,
+                # so interpolating `e` would land prompt content in
+                # CloudWatch.
+                logger.error(
+                    f"WS {item.request_id}: Log worker {worker_id} "
+                    f"error: {type(e).__name__}"
+                )
             finally:
                 self._queue.task_done()
 
@@ -138,7 +145,7 @@ async def _publish_message(item: _LogItem) -> None:
         except Exception as e:
             logger.error(
                 f"WS {item.request_id}: Failed to log message chunk "
-                f"{chunk_id}/{num_chunks}: {e}"
+                f"{chunk_id}/{num_chunks}: {type(e).__name__}"
             )
 
 
@@ -183,7 +190,9 @@ async def log_ws_headers(
             timestamp=timestamp,
         )
     except Exception as e:
-        logger.error(f"WS {request_id}: Failed to log request headers: {e}")
+        logger.error(
+            f"WS {request_id}: Failed to log request headers: {type(e).__name__}"
+        )
 
 
 async def log_ws_summary(
@@ -212,7 +221,9 @@ async def log_ws_summary(
             timestamp=timestamp,
         )
     except Exception as e:
-        logger.error(f"WS {request_id}: Failed to log connection summary: {e}")
+        logger.error(
+            f"WS {request_id}: Failed to log connection summary: {type(e).__name__}"
+        )
 
 
 async def enqueue_log(

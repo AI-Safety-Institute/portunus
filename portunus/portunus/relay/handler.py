@@ -119,6 +119,11 @@ async def _connect_upstream(
     """
     uri = _build_upstream_uri(target, path, websocket)
     headers = _build_upstream_headers(websocket, api_key)
+    # Some upstreams put short-lived auth tokens in query strings;
+    # avoid logging the URI verbatim. host:port/path is enough to
+    # identify the upstream while keeping the query string out of
+    # CloudWatch.
+    safe_target = f"{target.host}:{target.port}/{path}"
 
     try:
         upstream = await websockets.connect(
@@ -128,10 +133,13 @@ async def _connect_upstream(
             open_timeout=10,
         )
     except Exception as e:
-        logger.error(f"WS {request_id}: Failed to connect upstream: {e}")
+        logger.error(
+            f"WS {request_id}: Failed to connect upstream {safe_target}: "
+            f"{type(e).__name__}"
+        )
         return None
 
-    logger.info(f"WS {request_id}: Upstream connected to {uri}")
+    logger.info(f"WS {request_id}: Upstream connected to {safe_target}")
     return upstream
 
 
@@ -164,7 +172,11 @@ async def _publish_connection_metadata(
             secret_arn=ws_auth.secret_arn,
         )
     except Exception as e:
-        logger.error(f"WS {request_id}: Failed to publish metadata: {e}")
+        # boto3/Kinesis exception messages can include the request body;
+        # log only the type name to keep prompt content out of CloudWatch.
+        logger.error(
+            f"WS {request_id}: Failed to publish metadata: {type(e).__name__}"
+        )
 
 
 async def _relay(
@@ -173,10 +185,16 @@ async def _relay(
     publish_service: PublishService,
     request_id: str,
     max_lifetime: int,
-) -> tuple[int, int, WsCloseCode]:
+) -> tuple[int, int, int]:
     """Run bidirectional message relay with per-message logging.
 
-    Returns (client_msg_count, upstream_msg_count, close_code).
+    Returns ``(client_msg_count, upstream_msg_count, close_code)``.
+
+    ``close_code`` is the WS close code to surface to the client. If
+    the upstream closed with a non-1000 code (e.g. 1011 INTERNAL_ERROR,
+    1013 TRY_AGAIN_LATER), that code is propagated; otherwise the
+    relay-initiated close code (1001 GOING_AWAY for lifetime/cancel,
+    1000 NORMAL for clean completion) is returned.
     """
     client_msg_index = 0
     upstream_msg_index = 0
@@ -213,10 +231,20 @@ async def _relay(
         except WebSocketDisconnect:
             logger.info(f"WS {request_id}: Client disconnected")
         except Exception as e:
-            logger.error(f"WS {request_id}: Client->upstream error: {e}")
+            logger.error(
+                f"WS {request_id}: Client->upstream error: {type(e).__name__}"
+            )
+
+    # Captured when the upstream side closes so the close code can be
+    # forwarded transparently to the client. Without this, the relay
+    # substitutes 1000 NORMAL on every upstream-initiated close, which
+    # hides upstream errors (e.g. an LLM provider closing with 1011
+    # mid-stream) from clients and operators alike.
+    upstream_close_code: int | None = None
+    upstream_close_reason: str = ""
 
     async def upstream_to_client() -> None:
-        nonlocal upstream_msg_index
+        nonlocal upstream_msg_index, upstream_close_code, upstream_close_reason
         try:
             async for raw_message in upstream:
                 if isinstance(raw_message, bytes):
@@ -234,12 +262,19 @@ async def _relay(
                     upstream_msg_index,
                 )
                 upstream_msg_index += 1
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"WS {request_id}: Upstream disconnected")
+        except websockets.exceptions.ConnectionClosed as e:
+            upstream_close_code = e.code
+            upstream_close_reason = e.reason or ""
+            logger.info(
+                f"WS {request_id}: Upstream disconnected "
+                f"code={upstream_close_code} reason={upstream_close_reason!r}"
+            )
         except Exception as e:
-            logger.error(f"WS {request_id}: Upstream->client error: {e}")
+            logger.error(
+                f"WS {request_id}: Upstream->client error: {type(e).__name__}"
+            )
 
-    close_code = WsCloseCode.NORMAL
+    close_code: int = WsCloseCode.NORMAL
     try:
         async with asyncio.timeout(max_lifetime):
             tasks = [
@@ -263,6 +298,14 @@ async def _relay(
     except asyncio.CancelledError:
         close_code = WsCloseCode.GOING_AWAY
         logger.info(f"WS {request_id}: Connection cancelled (server draining)")
+
+    # Pass through the upstream's close code if it's the reason we're
+    # closing — codex/operators can then distinguish an upstream
+    # provider error (1011, 1013, etc.) from a clean completion (1000)
+    # or a relay-initiated drain (1001). Lifetime/cancel paths above
+    # already set close_code explicitly and override this.
+    if close_code == WsCloseCode.NORMAL and upstream_close_code is not None:
+        close_code = upstream_close_code
 
     return client_msg_index, upstream_msg_index, close_code
 
@@ -293,8 +336,27 @@ async def handle_ws_connection(
             pass
         return
 
-    # Authenticate before accepting
-    ws_auth = await authenticate_ws(websocket, auth_service, request_id, target.host)
+    # Authenticate before accepting. Bound the whole auth phase
+    # (STS + Secrets Manager) so a hung region or a client that
+    # never sends an Authorization header can't pin a max_connections
+    # slot for botocore's full ~60s default per call.
+    try:
+        ws_auth = await asyncio.wait_for(
+            authenticate_ws(websocket, auth_service, request_id, target.host),
+            timeout=relay_config.auth_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"WS {request_id}: auth phase exceeded "
+            f"{relay_config.auth_timeout}s, dropping connection"
+        )
+        try:
+            await websocket.close(
+                code=WsCloseCode.AUTH_FAILED, reason="Auth timeout"
+            )
+        except Exception:
+            pass
+        return
     if ws_auth is None:
         return
 
@@ -324,35 +386,51 @@ async def handle_ws_connection(
         )
         return
 
-    # Relay messages
-    client_msgs, upstream_msgs, close_code = await _relay(
-        websocket,
-        upstream,
-        publish_service,
-        request_id,
-        relay_config.max_connection_lifetime,
-    )
-
-    # Log summary and clean up
-    duration = time.monotonic() - connection_start
-    await log_ws_summary(
-        publish_service,
-        request_id,
-        client_msgs,
-        upstream_msgs,
-        duration,
-    )
-
+    client_msgs = 0
+    upstream_msgs = 0
+    close_code = WsCloseCode.NORMAL
     try:
-        await upstream.close()
-    except Exception:
-        pass
-    try:
-        await websocket.close(code=close_code)
-    except Exception:
-        pass
+        client_msgs, upstream_msgs, close_code = await _relay(
+            websocket,
+            upstream,
+            publish_service,
+            request_id,
+            relay_config.max_connection_lifetime,
+        )
+    finally:
+        # Run the summary log + close-frame send on EVERY exit path,
+        # including when the route is cancelled mid-relay (uvicorn
+        # signals a 1012 force-close that way). Without this finally
+        # block, summaries for any session interrupted by a deploy
+        # were silently dropped — visible as a gap in Kinesis
+        # accounting after each rolling restart. asyncio.shield keeps
+        # the publish alive against a second cancel arriving during
+        # cleanup.
+        duration = time.monotonic() - connection_start
+        try:
+            await asyncio.shield(
+                log_ws_summary(
+                    publish_service,
+                    request_id,
+                    client_msgs,
+                    upstream_msgs,
+                    duration,
+                )
+            )
+        except Exception as e:
+            logger.error(
+                f"WS {request_id}: log_ws_summary failed: {type(e).__name__}"
+            )
+        try:
+            await upstream.close()
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=close_code)
+        except Exception:
+            pass
 
-    logger.info(
-        f"WS {request_id}: Connection closed after {duration:.1f}s. "
-        f"Messages: {client_msgs} client, {upstream_msgs} upstream"
-    )
+        logger.info(
+            f"WS {request_id}: Connection closed after {duration:.1f}s. "
+            f"Messages: {client_msgs} client, {upstream_msgs} upstream"
+        )
