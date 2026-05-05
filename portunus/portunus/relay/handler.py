@@ -119,10 +119,7 @@ async def _connect_upstream(
     """
     uri = _build_upstream_uri(target, path, websocket)
     headers = _build_upstream_headers(websocket, api_key)
-    # Some upstreams put short-lived auth tokens in query strings;
-    # avoid logging the URI verbatim. host:port/path is enough to
-    # identify the upstream while keeping the query string out of
-    # CloudWatch.
+    # Avoid logging the full URI — some upstreams put auth tokens in the query string.
     safe_target = f"{target.host}:{target.port}/{path}"
 
     try:
@@ -172,8 +169,6 @@ async def _publish_connection_metadata(
             secret_arn=ws_auth.secret_arn,
         )
     except Exception as e:
-        # boto3/Kinesis exception messages can include the request body;
-        # log only the type name to keep prompt content out of CloudWatch.
         logger.error(
             f"WS {request_id}: Failed to publish metadata: {type(e).__name__}"
         )
@@ -188,13 +183,9 @@ async def _relay(
 ) -> tuple[int, int, int]:
     """Run bidirectional message relay with per-message logging.
 
-    Returns ``(client_msg_count, upstream_msg_count, close_code)``.
-
-    ``close_code`` is the WS close code to surface to the client. If
-    the upstream closed with a non-1000 code (e.g. 1011 INTERNAL_ERROR,
-    1013 TRY_AGAIN_LATER), that code is propagated; otherwise the
-    relay-initiated close code (1001 GOING_AWAY for lifetime/cancel,
-    1000 NORMAL for clean completion) is returned.
+    Returns ``(client_msg_count, upstream_msg_count, close_code)``. The
+    upstream's close code is forwarded if the relay didn't have its own
+    reason to close (lifetime/cancel set GOING_AWAY explicitly).
     """
     client_msg_index = 0
     upstream_msg_index = 0
@@ -235,11 +226,7 @@ async def _relay(
                 f"WS {request_id}: Client->upstream error: {type(e).__name__}"
             )
 
-    # Captured when the upstream side closes so the close code can be
-    # forwarded transparently to the client. Without this, the relay
-    # substitutes 1000 NORMAL on every upstream-initiated close, which
-    # hides upstream errors (e.g. an LLM provider closing with 1011
-    # mid-stream) from clients and operators alike.
+    # Forwarded to the client below so upstream errors aren't masked as 1000.
     upstream_close_code: int | None = None
     upstream_close_reason: str = ""
 
@@ -299,11 +286,8 @@ async def _relay(
         close_code = WsCloseCode.GOING_AWAY
         logger.info(f"WS {request_id}: Connection cancelled (server draining)")
 
-    # Pass through the upstream's close code if it's the reason we're
-    # closing — codex/operators can then distinguish an upstream
-    # provider error (1011, 1013, etc.) from a clean completion (1000)
-    # or a relay-initiated drain (1001). Lifetime/cancel paths above
-    # already set close_code explicitly and override this.
+    # Forward the upstream code unless the relay had its own reason to override
+    # (lifetime/cancel paths set GOING_AWAY explicitly above).
     if close_code == WsCloseCode.NORMAL and upstream_close_code is not None:
         close_code = upstream_close_code
 
@@ -336,10 +320,8 @@ async def handle_ws_connection(
             pass
         return
 
-    # Authenticate before accepting. Bound the whole auth phase
-    # (STS + Secrets Manager) so a hung region or a client that
-    # never sends an Authorization header can't pin a max_connections
-    # slot for botocore's full ~60s default per call.
+    # Bound the auth phase so a hung STS/Secrets Manager region can't pin
+    # a max_connections slot for botocore's ~60s default.
     try:
         ws_auth = await asyncio.wait_for(
             authenticate_ws(websocket, auth_service, request_id, target.host),
@@ -398,14 +380,8 @@ async def handle_ws_connection(
             relay_config.max_connection_lifetime,
         )
     finally:
-        # Run the summary log + close-frame send on EVERY exit path,
-        # including when the route is cancelled mid-relay (uvicorn
-        # signals a 1012 force-close that way). Without this finally
-        # block, summaries for any session interrupted by a deploy
-        # were silently dropped — visible as a gap in Kinesis
-        # accounting after each rolling restart. asyncio.shield keeps
-        # the publish alive against a second cancel arriving during
-        # cleanup.
+        # Summary publish must survive cancellation so deploys don't drop
+        # session accounting; shield against a second cancel during cleanup.
         duration = time.monotonic() - connection_start
         try:
             await asyncio.shield(

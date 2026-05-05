@@ -185,14 +185,10 @@ class RelayConfig(BaseModel):
     auth_timeout: float = Field(
         default=5.0,
         description=(
-            "Hard cap on the auth phase of a new WS upgrade, including "
-            "STS AssumeRole + Secrets Manager GetSecretValue. botocore "
-            "defaults each call to ~60s; this caps the overall auth "
-            "phase below that so a hung region cannot consume a "
-            "max_connections slot for the full default. Bounds the "
-            "client side too — a client that opens the TCP connection "
-            "but stalls before sending its Authorization header is "
-            "dropped at this deadline."
+            "Cap on the auth phase (STS + Secrets Manager) for a new WS "
+            "upgrade. Stops a hung AWS dependency or a stalled client "
+            "from pinning a max_connections slot for botocore's ~60s "
+            "default."
         ),
         ge=0.1,
     )

@@ -326,9 +326,7 @@ class AuthPayload:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
         except Exception as e:
-            # Do NOT include `raw_payload` here — it's the post-Bearer
-            # base64 blob containing AWS credentials. PayloadError
-            # messages reach CloudWatch via the relay's auth path.
+            # Don't include raw_payload — it's the base64 blob with AWS credentials.
             msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
 

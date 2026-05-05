@@ -79,10 +79,8 @@ class LogQueue:
             try:
                 await _publish_message(item)
             except Exception as e:
-                # boto3 / Kinesis exceptions can include the request body
-                # in str(e). The body here IS the relayed user message,
-                # so interpolating `e` would land prompt content in
-                # CloudWatch.
+                # Don't interpolate `e` — Kinesis exceptions can echo the
+                # message body, which is relayed user content.
                 logger.error(
                     f"WS {item.request_id}: Log worker {worker_id} "
                     f"error: {type(e).__name__}"
