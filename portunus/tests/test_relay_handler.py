@@ -1,5 +1,6 @@
 """Tests for WebSocket relay handler."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -162,3 +163,32 @@ class TestHandleWsConnection:
         call_kwargs = mock_publish_service.publish_metadata.call_args[1]
         assert call_kwargs["request_id"] == "test-req"
         assert "account_id" in call_kwargs["principal_info"]
+
+    @pytest.mark.asyncio
+    async def test_auth_timeout_closes_with_4001(
+        self, mock_websocket, mock_auth_service, mock_publish_service
+    ):
+        """A slow authenticate_ws hits auth_timeout and closes the WS with 4001."""
+
+        async def slow_auth(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        with (
+            patch("portunus.relay.handler.authenticate_ws", side_effect=slow_auth),
+            patch("portunus.relay.handler.config") as mock_config,
+        ):
+            mock_config.relay.max_message_size = 10485760
+            mock_config.relay.max_connection_lifetime = 60
+            mock_config.relay.auth_timeout = 0.05
+
+            await handle_ws_connection(
+                mock_websocket,
+                "v1/responses",
+                mock_auth_service,
+                mock_publish_service,
+                "test-req",
+            )
+
+        mock_websocket.close.assert_called_once_with(code=4001, reason="Auth timeout")
+        mock_websocket.accept.assert_not_called()
+        mock_publish_service.publish_metadata.assert_not_called()

@@ -226,7 +226,7 @@ async def _relay(
                 f"WS {request_id}: Client->upstream error: {type(e).__name__}"
             )
 
-    # Forwarded to the client below so upstream errors aren't masked as 1000.
+    # Forwarded to the client below so upstream errors aren't masked as NORMAL.
     upstream_close_code: int | None = None
     upstream_close_reason: str = ""
 
@@ -287,9 +287,15 @@ async def _relay(
         logger.info(f"WS {request_id}: Connection cancelled (server draining)")
 
     # Forward the upstream code unless the relay had its own reason to override
-    # (lifetime/cancel paths set GOING_AWAY explicitly above).
+    # (lifetime/cancel set GOING_AWAY above). Reserved-on-the-wire codes (1005
+    # "no status received", 1006 "abnormal closure", 1015 "TLS failure") get
+    # translated — clients are forbidden from receiving them in a close frame
+    # and Starlette will refuse to send them.
     if close_code == WsCloseCode.NORMAL and upstream_close_code is not None:
-        close_code = upstream_close_code
+        if upstream_close_code in {1005, 1006, 1015}:
+            close_code = WsCloseCode.INTERNAL_ERROR
+        else:
+            close_code = upstream_close_code
 
     return client_msg_index, upstream_msg_index, close_code
 
@@ -380,31 +386,39 @@ async def handle_ws_connection(
             relay_config.max_connection_lifetime,
         )
     finally:
-        # Summary publish must survive cancellation so deploys don't drop
-        # session accounting; shield against a second cancel during cleanup.
+        # Summary publish runs as a fire-and-forget task so an outer
+        # cancellation (uvicorn dropping the route mid-relay) doesn't
+        # strand it. The task body catches its own exceptions.
         duration = time.monotonic() - connection_start
-        try:
-            await asyncio.shield(
-                log_ws_summary(
+
+        async def _publish_summary() -> None:
+            try:
+                await log_ws_summary(
                     publish_service,
                     request_id,
                     client_msgs,
                     upstream_msgs,
                     duration,
                 )
-            )
-        except Exception as e:
-            logger.error(
-                f"WS {request_id}: log_ws_summary failed: {type(e).__name__}"
-            )
+            except Exception:
+                logger.exception(
+                    f"WS {request_id}: log_ws_summary failed"
+                )
+
+        asyncio.create_task(_publish_summary())
+
         try:
             await upstream.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                f"WS {request_id}: upstream close failed: {type(e).__name__}"
+            )
         try:
             await websocket.close(code=close_code)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                f"WS {request_id}: client close failed: {type(e).__name__}"
+            )
 
         logger.info(
             f"WS {request_id}: Connection closed after {duration:.1f}s. "

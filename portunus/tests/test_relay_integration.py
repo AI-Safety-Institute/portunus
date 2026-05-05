@@ -52,10 +52,25 @@ async def _echo_handler(websocket):
         await websocket.send(message)
 
 
+async def _close_4008_handler(websocket):
+    """Upstream that closes immediately with a non-1000 application code."""
+    await websocket.close(code=4008, reason="rate limit")
+
+
 @pytest_asyncio.fixture()
 async def echo_server():
     """Start a real WebSocket echo server on a random port."""
     server = await websockets.serve(_echo_handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    yield port
+    server.close()
+    await server.wait_closed()
+
+
+@pytest_asyncio.fixture()
+async def closing_4008_server():
+    """Upstream server that closes with code 4008 on connect."""
+    server = await websockets.serve(_close_4008_handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     yield port
     server.close()
@@ -318,3 +333,40 @@ class TestRelayIntegration:
 
         # Summary should still be published even on timeout
         publish_service.publish_response_headers.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_upstream_close_code_forwarded_to_client(
+        self, closing_4008_server, auth_result, publish_service
+    ):
+        """A non-1000 upstream close is forwarded to the client, not masked as 1000."""
+        port = closing_4008_server
+        client_ws = _make_client_ws(port)
+        captured_close: dict = {}
+
+        async def capture_close(code=1000, reason=None):
+            captured_close["code"] = code
+            captured_close["reason"] = reason
+
+        client_ws.close = capture_close
+
+        # The upstream closes immediately on connect; just block client_to_upstream
+        # so it doesn't race the close event.
+        async def block_forever():
+            await asyncio.sleep(60)
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        client_ws.receive = block_forever
+
+        with patch(
+            "portunus.relay.handler.authenticate_ws",
+            return_value=auth_result,
+        ):
+            await handle_ws_connection(
+                client_ws,
+                "echo",
+                AsyncMock(),
+                publish_service,
+                "test-req-fwd-code",
+            )
+
+        assert captured_close.get("code") == 4008
