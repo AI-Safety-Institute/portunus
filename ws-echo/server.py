@@ -55,9 +55,7 @@ async def _echo(websocket: WebSocketServerProtocol) -> None:
         await websocket.send(message)
 
 
-async def _stream_response(
-    websocket: WebSocketServerProtocol, request: dict
-) -> None:
+async def _stream_response(websocket: WebSocketServerProtocol, request: dict) -> None:
     """Stream a fake Responses API response to one ``response.create`` request.
 
     Emits the full event sequence so a real codex client can parse
@@ -210,7 +208,9 @@ async def _responses(websocket: WebSocketServerProtocol) -> None:
             else:
                 logger.info(f"ignoring unsupported message type: {msg.get('type')}")
     except websockets.exceptions.ConnectionClosed as exc:
-        logger.info(f"responses-api session closed from {peer}: {exc.code} {exc.reason!r}")
+        logger.info(
+            f"responses-api session closed from {peer}: " f"{exc.code} {exc.reason!r}"
+        )
 
 
 async def _dispatch(websocket: WebSocketServerProtocol) -> None:

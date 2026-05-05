@@ -2,6 +2,10 @@ version = 1
 revision = 3
 requires-python = ">=3.12, <4"
 
+[options]
+exclude-newer = "2026-04-28T12:50:52.17733226Z"
+exclude-newer-span = "P1W"
+
 [[package]]
 name = "aiobotocore"
 version = "2.13.3"

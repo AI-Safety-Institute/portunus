@@ -169,9 +169,7 @@ async def _publish_connection_metadata(
             secret_arn=ws_auth.secret_arn,
         )
     except Exception as e:
-        logger.error(
-            f"WS {request_id}: Failed to publish metadata: {type(e).__name__}"
-        )
+        logger.error(f"WS {request_id}: Failed to publish metadata: {type(e).__name__}")
 
 
 async def _relay(
@@ -222,9 +220,7 @@ async def _relay(
         except WebSocketDisconnect:
             logger.info(f"WS {request_id}: Client disconnected")
         except Exception as e:
-            logger.error(
-                f"WS {request_id}: Client->upstream error: {type(e).__name__}"
-            )
+            logger.error(f"WS {request_id}: Client->upstream error: {type(e).__name__}")
 
     # Forwarded to the client below so upstream errors aren't masked as NORMAL.
     upstream_close_code: int | None = None
@@ -257,9 +253,7 @@ async def _relay(
                 f"code={upstream_close_code} reason={upstream_close_reason!r}"
             )
         except Exception as e:
-            logger.error(
-                f"WS {request_id}: Upstream->client error: {type(e).__name__}"
-            )
+            logger.error(f"WS {request_id}: Upstream->client error: {type(e).__name__}")
 
     close_code: int = WsCloseCode.NORMAL
     try:
@@ -339,9 +333,7 @@ async def handle_ws_connection(
             f"{relay_config.auth_timeout}s, dropping connection"
         )
         try:
-            await websocket.close(
-                code=WsCloseCode.AUTH_FAILED, reason="Auth timeout"
-            )
+            await websocket.close(code=WsCloseCode.AUTH_FAILED, reason="Auth timeout")
         except Exception:
             pass
         return
@@ -376,7 +368,7 @@ async def handle_ws_connection(
 
     client_msgs = 0
     upstream_msgs = 0
-    close_code = WsCloseCode.NORMAL
+    close_code: int = WsCloseCode.NORMAL
     try:
         client_msgs, upstream_msgs, close_code = await _relay(
             websocket,
@@ -401,24 +393,18 @@ async def handle_ws_connection(
                     duration,
                 )
             except Exception:
-                logger.exception(
-                    f"WS {request_id}: log_ws_summary failed"
-                )
+                logger.exception(f"WS {request_id}: log_ws_summary failed")
 
         asyncio.create_task(_publish_summary())
 
         try:
             await upstream.close()
         except Exception as e:
-            logger.debug(
-                f"WS {request_id}: upstream close failed: {type(e).__name__}"
-            )
+            logger.debug(f"WS {request_id}: upstream close failed: {type(e).__name__}")
         try:
             await websocket.close(code=close_code)
         except Exception as e:
-            logger.debug(
-                f"WS {request_id}: client close failed: {type(e).__name__}"
-            )
+            logger.debug(f"WS {request_id}: client close failed: {type(e).__name__}")
 
         logger.info(
             f"WS {request_id}: Connection closed after {duration:.1f}s. "
