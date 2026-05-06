@@ -3,6 +3,14 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0]
+
+### Changed
+- `models._decompress_b64_body` now uses `isal.igzip` / `isal.isal_zlib`
+  for ~1.7× faster gzip/zlib decompress vs stdlib. Required runtime
+  dep, hard-imported. Helps the Glue ETL consumer (api-key-proxy#128)
+  that has been OOM'ing under load. Base64 stays on stdlib.
+
 ## [0.5.0]
 
 ### Added

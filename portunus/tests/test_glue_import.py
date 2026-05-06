@@ -72,7 +72,13 @@ print(f"✓ Successfully imported JoinedLogRecord with {len(schema)} schema fiel
 
         # Run the test in AWS Glue Docker container
         # Use bash to invoke Python (Glue image has custom Python setup)
+        # ``isal`` is a required runtime dep of portunus.models (see
+        # _decompress_b64_body). In production Glue jobs it is
+        # installed via ``--additional-python-modules``; the test
+        # container has to do the same to mirror the runtime
+        # environment, otherwise the import fails at first-call.
         bash_cmd = (
+            "pip install --quiet isal && "
             "export PYTHONPATH=/home/hadoop/workspace/portunus_models.zip && "
             "python3 /home/hadoop/workspace/test_import.py"
         )
