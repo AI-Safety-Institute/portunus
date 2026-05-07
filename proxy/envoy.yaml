@@ -252,7 +252,10 @@ static_resources:
               socket_address:
                 address: ${WS_TARGET_HOST}
                 port_value: ${TARGET_PORT}
-    transport_socket: ${TARGET_HOST_TRANSPORT_SOCKET}
+    # Dedicated transport socket: TLS with ALPN pinned to http/1.1 so
+    # the upstream ALB doesn't negotiate h2 (which Envoy then mishandles
+    # on a non-HTTP/2 cluster).
+    transport_socket: ${WS_TRANSPORT_SOCKET}
   # gRPC cluster for the ext_proc WebSocket relay handler hosted by Portunus.
   - name: portunus_extproc
     connect_timeout: 5s

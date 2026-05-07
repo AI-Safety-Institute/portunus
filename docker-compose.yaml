@@ -71,6 +71,7 @@ services:
       TARGET_HOST_TRANSPORT_SOCKET: "null"
       TARGET_HOST_USE_TLS: "false"
       PORTUNUS_TRANSPORT_SOCKET: "null"
+      WS_TRANSPORT_SOCKET: "null"
       DOWNSTREAM_TLS_TRANSPORT_SOCKET: "null"
       API_KEY_HEADER: authorization
       API_KEY_PREFIX: "Bearer "

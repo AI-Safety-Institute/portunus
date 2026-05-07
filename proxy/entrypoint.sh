@@ -64,6 +64,27 @@ EOF
   )
 fi
 
+# WS_TRANSPORT_SOCKET
+# TLS to the WebSocket upstream with ALPN pinned to http/1.1 — without
+# this, ALBs (and other upstreams) negotiate h2 via ALPN, which Envoy's
+# cluster layer (no http2_protocol_options on ws_target) then mishandles.
+# Symptom is a clean Envoy 500 with empty body on the upgrade.
+if [ -z "$WS_TRANSPORT_SOCKET" ]; then
+  export WS_TRANSPORT_SOCKET=$(yq -o json <<EOF
+name: envoy.transport_sockets.tls
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+  sni: $WS_TARGET_HOST
+  common_tls_context:
+    alpn_protocols:
+      - http/1.1
+    validation_context:
+      trusted_ca:
+        filename: /etc/ssl/certs/ca-certificates.crt
+EOF
+  )
+fi
+
 # DOWNSTREAM_TLS_TRANSPORT_SOCKET
 if [ -z "$DOWNSTREAM_TLS_TRANSPORT_SOCKET" ]; then
   export DOWNSTREAM_TLS_TRANSPORT_SOCKET=$(yq -o json <<EOF
