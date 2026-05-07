@@ -80,6 +80,9 @@ static_resources:
               # its sub-call to /authorise before Envoy switches to tunnel mode.
               # ext_proc observes WS frames post-upgrade for per-message Kinesis
               # logging.
+              # Route to a separate HTTP/1.1-only cluster: WS upgrade is forbidden
+              # in HTTP/2 (RFC 7540 §8.1.2.2), but the main TARGET_HOST cluster
+              # has HTTP/2 enabled for HTTP traffic.
               - match:
                   prefix: "/"
                   headers:
@@ -87,8 +90,11 @@ static_resources:
                     string_match:
                       exact: "websocket"
                 route:
-                  cluster: ${TARGET_HOST}
+                  cluster: ws_target
                   timeout: 0s
+                  # Rewrite Host so the upstream ALB sees the cert SNI it
+                  # expects (WS target host, not the WS proxy hostname).
+                  host_rewrite_literal: "${WS_TARGET_HOST}"
                   upgrade_configs:
                   - upgrade_type: websocket
               # Default HTTP route through Lua filter — ext_proc disabled here.
@@ -221,6 +227,32 @@ static_resources:
                 address: ${PORTUNUS_HOST}
                 port_value: ${PORTUNUS_PORT}
     transport_socket: ${PORTUNUS_TRANSPORT_SOCKET}
+  # WebSocket upstream: HTTP/1.1 only. WS upgrade is forbidden in HTTP/2
+  # (RFC 7540 §8.1.2.2); RFC 8441 extended-CONNECT exists but most
+  # upstreams (incl. AWS ALB) only handle WS over HTTP/1.1, so we don't
+  # add http2_protocol_options here.
+  - name: ws_target
+    connect_timeout: 5s
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    common_http_protocol_options:
+      idle_timeout: 60s
+    upstream_connection_options:
+      tcp_keepalive:
+        keepalive_probes: 1
+        keepalive_interval: 60
+        keepalive_time: 10
+    load_assignment:
+      cluster_name: ws_target
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${WS_TARGET_HOST}
+                port_value: ${TARGET_PORT}
+    transport_socket: ${TARGET_HOST_TRANSPORT_SOCKET}
   # gRPC cluster for the ext_proc WebSocket relay handler hosted by Portunus.
   - name: portunus_extproc
     connect_timeout: 5s
