@@ -96,10 +96,14 @@ def parse_identity_from_arn(arn: str):
             if len(role_parts) >= 3:
                 project = "_".join(role_parts[2:])
 
+    # IAM user ARNs: arn:aws:iam::ACCOUNT-ID:user/<path>/<user-name>
+    # Mirror the assumed-role layout (`assumed-role/<role-name>`) so downstream
+    # consumers can distinguish auth types from the prefix and aisitok's
+    # extract_short_principal passes the value through verbatim.
+    elif ":user/" in arn and path_parts:
+        principal = f"user/{'/'.join(path_parts)}"
+
     else:
-        principal = None
-        session_name = None
-        project = None
         logging.warning(f"Unrecognized ARN format: {arn}")
 
     return PrincipalInfo(

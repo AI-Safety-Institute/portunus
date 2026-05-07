@@ -21,11 +21,26 @@ def test_parse_identity_from_invalid_arn():
     assert result.project == "unknown"
 
 
-def test_parse_identity_from_basic_arn():
-    """Test parsing a basic ARN without assumed role."""
+def test_parse_identity_from_iam_user_arn():
+    """Test parsing an IAM user ARN with no explicit path."""
     result = parse_identity_from_arn("arn:aws:iam::123456789012:user/test-user")
     assert result.account_id == "123456789012"
-    assert result.principal is None
+    assert result.principal == "user/test-user"
+    assert result.session_name is None
+    assert result.project == "unknown"
+
+
+def test_parse_identity_from_iam_user_arn_with_path():
+    """Test parsing an IAM user ARN with a multi-segment path.
+
+    AWS IAM users may be provisioned at arbitrary slash-separated paths.
+    The full path-and-name must be preserved so downstream attribution
+    stays distinguishable across users at different paths.
+    """
+    arn = "arn:aws:iam::123456789012:user/some-path/example-user"
+    result = parse_identity_from_arn(arn)
+    assert result.account_id == "123456789012"
+    assert result.principal == "user/some-path/example-user"
     assert result.session_name is None
     assert result.project == "unknown"
 
