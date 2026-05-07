@@ -19,6 +19,10 @@ dependencies = [
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
     "websockets>=12.0,<14",
+    # WebSocket relay via Envoy ext_proc — see portunus/relay/extproc.py.
+    "grpcio>=1.66.0,<2",
+    "wsproto>=1.2.0,<2",
+    "xds-protos>=1.80.0,<2",
 ]
 
 [dependency-groups]

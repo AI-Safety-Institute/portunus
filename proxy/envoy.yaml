@@ -74,49 +74,30 @@ static_resources:
             - name: local_service
               domains: ["*"]
               routes:
-              # WebSocket upgrades on any path route to the Portunus WS relay.
-              # Envoy matches the Upgrade header before falling through to the
-              # default HTTP route. Portunus handles auth and relays messages
-              # to the upstream target with per-message Kinesis logging.
+              # WebSocket upgrades on any path. The Lua filter authenticates the
+              # upgrade against Portunus's /authorise endpoint exactly as it does
+              # for HTTP — Lua sees the upgrade as a normal HTTP request and runs
+              # its sub-call to /authorise before Envoy switches to tunnel mode.
+              # ext_proc observes WS frames post-upgrade for per-message Kinesis
+              # logging.
               - match:
                   prefix: "/"
                   headers:
                   - name: "upgrade"
                     string_match:
                       exact: "websocket"
-                # Disable Lua filter for WS — auth is handled by Portunus directly.
-                typed_per_filter_config:
-                  envoy.filters.http.lua:
-                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
-                    disabled: true
-                request_headers_to_add:
-                - header:
-                    key: "${PORTUNUS_API_KEY_HEADER}"
-                    value: "${PORTUNUS_API_KEY}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-host"
-                    value: "${WS_TARGET_HOST}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-port"
-                    value: "${TARGET_PORT}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-use-tls"
-                    value: "${TARGET_HOST_USE_TLS}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
                 route:
-                  cluster: ${PORTUNUS_HOST}
+                  cluster: ${TARGET_HOST}
                   timeout: 0s
-                  # Rewrite Host so the shared ALB routes to the Portunus service,
-                  # not back to this proxy (which would loop until XFF hits 30 IPs → 463).
-                  host_rewrite_literal: "${PORTUNUS_HOST}"
                   upgrade_configs:
                   - upgrade_type: websocket
-              # Default HTTP route through Lua filter
+              # Default HTTP route through Lua filter — ext_proc disabled here.
               - match:
                   prefix: "/"
+                typed_per_filter_config:
+                  envoy.filters.http.ext_proc:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                    disabled: true
                 route:
                   cluster: ${TARGET_HOST}
                   timeout: 0s # no timeout
@@ -165,6 +146,26 @@ static_resources:
               "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
               default_source_code:
                 filename: /envoy/lua_subst.lua
+          # ext_proc observes WS frames post-upgrade and forwards them to
+          # Portunus's gRPC handler for Kinesis logging. Disabled per-route
+          # on plain HTTP (see route config above).
+          - name: envoy.filters.http.ext_proc
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: portunus_extproc
+                timeout: 30s
+              processing_mode:
+                request_header_mode: SEND
+                response_header_mode: SEND
+                request_body_mode: FULL_DUPLEX_STREAMED
+                response_body_mode: FULL_DUPLEX_STREAMED
+                # Envoy 1.36 requires SEND trailer modes when *_body_mode is
+                # FULL_DUPLEX_STREAMED, even though WS has no trailers.
+                request_trailer_mode: SEND
+                response_trailer_mode: SEND
+              failure_mode_allow: false
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -209,9 +210,7 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    # Must stay HTTP/1.1 — WebSocket relay uses the traditional Upgrade mechanism
-    # which is forbidden in HTTP/2 (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441)
-    # would work but uvicorn doesn't support it. Do not add http2_protocol_options here.
+    # Used by the Lua filter to call Portunus's HTTP /authorise endpoint.
     load_assignment:
       cluster_name: ${PORTUNUS_HOST}
       endpoints:
@@ -221,4 +220,30 @@ static_resources:
               socket_address:
                 address: ${PORTUNUS_HOST}
                 port_value: ${PORTUNUS_PORT}
+    transport_socket: ${PORTUNUS_TRANSPORT_SOCKET}
+  # gRPC cluster for the ext_proc WebSocket relay handler hosted by Portunus.
+  - name: portunus_extproc
+    connect_timeout: 5s
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    lb_policy: ROUND_ROBIN
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}   # gRPC requires HTTP/2
+    upstream_connection_options:
+      tcp_keepalive:
+        keepalive_probes: 1
+        keepalive_interval: 60
+        keepalive_time: 10
+    load_assignment:
+      cluster_name: portunus_extproc
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${PORTUNUS_HOST}
+                port_value: ${PORTUNUS_EXTPROC_PORT}
     transport_socket: ${PORTUNUS_TRANSPORT_SOCKET}

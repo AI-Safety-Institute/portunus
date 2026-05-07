@@ -192,6 +192,7 @@ async def log_ws_summary(
     client_messages: int,
     upstream_messages: int,
     duration_seconds: float,
+    close_code: int | None = None,
 ) -> None:
     """Log WebSocket connection summary to the response-headers Kinesis stream.
 
@@ -205,6 +206,8 @@ async def log_ws_summary(
         "x-ws-duration-seconds": f"{duration_seconds:.1f}",
         "x-ws-type": "websocket-summary",
     }
+    if close_code is not None:
+        summary["x-ws-close-code"] = str(close_code)
     try:
         await publish_service.publish_response_headers(
             request_id=request_id,

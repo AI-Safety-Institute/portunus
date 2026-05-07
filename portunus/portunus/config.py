@@ -182,6 +182,12 @@ class RelayConfig(BaseModel):
         description="Seconds to wait for WS connections to drain on shutdown",
         ge=0,
     )
+    extproc_port: int = Field(
+        default=9000,
+        description="Port the ext_proc gRPC server listens on (Envoy → Portunus)",
+        ge=1,
+        le=65535,
+    )
 
 
 class PortunusConfig(BaseModel):
@@ -298,6 +304,7 @@ def get_config() -> PortunusConfig:
         ),
         max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "200")),
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
+        extproc_port=int(os.environ.get("WS_EXTPROC_PORT", "9000")),
     )
 
     return PortunusConfig(

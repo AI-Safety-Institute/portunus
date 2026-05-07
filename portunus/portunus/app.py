@@ -7,13 +7,12 @@ It implements the authentication logic and log event publishing to Kinesis.
 
 import asyncio
 import logging
-import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
-from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
+from fastapi import APIRouter, FastAPI, Request, Response
 from pydantic import BaseModel, ValidationError
 
 from portunus.config import config  # noqa: E402 — also used by XRayService
@@ -29,8 +28,7 @@ from portunus.models import (
     HeadersPayload,
     TrailersPayload,
 )
-from portunus.relay import WsCloseCode
-from portunus.relay.handler import handle_ws_connection
+from portunus.relay.extproc_server import start_extproc_server, stop_extproc_server
 from portunus.relay.logger import start_log_queue, stop_log_queue
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
@@ -445,49 +443,6 @@ async def log_response_trailers(
     return None
 
 
-# Active WebSocket connections tracked for graceful shutdown.
-_active_ws_connections: set[asyncio.Task] = set()
-
-
-@portunus_router.websocket("/{path:path}")
-async def ws_relay(websocket: WebSocket, path: str):
-    """WebSocket relay endpoint.
-
-    Envoy routes WebSocket upgrade requests (matched by the Upgrade header)
-    to Portunus. The path is forwarded to the upstream as-is
-    (e.g., /v1/responses -> upstream /v1/responses).
-
-    Authenticates the upgrade request, connects to the upstream WebSocket,
-    and relays messages bidirectionally with per-message Kinesis logging.
-    Rejects with 1013 (Try Again Later) if connection limit is reached.
-    """
-    max_conns = config.relay.max_connections
-    if len(_active_ws_connections) >= max_conns:
-        logger.warning(f"WS connection limit reached ({max_conns}), rejecting")
-        await websocket.close(
-            code=WsCloseCode.TRY_AGAIN_LATER, reason="Try again later"
-        )
-        return
-
-    segment = xray_service.recorder.current_segment()
-    request_id = segment.trace_id if segment else str(uuid.uuid4())
-
-    task = asyncio.current_task()
-    if task is not None:
-        _active_ws_connections.add(task)
-    try:
-        await handle_ws_connection(
-            websocket=websocket,
-            path=path,
-            auth_service=auth_service,
-            publish_service=publish_service,
-            request_id=request_id,
-        )
-    finally:
-        if task is not None:
-            _active_ws_connections.discard(task)
-
-
 class CacheFlushResponse(BaseModel):
     """Response model for cache flush operations.
 
@@ -568,27 +523,17 @@ async def ping(request: Request) -> dict:
 async def lifespan(app: FastAPI):
     """Manage application lifecycle.
 
-    Starts the WS log queue on startup, drains active WS connections
-    and cleans up Redis on shutdown.
+    Starts the log queue + the ext_proc gRPC server (which serves the
+    WebSocket relay path), and tears them down on shutdown.
     """
     await start_log_queue(num_workers=config.relay.max_connections)
+    extproc_server = await start_extproc_server(
+        publish_service=publish_service, port=config.relay.extproc_port
+    )
+
     yield
 
-    # Cancel WS connections first so they stop producing log items
-    if _active_ws_connections:
-        logger.info(
-            f"Draining {len(_active_ws_connections)} active WebSocket connections"
-        )
-        drain_timeout = config.relay.drain_timeout
-        for task in list(_active_ws_connections):
-            task.cancel()
-        if _active_ws_connections:
-            await asyncio.sleep(drain_timeout)
-        logger.info(
-            f"WebSocket drain complete, {len(_active_ws_connections)} remaining"
-        )
-
-    # Then drain the log queue (no new items will arrive)
+    await stop_extproc_server(extproc_server, grace_seconds=config.relay.drain_timeout)
     await stop_log_queue()
 
     logger.info("Shutting down Redis connections")

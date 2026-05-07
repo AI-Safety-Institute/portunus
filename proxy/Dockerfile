@@ -1,5 +1,7 @@
-# Start from the Envoy Alpine Linux image
-FROM envoyproxy/envoy:v1.31.0
+# Start from the Envoy Alpine Linux image.
+# 1.36.0 is the floor for the FULL_DUPLEX_STREAMED ext_proc body mode used
+# by the WebSocket relay (see portunus/portunus/relay/extproc.py).
+FROM envoyproxy/envoy:v1.36.0
 
 # Update the package lists
 RUN apt update
