@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import struct
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import (
@@ -119,12 +120,76 @@ def _decode_b64_headers(
     return result, failures
 
 
-def _decompress_b64_body(
-    body_b64: str, content_encoding: Optional[str]
-) -> tuple[Optional[str], bool]:
-    """Base64-decode, optionally decompress, and UTF-8 decode a body.
+_EVENTSTREAM_CONTENT_TYPE = "application/vnd.amazon.eventstream"
 
-    Returns (decoded_text, failed). On failure, decoded_text is None and failed is True.
+# vnd.amazon.eventstream wire format: prelude (total_len, headers_len,
+# prelude_crc — three big-endian u32s) then headers, payload, and a
+# trailing message-CRC u32.
+_ES_PRELUDE = struct.Struct(">III")
+_ES_TRAILING_CRC_SIZE = 4
+_ES_FRAME_OVERHEAD = _ES_PRELUDE.size + _ES_TRAILING_CRC_SIZE
+
+
+def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
+    r"""Convert vnd.amazon.eventstream binary framing into SSE-style text.
+
+    AWS Bedrock streaming wraps each chunk as a length-prefixed binary
+    message whose payload is JSON of the shape ``{"bytes": "<base64
+    inner event>"}``; the inner is an Anthropic-shaped event. We
+    unwrap and emit each inner as one ``data: {...}\n`` line for
+    downstream SSE consumers.
+
+    Returns None on structural failure (truncated/inconsistent framing).
+    Individual messages with malformed/non-object payloads are skipped:
+    Bedrock occasionally emits exception events with different shapes,
+    and ``json.loads`` enforces RFC 8259 (no literal control chars in
+    strings) so passing it implies the inner is safe to embed in SSE.
+    CRCs are not verified.
+    """
+    sse_lines: list[str] = []
+    pos = 0
+    n = len(body_bytes)
+    while pos < n:
+        if pos + _ES_PRELUDE.size > n:
+            return None
+        total_len, headers_len, _ = _ES_PRELUDE.unpack_from(body_bytes, pos)
+        if (
+            total_len < _ES_FRAME_OVERHEAD
+            or pos + total_len > n
+            or headers_len > total_len - _ES_FRAME_OVERHEAD
+        ):
+            return None
+        payload_start = pos + _ES_PRELUDE.size + headers_len
+        payload_end = pos + total_len - _ES_TRAILING_CRC_SIZE
+        payload = body_bytes[payload_start:payload_end]
+        try:
+            envelope = json.loads(payload)
+            if isinstance(envelope, dict) and (inner_b64 := envelope.get("bytes")):
+                inner_bytes = base64.b64decode(inner_b64)
+                inner_str = inner_bytes.decode("utf-8")
+                # json.loads validates the inner is well-formed JSON
+                # *and* — critically — that any control chars in
+                # strings are escaped, so the inner is safe to splice
+                # into ``data: ...\n`` without re-encoding.
+                if isinstance(json.loads(inner_str), dict):
+                    sse_lines.append(f"data: {inner_str}\n")
+        except (json.JSONDecodeError, binascii.Error, UnicodeDecodeError):
+            pass
+        pos += total_len
+    return "".join(sse_lines)
+
+
+def _decompress_b64_body(
+    body_b64: str,
+    content_encoding: Optional[str],
+    content_type: Optional[str] = None,
+) -> tuple[Optional[str], bool]:
+    """Base64-decode, optionally decompress, and decode a body to text.
+
+    Plain UTF-8 by default; gzip/deflate via ``content_encoding``;
+    AWS event-stream binary via ``content_type`` (see
+    ``_parse_vnd_amazon_eventstream``). Returns ``(text, failed)``;
+    ``text`` is None when ``failed``.
     """
     import gzip
     import zlib
@@ -146,6 +211,12 @@ def _decompress_b64_body(
                 body_bytes = zlib.decompress(body_bytes)
             except (zlib.error, EOFError):
                 return None, True
+
+    if content_type and _EVENTSTREAM_CONTENT_TYPE in content_type.lower():
+        sse = _parse_vnd_amazon_eventstream(body_bytes)
+        if sse is None:
+            return None, True
+        return sse, False
 
     try:
         return body_bytes.decode("utf-8"), False
@@ -1138,7 +1209,9 @@ class JoinedLogRecord:
             True if decoding succeeded, False otherwise
         """
         decoded, failed = _decompress_b64_body(
-            self.response_body_body, self.response_headers_content_encoding
+            self.response_body_body,
+            self.response_headers_content_encoding,
+            self.response_headers_content_type,
         )
         self.response_body_decoded = decoded
         self.response_body_decode_failure = failed
