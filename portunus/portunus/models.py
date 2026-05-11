@@ -131,20 +131,13 @@ _ES_FRAME_OVERHEAD = _ES_PRELUDE.size + _ES_TRAILING_CRC_SIZE
 
 
 def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
-    r"""Convert vnd.amazon.eventstream binary framing into SSE-style text.
+    r"""Unwrap eventstream framing into SSE ``data: {...}\n`` lines.
 
-    AWS Bedrock streaming wraps each chunk as a length-prefixed binary
-    message whose payload is JSON of the shape ``{"bytes": "<base64
-    inner event>"}``; the inner is an Anthropic-shaped event. We
-    unwrap and emit each inner as one ``data: {...}\n`` line for
-    downstream SSE consumers.
-
-    Returns None on structural failure (truncated/inconsistent framing).
-    Individual messages with malformed/non-object payloads are skipped:
-    Bedrock occasionally emits exception events with different shapes,
-    and ``json.loads`` enforces RFC 8259 (no literal control chars in
-    strings) so passing it implies the inner is safe to embed in SSE.
-    CRCs are not verified.
+    Each message's payload is ``{"bytes": "<base64 inner event>"}``;
+    one SSE line per inner. Returns None on structural failure;
+    malformed individual messages are skipped (Bedrock emits non-``bytes``
+    exception/throttling shapes mid-stream). CRCs are not checked —
+    Firehose already validated transport.
     """
     sse_lines: list[str] = []
     pos = 0
@@ -167,10 +160,9 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
             if isinstance(envelope, dict) and (inner_b64 := envelope.get("bytes")):
                 inner_bytes = base64.b64decode(inner_b64)
                 inner_str = inner_bytes.decode("utf-8")
-                # json.loads validates the inner is well-formed JSON
-                # *and* — critically — that any control chars in
-                # strings are escaped, so the inner is safe to splice
-                # into ``data: ...\n`` without re-encoding.
+                # Re-parse + dict check is the SSE-injection guard:
+                # rejects non-object inners, and inners whose strings
+                # contain literal control chars (RFC 8259 forbids those).
                 if isinstance(json.loads(inner_str), dict):
                     sse_lines.append(f"data: {inner_str}\n")
         except (json.JSONDecodeError, binascii.Error, UnicodeDecodeError):

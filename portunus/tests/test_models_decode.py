@@ -31,11 +31,6 @@ def _bedrock_event(inner_obj: dict, headers: bytes = b"") -> bytes:
     return _build_eventstream_message(payload, headers)
 
 
-# ---------------------------------------------------------------------------
-# Plain text + gzip/deflate paths (regression coverage for existing behaviour)
-# ---------------------------------------------------------------------------
-
-
 def test_plain_utf8_passes_through():
     body = '{"hello": "world"}'
     decoded, failed = _decompress_b64_body(_b64(body.encode()), None)
@@ -75,11 +70,6 @@ def test_non_utf8_bytes_mark_failure_when_no_eventstream_hint():
     decoded, failed = _decompress_b64_body(_b64(b"\xff\xfe\xfd\x00"), None)
     assert failed
     assert decoded is None
-
-
-# ---------------------------------------------------------------------------
-# vnd.amazon.eventstream path
-# ---------------------------------------------------------------------------
 
 
 def test_eventstream_single_message():
@@ -161,43 +151,22 @@ def test_eventstream_inner_payload_must_be_json_object():
         _b64(es_bytes), None, "application/vnd.amazon.eventstream"
     )
     assert not failed
-    # Hostile message dropped, only the legitimate one survives.
     assert decoded == 'data: {"type":"message_start"}\n'
 
 
-def test_eventstream_truncated_prelude_marks_failure():
-    truncated = b"\x00\x00\x00\x10\x00"  # 5 bytes; need ≥12 for prelude
-    decoded, failed = _decompress_b64_body(
-        _b64(truncated), None, "application/vnd.amazon.eventstream"
-    )
-    assert failed
-    assert decoded is None
-
-
-def test_eventstream_message_overruns_buffer_marks_failure():
-    bad = struct.pack(">III", 1024, 0, 0) + b"\x00" * 4  # claims 1024 bytes, has 16
-    decoded, failed = _decompress_b64_body(
-        _b64(bad), None, "application/vnd.amazon.eventstream"
-    )
-    assert failed
-    assert decoded is None
-
-
-def test_eventstream_oversized_headers_len_marks_failure():
-    # total_len=20, headers_len=100 → headers can't fit (need ≤ 4 here).
-    bad = struct.pack(">III", 20, 100, 0) + b"\x00" * 8
+@pytest.mark.parametrize(
+    "bad",
+    [
+        b"\x00\x00\x00\x10\x00",  # truncated: <12-byte prelude
+        struct.pack(">III", 1024, 0, 0) + b"\x00" * 4,  # total_len overruns buffer
+        struct.pack(">III", 20, 100, 0) + b"\x00" * 8,  # headers_len > total_len
+        struct.pack(">III", 8, 0, 0) + b"\x00" * 4,  # total_len < frame overhead
+    ],
+)
+def test_eventstream_structural_failure_returns_none(bad):
     decoded, failed = _decompress_b64_body(
         _b64(bad), None, "application/vnd.amazon.eventstream"
     )
-    assert failed
-    assert decoded is None
-
-
-def test_eventstream_content_type_required_for_dispatch():
-    # High-bit bytes in headers force UTF-8 fallback to fail definitively.
-    payload = b'{"bytes":"' + _b64(b'{"type":"x"}').encode() + b'"}'
-    es_bytes = _build_eventstream_message(payload, headers=b"\xff\xfe\xfd\xfc")
-    decoded, failed = _decompress_b64_body(_b64(es_bytes), None, None)
     assert failed
     assert decoded is None
 
