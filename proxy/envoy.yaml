@@ -155,13 +155,11 @@ static_resources:
                 - key: x-portunus-proxy-key
                   value: "${PORTUNUS_API_KEY}"
               failure_mode_allow: false
-              # Do not forward customer request body to Portunus — only
-              # headers are needed for the auth decision. The customer
-              # body never leaves the data path.
-              with_request_body:
-                max_request_bytes: 0
-                allow_partial_message: true
-                pack_as_bytes: false
+              # No `with_request_body` block: by default Envoy does not
+              # buffer or forward the customer body to ext_authz, which
+              # is exactly what we want — auth decisions are made on
+              # headers alone. Setting max_request_bytes: 0 explicitly is
+              # rejected by Envoy's proto validator (value must be > 0).
           # Observability via Portunus gRPC ext_proc. Replaces the Lua filter's
           # /log/{id}/* sub-calls. Streams request/response headers, body
           # chunks, and trailers into Portunus's Process service, which
