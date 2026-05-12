@@ -179,7 +179,6 @@ static_resources:
           - name: envoy.filters.http.ext_proc
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
-              transport_api_version: V3
               grpc_service:
                 envoy_grpc:
                   cluster_name: portunus_grpc_cluster
