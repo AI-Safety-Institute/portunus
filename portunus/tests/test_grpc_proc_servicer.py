@@ -277,9 +277,9 @@ async def test_websocket_stream_publishes_decoded_message_text_not_raw_frame_byt
         # The body publish should be the decoded "hello", not the framed bytes.
         body_items = publish.of_kind("response_body")
         decoded = [i.payload.get("body_bytes") for i in body_items]
-        assert any(b == b"hello" for b in decoded), (
-            f"Expected decoded 'hello'; got {decoded!r}"
-        )
+        assert any(
+            b == b"hello" for b in decoded
+        ), f"Expected decoded 'hello'; got {decoded!r}"
     finally:
         await queue.stop()
 

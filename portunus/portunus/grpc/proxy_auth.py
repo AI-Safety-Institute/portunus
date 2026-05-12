@@ -30,13 +30,29 @@ from typing import Optional
 import grpc
 
 PROXY_KEY_HEADER = "x-portunus-proxy-key"
+TARGET_HOST_HEADER = "x-portunus-target-host"
 
 
 def extract_proxy_key(context: grpc.aio.ServicerContext) -> Optional[str]:
     """Return the proxy key from invocation metadata, or ``None`` if absent."""
+    return _read_metadata(context, PROXY_KEY_HEADER)
+
+
+def extract_target_host(context: grpc.aio.ServicerContext) -> Optional[str]:
+    """Return the proxy's target_host from gRPC invocation metadata.
+
+    Envoy injects this via ``initial_metadata`` on the ext_authz filter
+    so it's authoritative from the proxy config. Clients have no path
+    to the gRPC channel; reading from invocation_metadata closes the
+    HTTP-header forgery vector that bypassed secret.host validation.
+    """
+    return _read_metadata(context, TARGET_HOST_HEADER)
+
+
+def _read_metadata(context: grpc.aio.ServicerContext, key_name: str) -> Optional[str]:
     try:
         for key, value in context.invocation_metadata() or []:
-            if key.lower() == PROXY_KEY_HEADER:
+            if key.lower() == key_name:
                 return value
     except Exception:
         return None

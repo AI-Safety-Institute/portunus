@@ -67,22 +67,16 @@ static_resources:
           - upgrade_type: websocket
           route_config:
             name: local_route
-            # Strip and re-set internal `x-portunus-*` headers at the
-            # virtual_host level so they're applied before any route
-            # selection runs. Without this, a client can forge
-            # `x-portunus-target-host` and bypass Portunus's
-            # secret.host validation, sending a key bound to provider A
-            # through provider B's proxy. The `x-portunus-target-host`
-            # value MUST be authoritative from the proxy config, not
-            # from the client.
+            # Defence in depth: strip internal x-portunus-* headers
+            # inbound. The authoritative target_host is sent below via
+            # gRPC initial_metadata on the ext_authz filter — invisible
+            # to clients. (Route-config request_headers_to_add wouldn't
+            # work here: it's applied by the router filter, AFTER
+            # ext_authz, so ext_authz sees the client's raw headers.)
             request_headers_to_remove:
               - x-portunus-debug-id
               - x-portunus-proxy-key
-            request_headers_to_add:
-              - header:
-                  key: x-portunus-target-host
-                  value: "${TARGET_HOST}"
-                append_action: OVERWRITE_IF_EXISTS_OR_ADD
+              - x-portunus-target-host
             virtual_hosts:
             - name: local_service
               domains: ["*"]
@@ -185,8 +179,16 @@ static_resources:
                 # network reachability but is broader than the proxy
                 # fleet; this key is the additional gate.
                 initial_metadata:
+                # Identity gate — proxy-key auth on the gRPC channel.
                 - key: x-portunus-proxy-key
                   value: "${PORTUNUS_API_KEY}"
+                # Server-supplied target host. Client-supplied
+                # x-portunus-target-host is stripped at route_config
+                # above; the gRPC channel value is the only source
+                # Portunus reads for secret.host validation, so the
+                # forgery path is closed.
+                - key: x-portunus-target-host
+                  value: "${TARGET_HOST}"
               failure_mode_allow: false
               # No `with_request_body` block: by default Envoy does not
               # buffer or forward the customer body to ext_authz, which

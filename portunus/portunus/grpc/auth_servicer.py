@@ -47,7 +47,13 @@ from portunus.exceptions import (
     FetchSecretError,
     PayloadError,
 )
-from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
+from portunus.grpc.proxy_auth import (
+    extract_proxy_key,
+    is_valid_proxy_key,
+)
+from portunus.grpc.proxy_auth import (
+    extract_target_host as _extract_target_host,
+)
 from portunus.models import AuthPayload
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_service import PublishService
@@ -63,9 +69,6 @@ logger = logging.getLogger("api.access")
 # reads this header from the ext_authz request context.
 _DEFAULT_PAYLOAD_HEADER = "authorization"
 
-# Header used to pass the target upstream host for validation against the
-# cached principal info.
-_TARGET_HOST_HEADER = "x-portunus-target-host"
 
 # Synchronous Kinesis publish timeout. If Kinesis is slower than this,
 # the request fails closed.
@@ -138,7 +141,13 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             if config.api_key_prefix and raw_payload.startswith(config.api_key_prefix):
                 raw_payload = raw_payload[len(config.api_key_prefix) :]
 
-            target_host = headers.get(_TARGET_HOST_HEADER) or None
+            # target_host is sent server-side via the gRPC channel's
+            # initial_metadata (envoy.yaml ext_authz filter config), NOT
+            # via an HTTP header. The matching HTTP header is stripped
+            # at the proxy's route_config too as defence in depth. Reading
+            # from invocation_metadata closes the forgery path because
+            # clients can't reach the gRPC channel.
+            target_host = _extract_target_host(context)
 
             payload = AuthPayload.from_contents(raw_payload, target_host=None)
             try:
@@ -188,11 +197,26 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             # principal info recorded.
             try:
                 async with asyncio.timeout(_METADATA_PUBLISH_TIMEOUT_S):
-                    await self._publish.publish_metadata(
+                    published = await self._publish.publish_metadata(
                         request_id=request_id,
                         timestamp=generate_iso_timestamp(),
                         principal_info=auth_result.principal_info.to_dict(),
                         secret_arn=payload.secret_arn,
+                    )
+                if not published:
+                    # publish_metadata returns False (no exception) when
+                    # the Kinesis stream isn't configured. Treat as a
+                    # fail-closed audit gap rather than silently
+                    # admitting the request.
+                    logger.critical(
+                        "Metadata publish returned False — likely unconfigured stream "
+                        "(request_id=%s)",
+                        request_id,
+                    )
+                    return _denied(
+                        code=503,
+                        body="Audit publish unconfigured — request rejected",
+                        request_id=request_id,
                     )
             except (TimeoutError, asyncio.TimeoutError):
                 logger.critical(
