@@ -134,6 +134,11 @@ class BoundedPublishQueue:
                 await task.coro_fn()
                 self._published_total += 1
             except Exception as e:
-                logger.error("Publish failed for %s: %s", task.label, e)
+                # Log the exception class only — boto3/Kinesis errors can
+                # echo the offending payload back in the exception message,
+                # and on the WS path that payload is relayed user content
+                # (token-bearing). Type name keeps the diagnostic without
+                # leaking customer data into logs.
+                logger.error("Publish failed for %s: %s", task.label, type(e).__name__)
             finally:
                 self._queue.task_done()

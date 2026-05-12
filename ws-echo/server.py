@@ -1,27 +1,29 @@
-"""WebSocket echo server with scriptable failure-mode endpoints.
+"""WebSocket echo server with scriptable handlers for end-to-end tests.
 
-The default path (``/``) is the legacy echo behaviour. Additional paths
-let tests exercise WS failure scenarios without depending on a real
-upstream provider:
+Two families of handler:
 
-* ``/echo`` — same as default, kept explicit for readability in tests.
-* ``/close-after/N`` — echo each message; after the Nth message, send a
-  WS close frame (code 1000, "ok") and close the TCP connection cleanly.
-  Use to assert that Portunus propagates upstream-initiated closes.
-* ``/echo-then-die`` — echo a single message, then drop the underlying
-  TCP socket without sending a close frame. Use to assert that an
-  abrupt upstream disconnect surfaces to the client as a clean error.
-* ``/malformed`` — accept the WS handshake, then send raw bytes that
-  don't form a valid WS frame. Use to assert that Portunus reports the
-  upstream as broken rather than passing garbage through silently.
+**Positive-path / SDK shape**
+* ``/`` and ``/echo`` — bidirectional echo.
+* ``/v1/responses`` — minimal OpenAI Responses-API mock. Emits
+  ``response.created`` then ``RESPONSE_CHUNKS`` (default 3)
+  ``response.output_text.delta`` events at ``CHUNK_INTERVAL_SEC``
+  intervals (default 0.1s), then ``response.completed``. Just enough
+  shape for Codex / openai-python to validate the relay end to end
+  without burning real OpenAI quota.
 
-``/health`` (HTTP) returns 200 for ALB health checks.
+**Failure-mode**
+* ``/close-after/N`` — echo N messages, then close cleanly with 1000.
+* ``/echo-then-die`` — echo once, then abort the TCP socket (no close).
+* ``/malformed`` — accept handshake, then write invalid frame bytes.
+
+``/health`` (HTTP) returns 200 for ALB readiness checks.
 """
 
 import asyncio
 import http
+import json
 import os
-from urllib.parse import urlparse
+import uuid
 
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -53,6 +55,10 @@ async def _handler(websocket: WebSocketServerProtocol) -> None:
 
     if path == "/malformed":
         await _malformed(websocket)
+        return
+
+    if path == "/v1/responses":
+        await _openai_responses_mock(websocket)
         return
 
     await websocket.close(code=1008, reason=f"unknown path: {path!r}")
@@ -106,6 +112,48 @@ async def _malformed(websocket: WebSocketServerProtocol) -> None:
     transport.write(b"\xff\x00\x00garbage")
     await asyncio.sleep(0.05)  # let the bytes flush
     transport.close()
+
+
+async def _openai_responses_mock(websocket: WebSocketServerProtocol) -> None:
+    """Minimal OpenAI Responses-API mock over WebSocket.
+
+    Receives one client message (any shape), then emits a Responses-API
+    event stream: ``response.created`` -> ``response.output_text.delta``
+    x N -> ``response.completed``. Each event is sent as a JSON text frame.
+
+    Configurable via env vars (set on the ws-echo container):
+      RESPONSE_CHUNKS       number of delta chunks (default 3)
+      CHUNK_INTERVAL_SEC    delay between chunks (default 0.1)
+    """
+    chunks = int(os.environ.get("RESPONSE_CHUNKS", "3"))
+    interval = float(os.environ.get("CHUNK_INTERVAL_SEC", "0.1"))
+
+    # Wait for the client's request — Codex / openai-python sends the
+    # initial request as the first frame after the handshake.
+    try:
+        await asyncio.wait_for(websocket.recv(), timeout=5)
+    except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+        return
+
+    response_id = f"resp_{uuid.uuid4().hex[:24]}"
+
+    await websocket.send(json.dumps({
+        "type": "response.created",
+        "response": {"id": response_id, "status": "in_progress"},
+    }))
+
+    for i in range(chunks):
+        await asyncio.sleep(interval)
+        await websocket.send(json.dumps({
+            "type": "response.output_text.delta",
+            "response_id": response_id,
+            "delta": f"chunk-{i} ",
+        }))
+
+    await websocket.send(json.dumps({
+        "type": "response.completed",
+        "response": {"id": response_id, "status": "completed"},
+    }))
 
 
 def _process_request(path: str, headers):

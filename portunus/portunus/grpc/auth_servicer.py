@@ -71,6 +71,12 @@ _TARGET_HOST_HEADER = "x-portunus-target-host"
 # the request fails closed.
 _METADATA_PUBLISH_TIMEOUT_S = 3
 
+# Bound on the STS / Secrets Manager call inside AuthService.authenticate.
+# Without this an unresponsive AWS endpoint stalls every ext_authz call
+# until Envoy's own 5s timeout kicks in — at which point the client sees
+# a generic Envoy 5xx instead of our 504/DEADLINE_EXCEEDED.
+_AUTH_TIMEOUT_S = 5
+
 
 class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
     """Envoy ext_authz v3 ``AuthorizationServicer`` implementation."""
@@ -137,9 +143,22 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             target_host = headers.get(_TARGET_HOST_HEADER) or None
 
             payload = AuthPayload.from_contents(raw_payload, target_host=None)
-            auth_result = await self._auth.authenticate(
-                payload, request_id, target_host
-            )
+            try:
+                async with asyncio.timeout(_AUTH_TIMEOUT_S):
+                    auth_result = await self._auth.authenticate(
+                        payload, request_id, target_host
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "Auth timeout (%ss) for request_id=%s",
+                    _AUTH_TIMEOUT_S,
+                    request_id,
+                )
+                return _denied(
+                    code=504,
+                    body="Auth backend timeout",
+                    request_id=request_id,
+                )
 
             signature_headers: Optional[SignatureHeaders] = None
             if auth_result.signing_key is not None:

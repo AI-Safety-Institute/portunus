@@ -414,8 +414,22 @@ def _extract_mode(req: proc_pb2.ProcessingRequest) -> StreamMode:
 
 
 def _headers_to_dict(http_headers: base_pb2.HeaderMap) -> dict[str, str]:
-    """Flatten Envoy's HeaderMap into a case-folded dict for downstream use."""
-    return {h.key.lower(): h.value for h in http_headers.headers}
+    """Flatten Envoy's HeaderMap into a case-folded dict with base64-encoded values.
+
+    Values are base64-encoded for wire compatibility with the previous
+    Lua-filter path. ``RequestHeadersRecord`` / ``ResponseHeadersRecord``
+    in ``portunus.models`` (and the joined-log ETL downstream) call
+    ``_decode_b64_header`` on these values to populate the convenience
+    fields (``path``, ``authority``, ``status``, etc.) that aisitok's
+    provider detection consumes. Sending raw strings here would break
+    every header record once it lands in Kinesis.
+    """
+    import base64
+
+    return {
+        h.key.lower(): base64.b64encode(h.value.encode("utf-8")).decode("ascii")
+        for h in http_headers.headers
+    }
 
 
 def _empty_body_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
