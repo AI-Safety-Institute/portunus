@@ -148,42 +148,6 @@ class AwsConfig(BaseModel):
     )
 
 
-class RelayConfig(BaseModel):
-    """WebSocket relay configuration settings.
-
-    The upstream target (host, port, TLS) is provided per-connection via
-    headers injected by each proxy's Envoy (x-portunus-target-host, etc.).
-    This config only holds Portunus-level settings that apply to all connections.
-
-    Attributes:
-        max_message_size: Maximum WebSocket message size in bytes
-        max_connection_lifetime: Maximum connection lifetime in seconds
-        max_connections: Maximum concurrent WebSocket connections per instance
-        drain_timeout: Seconds to wait for WS connections to drain on shutdown
-    """
-
-    max_message_size: int = Field(
-        default=10_485_760,
-        description="Maximum WebSocket message size in bytes (10MB)",
-        ge=1024,
-    )
-    max_connection_lifetime: int = Field(
-        default=3300,
-        description="Maximum connection lifetime in seconds (55 min)",
-        ge=60,
-    )
-    max_connections: int = Field(
-        default=200,
-        description="Maximum concurrent WebSocket connections per instance",
-        ge=1,
-    )
-    drain_timeout: int = Field(
-        default=10,
-        description="Seconds to wait for WS connections to drain on shutdown",
-        ge=0,
-    )
-
-
 class GrpcConfig(BaseModel):
     """gRPC server configuration for Envoy ext_authz / ext_proc filters.
 
@@ -249,10 +213,6 @@ class PortunusConfig(BaseModel):
     kinesis: KinesisConfig = Field(
         default_factory=KinesisConfig,
         description="Kinesis Firehose configuration",
-    )
-    relay: RelayConfig = Field(
-        default_factory=RelayConfig,
-        description="WebSocket relay configuration",
     )
     grpc: GrpcConfig = Field(
         default_factory=GrpcConfig,
@@ -337,15 +297,6 @@ def get_config() -> PortunusConfig:
         max_record_size=int(os.environ.get("KINESIS_MAX_RECORD_SIZE", "1000000")),
     )
 
-    relay = RelayConfig(
-        max_message_size=int(os.environ.get("WS_MAX_MESSAGE_SIZE", "10485760")),
-        max_connection_lifetime=int(
-            os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")
-        ),
-        max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "200")),
-        drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
-    )
-
     grpc = GrpcConfig(
         enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
         port=int(os.environ.get("GRPC_PORT", "9000")),
@@ -364,7 +315,6 @@ def get_config() -> PortunusConfig:
         redis=redis,
         aws=aws,
         kinesis=kinesis,
-        relay=relay,
         grpc=grpc,
     )
 

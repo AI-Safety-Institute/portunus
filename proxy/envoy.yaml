@@ -5,11 +5,10 @@ static_resources:
       socket_address:
         address: 0.0.0.0
         port_value: ${LISTEN_PORT}
-    # Large buffer size (50 MiB) for buffering complete request bodies
-    # This is necessary because:
-    #  1. Our authentication requires access to the full request before forwarding
-    #  2. Large requests are common with API services (e.g., embedding large documents)
-    # Note that responses are streamed and NOT buffered for better performance
+    # Large buffer size (50 MiB) for buffering complete request bodies.
+    # Needed because some upstreams (LLM APIs) accept large request bodies
+    # (e.g. embeddings of long documents). Responses are streamed and not
+    # buffered.
     per_connection_buffer_limit_bytes: 52428800  # 50 MiB
     filter_chains:
     - filters:
@@ -30,7 +29,7 @@ static_resources:
                 segment_name: pp-${TARGET_HOST}
             spawn_upstream_span: true
             verbose: true
-          generate_request_id: false
+          generate_request_id: true
           access_log:
           - name: envoy.access_loggers.file
             typed_config:
@@ -38,7 +37,7 @@ static_resources:
               path: "/dev/stdout"
               json_format:
                 timestamp: "%START_TIME%"
-                http_x_trace_id: "%DYNAMIC_METADATA(envoy.filters.http.lua:request_id)%"
+                http_x_request_id: "%REQ(X-REQUEST-ID)%"
                 http_method: "%REQ(:METHOD)%"
                 http_path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
                 http_protocol: "%PROTOCOL%"
@@ -60,11 +59,9 @@ static_resources:
                 requested_server_name: "%REQUESTED_SERVER_NAME%"
           stat_prefix: ingress_http
           codec_type: AUTO
-          # Increased stream_idle_timeout from default of 5m to 60m (3600s)
-          # This is important for streaming responses (like SSE) where tokens may arrive slowly
-          # or for long-running API calls like those to LLM APIs
-          # Without this, connections would time out after 5 minutes of inactivity
-          # Ref: https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts#stream-timeouts
+          # Streaming responses (SSE, slow LLM tokens) and long-running API
+          # calls need a long stream_idle_timeout. WebSocket sessions inherit
+          # this on the upgraded stream.
           stream_idle_timeout: 3600s
           upgrade_configs:
           - upgrade_type: websocket
@@ -74,80 +71,54 @@ static_resources:
             - name: local_service
               domains: ["*"]
               routes:
-              # WebSocket upgrades on any path route to the Portunus WS relay.
-              # Envoy matches the Upgrade header before falling through to the
-              # default HTTP route. Portunus handles auth and relays messages
-              # to the upstream target with per-message Kinesis logging.
+              # WebSocket route. Routes to the same upstream as HTTP; ext_proc
+              # filter below observes frames. Per-route filter_metadata flags
+              # the stream as WS so the Portunus Process service parses
+              # frames via wsproto instead of treating bytes opaquely.
               - match:
                   prefix: "/"
                   headers:
                   - name: "upgrade"
                     string_match:
                       exact: "websocket"
-                # Disable Lua filter for WS — auth is handled by Portunus directly.
-                typed_per_filter_config:
-                  envoy.filters.http.lua:
-                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
-                    disabled: true
-                request_headers_to_add:
-                - header:
-                    key: "${PORTUNUS_API_KEY_HEADER}"
-                    value: "${PORTUNUS_API_KEY}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-host"
-                    value: "${WS_TARGET_HOST}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-port"
-                    value: "${TARGET_PORT}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-use-tls"
-                    value: "${TARGET_HOST_USE_TLS}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                metadata:
+                  filter_metadata:
+                    envoy.filters.http.ext_proc:
+                      websocket: true
                 route:
-                  cluster: ${PORTUNUS_HOST}
+                  cluster: ${TARGET_HOST}
                   timeout: 0s
-                  # Rewrite Host so the shared ALB routes to the Portunus service,
-                  # not back to this proxy (which would loop until XFF hits 30 IPs → 463).
-                  host_rewrite_literal: "${PORTUNUS_HOST}"
                   upgrade_configs:
                   - upgrade_type: websocket
-              # Default HTTP route through Lua filter
+              # Default HTTP route — forwards to upstream provider. ext_authz
+              # mutates headers (upstream API key, signatures); ext_proc
+              # observes body bytes for the audit trail.
               - match:
                   prefix: "/"
                 route:
                   cluster: ${TARGET_HOST}
-                  timeout: 0s # no timeout
+                  timeout: 0s
                   retry_policy:
                     retry_on: reset
                     num_retries: 3
           http_filters:
           - name: envoy.filters.http.local_ratelimit
-            # This filter enable rate-limiting on a per-proxy basis, so that we
-            # can rate limit for specific projects/labs as required
+            # Per-proxy rate limit so individual project / lab quotas can be
+            # enforced. Each request through the filter consumes one token;
+            # if no tokens are available, the configured response is returned.
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
               stat_prefix: http_local_rate_limiter
-              # Conditionally include token_bucket configuration only when rate limiting is enabled
               token_bucket:
-                # Each request processed by the filter consumes a single token.
-                # If the token is available, the request will be allowed.
-                # If no tokens are available, the request will receive the configured rate limit status.
-                #
-                # https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/local_rate_limit_filter#config-http-filters-local-rate-limit
-                # and
-                # https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/local_ratelimit/v3/local_rate_limit.proto#envoy-v3-api-field-extensions-filters-http-local-ratelimit-v3-localratelimit-token-bucket
                 max_tokens: ${RATE_LIMIT_REQUESTS_PER_INTERVAL}
                 tokens_per_fill: ${RATE_LIMIT_REQUESTS_PER_INTERVAL}
                 fill_interval: ${RATE_LIMIT_INTERVAL_SECONDS}s
-              filter_enabled: # Enable the filter (it defaults to zero percent)
+              filter_enabled:
                 runtime_key: local_rate_limit_enabled
                 default_value:
                   numerator: ${RATE_LIMIT_PERCENT_ENABLED}
                   denominator: HUNDRED
-              filter_enforced: # Also "enforce" the filter (also defaults to zero percent)
+              filter_enforced:
                 runtime_key: local_rate_limit_enforced
                 default_value:
                   numerator: ${RATE_LIMIT_PERCENT_ENABLED}
@@ -155,16 +126,64 @@ static_resources:
               response_headers_to_add:
                 - append_action: OVERWRITE_IF_EXISTS_OR_ADD
                   header:
-                    # Add rate-limit response header when rate-limited,
-                    # so we can debug which rate-limits come from our proxy vs the lab
                     key: x-${PORTUNUS_HEADER_PREFIX}-rate-limit
                     value: "true"
               local_rate_limit_per_downstream_connection: false
-          - name: envoy.filters.http.lua
+          # Auth via Portunus gRPC ext_authz. Replaces the Lua filter that
+          # previously POSTed to /authorise. Returns header mutations to
+          # rewrite the customer's payload header into the upstream API key
+          # (and optional Signature / Signature-Input).
+          #
+          # failure_mode_allow: false — if Portunus is unreachable, Envoy
+          # returns 5xx rather than forwarding unauthenticated requests.
+          # This is the security half of the asymmetry; see ext_proc below
+          # for the availability half.
+          - name: envoy.filters.http.ext_authz
             typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-              default_source_code:
-                filename: /envoy/lua_subst.lua
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              transport_api_version: V3
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: portunus_grpc_cluster
+                timeout: 5s
+              failure_mode_allow: false
+              # Do not forward customer request body to Portunus — only
+              # headers are needed for the auth decision. The customer
+              # body never leaves the data path.
+              with_request_body:
+                max_request_bytes: 0
+                allow_partial_message: true
+                pack_as_bytes: false
+          # Observability via Portunus gRPC ext_proc. Replaces the Lua filter's
+          # /log/{id}/* sub-calls. Streams request/response headers, body
+          # chunks, and trailers into Portunus's Process service, which
+          # publishes to Kinesis asynchronously.
+          #
+          # failure_mode_allow: true — if Portunus is unreachable or slow,
+          # customer traffic flows; we lose audit fidelity for that window
+          # rather than dropping connections. The availability half of the
+          # asymmetry.
+          #
+          # FULL_DUPLEX_STREAMED body mode: Envoy forwards bytes upstream
+          # without waiting for the Process service to ACK each chunk.
+          # Requires *_trailer_mode: SEND (Envoy 1.36 contract) even though
+          # WS streams have no HTTP trailers.
+          - name: envoy.filters.http.ext_proc
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+              transport_api_version: V3
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: portunus_grpc_cluster
+                timeout: 30s
+              failure_mode_allow: true
+              processing_mode:
+                request_header_mode: SEND
+                response_header_mode: SEND
+                request_body_mode: FULL_DUPLEX_STREAMED
+                response_body_mode: FULL_DUPLEX_STREAMED
+                request_trailer_mode: SEND
+                response_trailer_mode: SEND
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -176,7 +195,7 @@ static_resources:
     dns_lookup_family: V4_ONLY
     lb_policy: ROUND_ROBIN
     common_http_protocol_options:
-      idle_timeout: 60s  # Set the idle timeout to 60 seconds
+      idle_timeout: 60s
     upstream_connection_options:
       tcp_keepalive:
         keepalive_probes: 1
@@ -197,9 +216,15 @@ static_resources:
                 address: ${TARGET_HOST}
                 port_value: ${TARGET_PORT}
     transport_socket: ${TARGET_HOST_TRANSPORT_SOCKET}
-  - name: ${PORTUNUS_HOST}
+  # Portunus gRPC cluster — serves both ext_authz Check and ext_proc Process.
+  # Resolved via Service Connect (portunus.{tenant}.local); STRICT_DNS picks
+  # up the multivalue A-record so load distributes across Portunus tasks
+  # rather than pinning to the first resolved IP.
+  - name: portunus_grpc_cluster
     connect_timeout: 5s
-    type: LOGICAL_DNS
+    type: STRICT_DNS
+    dns_refresh_rate: 5s
+    respect_dns_ttl: true
     dns_lookup_family: V4_ONLY
     lb_policy: ROUND_ROBIN
     common_http_protocol_options:
@@ -209,16 +234,17 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    # Must stay HTTP/1.1 — WebSocket relay uses the traditional Upgrade mechanism
-    # which is forbidden in HTTP/2 (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441)
-    # would work but uvicorn doesn't support it. Do not add http2_protocol_options here.
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
     load_assignment:
-      cluster_name: ${PORTUNUS_HOST}
+      cluster_name: portunus_grpc_cluster
       endpoints:
       - lb_endpoints:
         - endpoint:
             address:
               socket_address:
                 address: ${PORTUNUS_HOST}
-                port_value: ${PORTUNUS_PORT}
-    transport_socket: ${PORTUNUS_TRANSPORT_SOCKET}
+                port_value: ${PORTUNUS_GRPC_PORT}

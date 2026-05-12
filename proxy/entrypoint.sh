@@ -7,10 +7,12 @@ export RATE_LIMIT_INTERVAL_SECONDS=${RATE_LIMIT_INTERVAL_SECONDS:-1}
 export RATE_LIMIT_PERCENT_ENABLED=${RATE_LIMIT_PERCENT_ENABLED:-0}
 export TARGET_MAX_CONNECTIONS=${TARGET_MAX_CONNECTIONS:-10000}
 export TARGET_HOST_USE_TLS=${TARGET_HOST_USE_TLS:-true}
-export PORTUNUS_API_KEY=${PORTUNUS_API_KEY:-""}
-export PORTUNUS_API_KEY_HEADER=${PORTUNUS_API_KEY_HEADER:-"x-api-key"}
 export PORTUNUS_HEADER_PREFIX=${PORTUNUS_HEADER_PREFIX:-portunus}
 export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-""}
+
+# Portunus gRPC port — ext_authz and ext_proc both target this on the
+# Portunus host. Customer-facing REST is no longer reached from the proxy.
+export PORTUNUS_GRPC_PORT=${PORTUNUS_GRPC_PORT:-9000}
 
 # TARGET_HOST_HTTP2_OPTIONS
 if [ -z "$TARGET_HOST_HTTP2_OPTIONS" ]; then
@@ -23,14 +25,6 @@ EOF
   )
 fi
 
-# PORTUNUS_HOST_HTTP2_OPTIONS is intentionally absent — the Portunus cluster
-# must stay HTTP/1.1 for WebSocket Upgrade support (RFC 7540 §8.1.2.2).
-
-# WS_TARGET_HOST defaults to TARGET_HOST — in production they're the same
-# (e.g., api.openai.com handles both HTTP and WS). Override in local dev
-# to point WS to a separate echo server.
-export WS_TARGET_HOST=${WS_TARGET_HOST:-$TARGET_HOST}
-
 # TARGET_HOST_TRANSPORT_SOCKET
 if [ -z "$TARGET_HOST_TRANSPORT_SOCKET" ]; then
   export TARGET_HOST_TRANSPORT_SOCKET=$(yq -o json <<EOF
@@ -42,22 +36,6 @@ typed_config:
     validation_context:
       trusted_ca:
         filename: /etc/ssl/certs/ca-certificates.crt
-EOF
-  )
-fi
-
-# PORTUNUS_TRANSPORT_SOCKET
-# Force HTTP/1.1 via ALPN — WebSocket Upgrade requires HTTP/1.1 and will
-# silently fail if the TLS connection negotiates HTTP/2.
-if [ -z "$PORTUNUS_TRANSPORT_SOCKET" ]; then
-  export PORTUNUS_TRANSPORT_SOCKET=$(yq -o json <<EOF
-name: envoy.transport_sockets.tls
-typed_config:
-  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-  sni: $PORTUNUS_HOST
-  common_tls_context:
-    alpn_protocols:
-      - http/1.1
 EOF
   )
 fi
@@ -79,9 +57,8 @@ EOF
   )
 fi
 
-# Apply environment variable substitution to config files
+# Apply environment variable substitution to the Envoy config.
 envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
-envsubst < /envoy/lua.lua > /envoy/lua_subst.lua
 
-# Start Envoy with the substituted config
+# Start Envoy with the substituted config.
 exec envoy -c /envoy/envoy_subst.yaml --log-level ${ENVOY_LOG_LEVEL:-info}

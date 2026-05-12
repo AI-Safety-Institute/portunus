@@ -1,5 +1,7 @@
-# Start from the Envoy Alpine Linux image
-FROM envoyproxy/envoy:v1.31.0
+# Start from the Envoy Alpine Linux image.
+# 1.36 is the LTS-track release with graceful side-stream closing on
+# ext_proc streams. FULL_DUPLEX_STREAMED requires >=1.34.
+FROM envoyproxy/envoy:v1.36.0
 
 # Update the package lists
 RUN apt update
