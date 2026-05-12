@@ -1,17 +1,19 @@
-"""Tests for the ext_proc gRPC Process service.
+"""Behaviour tests for the ext_proc gRPC Process servicer.
 
-Covers:
-- HTTP body chunks dispatched to the right PublishService method
-- WS-upgraded streams: frame parsing, per-direction deflate state
-- Bounded queue drop policy under pressure
-- Drain protocol injects WS close code 1012
+Each test name reads as a claim about what the servicer guarantees.
+``PublishService`` is replaced by a ``FakePublishService`` that records
+every call's arguments — assertions inspect what was published, not how
+many times a method was called.
+
+End-to-end behaviour (real Kinesis, real Envoy, real WS clients) is
+covered by the docker-compose-driven tests in ``tests/test_behaviours.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from typing import AsyncIterator, Optional
-from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
@@ -19,12 +21,60 @@ from envoy.config.core.v3 import base_pb2
 from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
 from google.protobuf import struct_pb2
 
-from portunus.grpc.proc_servicer import PortunusProcessServicer, StreamMode
+from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.grpc.publish_queue import BoundedPublishQueue
 
 
 # ---------------------------------------------------------------------------
-# Builders
+# Fake publish service — records what was published so assertions can read
+# the data flowing through, rather than counting internal method calls.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _PublishedItem:
+    """One thing the servicer asked Publish to send to Kinesis."""
+
+    kind: str  # "request_headers" | "request_body" | "request_trailers" | ...
+    request_id: str
+    payload: dict = field(default_factory=dict)
+
+
+class FakePublishService:
+    """Captures every publish-* call. ``items`` is the ordered record of
+    everything the servicer dispatched."""
+
+    def __init__(self) -> None:
+        self.items: list[_PublishedItem] = []
+
+    def _capture(self, kind: str):
+        async def _impl(**kwargs):
+            self.items.append(
+                _PublishedItem(
+                    kind=kind,
+                    request_id=kwargs.get("request_id", ""),
+                    payload={k: v for k, v in kwargs.items() if k != "request_id"},
+                )
+            )
+            return True
+
+        return _impl
+
+    def __getattr__(self, name: str):
+        if name.startswith("publish_"):
+            return self._capture(name[len("publish_") :])
+        raise AttributeError(name)
+
+    # Helpers ----------------------------------------------------------------
+    def kinds(self) -> list[str]:
+        return [i.kind for i in self.items]
+
+    def of_kind(self, kind: str) -> list[_PublishedItem]:
+        return [i for i in self.items if i.kind == kind]
+
+
+# ---------------------------------------------------------------------------
+# Builders — protobuf scaffolding kept out of the test bodies
 # ---------------------------------------------------------------------------
 
 
@@ -35,7 +85,6 @@ def _http_headers_message(
     websocket_metadata: bool = False,
     request_id: Optional[str] = None,
 ) -> proc_pb2.ProcessingRequest:
-    """Build a ProcessingRequest carrying a headers message."""
     if request_id:
         headers = {**headers, "x-request-id": request_id}
     header_list = [base_pb2.HeaderValue(key=k, value=v) for k, v in headers.items()]
@@ -43,32 +92,21 @@ def _http_headers_message(
         headers=base_pb2.HeaderMap(headers=header_list),
         end_of_stream=False,
     )
-
-    kwargs: dict = {}
-    if is_request:
-        kwargs["request_headers"] = headers_msg
-    else:
-        kwargs["response_headers"] = headers_msg
-
+    kwargs: dict = (
+        {"request_headers": headers_msg} if is_request else {"response_headers": headers_msg}
+    )
     if websocket_metadata:
-        # Build a metadata_context with the websocket flag set under our
-        # ext_proc filter namespace.
         kwargs["metadata_context"] = base_pb2.Metadata(
             filter_metadata={
                 "envoy.filters.http.ext_proc": struct_pb2.Struct(
-                    fields={
-                        "websocket": struct_pb2.Value(bool_value=True),
-                    }
+                    fields={"websocket": struct_pb2.Value(bool_value=True)}
                 )
             }
         )
-
     return proc_pb2.ProcessingRequest(**kwargs)
 
 
-def _http_body_message(
-    *, body: bytes, is_request: bool
-) -> proc_pb2.ProcessingRequest:
+def _http_body_message(*, body: bytes, is_request: bool) -> proc_pb2.ProcessingRequest:
     body_msg = proc_pb2.HttpBody(body=body, end_of_stream=False)
     if is_request:
         return proc_pb2.ProcessingRequest(request_body=body_msg)
@@ -80,17 +118,15 @@ async def _stream_from(items: list) -> AsyncIterator:
         yield item
 
 
-class _MockContext:
-    """Minimal grpc.aio.ServicerContext stand-in.
+# ---------------------------------------------------------------------------
+# Fake context — only what the servicer touches
+# ---------------------------------------------------------------------------
 
-    ``metadata`` is what invocation_metadata() returns. Tests set this
-    so the per-stream proxy-key check passes (or doesn't, for the
-    negative-path tests).
-    """
 
+class _FakeContext:
     def __init__(self, *, metadata: Optional[list[tuple[str, str]]] = None) -> None:
-        self.aborted_with: Optional[tuple] = None
         self._metadata = list(metadata or [])
+        self.aborted_with: Optional[tuple] = None
 
     def invocation_metadata(self) -> list[tuple[str, str]]:
         return self._metadata
@@ -102,45 +138,49 @@ class _MockContext:
 _PROXY_KEY = "test-proxy-key-shhh"
 
 
-def _ctx_with_key(value: Optional[str] = _PROXY_KEY) -> _MockContext:
-    metadata: list[tuple[str, str]] = []
-    if value is not None:
-        metadata.append(("x-portunus-proxy-key", value))
-    return _MockContext(metadata=metadata)
+def _ctx_with_key(value: Optional[str] = _PROXY_KEY) -> _FakeContext:
+    metadata = [("x-portunus-proxy-key", value)] if value is not None else []
+    return _FakeContext(metadata=metadata)
 
 
 @pytest.fixture(autouse=True)
 def _enable_proxy_key_validation(monkeypatch):
-    """Force proxy-key validation on for every test in this module."""
     from portunus.config import config as portunus_config
 
     monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", _PROXY_KEY)
-    yield
 
 
-def _make_servicer(*, queue_maxsize: int = 10_000) -> tuple[
-    PortunusProcessServicer, MagicMock, BoundedPublishQueue
-]:
-    publish = MagicMock()
-    publish.publish_request_headers = AsyncMock(return_value=True)
-    publish.publish_request_body = AsyncMock(return_value=True)
-    publish.publish_request_trailers = AsyncMock(return_value=True)
-    publish.publish_response_headers = AsyncMock(return_value=True)
-    publish.publish_response_body = AsyncMock(return_value=True)
-    publish.publish_response_trailers = AsyncMock(return_value=True)
-
+def _make_servicer(
+    *, queue_maxsize: int = 10_000, publish: Optional[FakePublishService] = None
+) -> tuple[PortunusProcessServicer, FakePublishService, BoundedPublishQueue]:
+    publish = publish or FakePublishService()
     queue = BoundedPublishQueue(maxsize=queue_maxsize, num_workers=2)
     servicer = PortunusProcessServicer(publish_service=publish, publish_queue=queue)
     return servicer, publish, queue
 
 
+async def _drain_queue(queue: BoundedPublishQueue, *, timeout: float = 1.0) -> None:
+    """Wait for the queue to fully drain so publish-side assertions see all
+    items the servicer dispatched. Avoids a fixed ``sleep(0.1)`` that
+    relies on workers being faster than wall-clock."""
+    end = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < end:
+        if queue.qsize() == 0:
+            # Give workers one more event-loop tick to finish their task.
+            await asyncio.sleep(0)
+            if queue.qsize() == 0:
+                return
+        await asyncio.sleep(0.01)
+    raise AssertionError("publish queue did not drain within timeout")
+
+
 # ---------------------------------------------------------------------------
-# HTTP path
+# HTTP path — request and response halves
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_http_request_headers_dispatched_to_publish_request_headers():
+async def test_http_request_headers_are_published_with_their_headers_intact():
     servicer, publish, queue = _make_servicer()
     await queue.start()
     try:
@@ -154,52 +194,60 @@ async def test_http_request_headers_dispatched_to_publish_request_headers():
             ]
         )
 
-        responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
 
-        # One response per request message — an empty body response per FDS.
-        assert len(responses) == 1
-        # Allow queue worker to drain.
-        await asyncio.sleep(0.1)
-        publish.publish_request_headers.assert_awaited_once()
-        kwargs = publish.publish_request_headers.await_args.kwargs
-        assert kwargs["request_id"] == "req-123"
-        assert kwargs["headers"]["x-foo"] == "bar"
+        request_headers = publish.of_kind("request_headers")
+        assert len(request_headers) == 1
+        assert request_headers[0].request_id == "req-123"
+        assert request_headers[0].payload["headers"]["x-foo"] == "bar"
     finally:
         await queue.stop()
 
 
 @pytest.mark.asyncio
-async def test_http_response_body_dispatched_to_publish_response_body():
+async def test_http_response_body_chunks_are_published_with_their_bytes_intact():
     servicer, publish, queue = _make_servicer()
     await queue.start()
     try:
         stream = _stream_from(
             [
-                _http_headers_message(
-                    headers={}, is_request=True, request_id="req-x"
-                ),
+                _http_headers_message(headers={}, is_request=True, request_id="req-x"),
                 _http_body_message(body=b"hello world", is_request=False),
             ]
         )
 
         async for _ in servicer.Process(stream, _ctx_with_key()):
             pass
+        await _drain_queue(queue)
 
-        await asyncio.sleep(0.1)
-        publish.publish_response_body.assert_awaited_once()
-        kwargs = publish.publish_response_body.await_args.kwargs
-        assert kwargs["body_bytes"] == b"hello world"
+        response_bodies = publish.of_kind("response_body")
+        assert len(response_bodies) == 1
+        assert response_bodies[0].payload["body_bytes"] == b"hello world"
     finally:
         await queue.stop()
 
 
 # ---------------------------------------------------------------------------
-# WS detection from filter metadata
+# WS detection — driven by the filter metadata Envoy attaches. Tested via
+# the observable side effect (a WS-mode stream parses frames) rather than
+# by calling the private ``_extract_mode`` directly.
 # ---------------------------------------------------------------------------
 
 
+def _ws_frame(payload: bytes) -> bytes:
+    """Single-fragment, unmasked WS text frame with the given payload."""
+    header = bytes([0x81, len(payload)])  # FIN | text opcode, payload length
+    return header + payload
+
+
 @pytest.mark.asyncio
-async def test_websocket_metadata_promotes_stream_to_ws_mode():
+async def test_websocket_stream_publishes_decoded_message_text_not_raw_frame_bytes():
+    """A WS-tagged stream means the servicer should parse frames via
+    wsproto and publish the decoded message payload. If the metadata flag
+    were ignored the publish would carry raw frame bytes (header + body).
+    Observing the decoded payload confirms the WS path is in effect."""
     servicer, publish, queue = _make_servicer()
     await queue.start()
     try:
@@ -210,47 +258,42 @@ async def test_websocket_metadata_promotes_stream_to_ws_mode():
                     is_request=True,
                     websocket_metadata=True,
                     request_id="ws-1",
-                )
+                ),
+                _http_body_message(body=_ws_frame(b"hello"), is_request=False),
             ]
         )
 
         async for _ in servicer.Process(stream, _ctx_with_key()):
             pass
+        await _drain_queue(queue)
 
-        # State for ws-1 has been popped already (stream ended), but we
-        # can prove it was WS by observing the active-stream side effect
-        # via a second mid-stream request — easier: stub out and check
-        # by attribute on the request_headers handler. Simplest: assert
-        # _extract_mode behaviour in isolation.
-        from portunus.grpc.proc_servicer import _extract_mode
-
-        first = _http_headers_message(
-            headers={}, is_request=True, websocket_metadata=True
+        # The body publish should be the decoded "hello", not the framed bytes.
+        body_items = publish.of_kind("response_body")
+        assert any(item.payload.get("body_bytes") == b"hello" for item in body_items), (
+            f"Expected decoded 'hello'; got {[i.payload.get('body_bytes') for i in body_items]!r}"
         )
-        assert _extract_mode(first) == StreamMode.WS_UPGRADE
-
-        plain = _http_headers_message(headers={}, is_request=True)
-        assert _extract_mode(plain) == StreamMode.HTTP
     finally:
         await queue.stop()
 
 
 # ---------------------------------------------------------------------------
-# Bounded queue drop policy
+# Bounded queue drop policy — under back-pressure, drop body chunks rather
+# than blocking the customer's request
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_body_chunks_drop_when_queue_full_and_metric_increments():
-    # Tiny queue and no workers running yet so put_nowait fills immediately.
-    servicer, publish, queue = _make_servicer(queue_maxsize=2)
-    # NB: don't start workers — we want the queue to stay full.
+async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_counter():
+    """Tiny queue + no workers running → put_nowait will fail past
+    capacity, the servicer should swallow those bodies and bump the drop
+    counter. The customer's request must still receive its per-message
+    Envoy response."""
+    servicer, _publish, queue = _make_servicer(queue_maxsize=2)
+    # NB: workers deliberately not started so the queue stays full.
 
     stream = _stream_from(
         [
-            _http_headers_message(
-                headers={}, is_request=True, request_id="drop-test"
-            ),
+            _http_headers_message(headers={}, is_request=True, request_id="drop-test"),
             _http_body_message(body=b"a" * 100, is_request=False),
             _http_body_message(body=b"b" * 100, is_request=False),
             _http_body_message(body=b"c" * 100, is_request=False),
@@ -258,30 +301,28 @@ async def test_body_chunks_drop_when_queue_full_and_metric_increments():
         ]
     )
 
-    async for _ in servicer.Process(stream, _ctx_with_key()):
-        pass
+    responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-    # First two fit; the rest get dropped. (request_headers got the
-    # "block" path, so it might also occupy a queue slot — give a wide
-    # tolerance and just assert *some* drops happened.)
+    # The customer-facing contract: every ProcessingRequest gets a
+    # ProcessingResponse, regardless of whether the body was dropped.
+    assert len(responses) == 5
+    # And at least one drop must have been counted.
     assert queue.dropped_total >= 1
 
 
 # ---------------------------------------------------------------------------
-# Drain protocol — inject WS close frame on mid-stream drain
+# Drain protocol — active WS streams receive a 1012 close frame
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_drain_injects_ws_close_1012_on_active_ws_stream():
-    servicer, publish, queue = _make_servicer()
+async def test_drain_injects_ws_close_frame_with_code_1012_on_active_ws_stream():
+    """When the servicer is asked to drain, every active WS stream gets a
+    close frame injected into its response so clients learn the server is
+    going away. We observe the close frame bytes on the second response."""
+    servicer, _publish, queue = _make_servicer()
     await queue.start()
     try:
-        # We can't easily mid-stream the request_iterator in a test, so
-        # exercise the response path directly: open a stream, then trigger
-        # drain after the headers message, then send a body message and
-        # observe the next response is a close-frame injection rather
-        # than the empty BodyMutation.
         ready = asyncio.Event()
         drain_done = asyncio.Event()
 
@@ -297,10 +338,7 @@ async def test_drain_injects_ws_close_1012_on_active_ws_stream():
             yield _http_body_message(body=b"another frame", is_request=False)
 
         async def driver() -> list:
-            results = []
-            async for r in servicer.Process(iterator(), _ctx_with_key()):
-                results.append(r)
-            return results
+            return [r async for r in servicer.Process(iterator(), _ctx_with_key())]
 
         task = asyncio.create_task(driver())
         await ready.wait()
@@ -308,100 +346,89 @@ async def test_drain_injects_ws_close_1012_on_active_ws_stream():
         drain_done.set()
         results = await asyncio.wait_for(task, timeout=2.0)
 
-        # First response: empty body response for the headers.
-        # Second response: the injected close frame.
         assert len(results) == 2
-        close_response = results[1]
-        assert close_response.HasField("response_body")
-        body = close_response.response_body.response.body_mutation.streamed_response.body
-        # Close frame: 0x88 (FIN|close opcode), then 2 + len(reason) payload.
+        body = (
+            results[1]
+            .response_body.response.body_mutation.streamed_response.body
+        )
+        # WS close frame: 0x88 = FIN|close opcode; then 2-byte big-endian code.
         assert body[0] == 0x88
-        # Close code 1012 in big-endian
-        close_code = int.from_bytes(body[2:4], "big")
-        assert close_code == 1012
+        assert int.from_bytes(body[2:4], "big") == 1012
     finally:
         await queue.stop()
 
 
 # ---------------------------------------------------------------------------
-# Proxy-key identity check — once per stream, at stream open
+# Proxy-key identity check — once per stream at stream open
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_missing_proxy_key_aborts_stream_with_permission_denied():
-    servicer, _publish, queue = _make_servicer()
+async def test_missing_proxy_key_aborts_the_stream_before_yielding_any_response():
+    servicer, publish, queue = _make_servicer()
     await queue.start()
     try:
         stream = _stream_from(
-            [
-                _http_headers_message(
-                    headers={}, is_request=True, request_id="no-key"
-                )
-            ]
+            [_http_headers_message(headers={}, is_request=True, request_id="no-key")]
         )
         ctx = _ctx_with_key(value=None)
 
         responses = [r async for r in servicer.Process(stream, ctx)]
 
-        assert responses == [], "Process should abort before yielding any response"
+        assert responses == []
         assert ctx.aborted_with is not None
         code, detail = ctx.aborted_with
         assert code == grpc.StatusCode.PERMISSION_DENIED
         assert "proxy identity" in detail.lower()
+        # And — no publish should have leaked through for a stream that
+        # never proved its identity.
+        assert publish.items == []
     finally:
         await queue.stop()
 
 
 @pytest.mark.asyncio
-async def test_wrong_proxy_key_aborts_stream_with_permission_denied():
+async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
     servicer, _publish, queue = _make_servicer()
     await queue.start()
     try:
         stream = _stream_from(
-            [
-                _http_headers_message(
-                    headers={}, is_request=True, request_id="wrong-key"
-                )
-            ]
+            [_http_headers_message(headers={}, is_request=True, request_id="wrong")]
         )
-        ctx = _ctx_with_key(value="wrong")
+        ctx = _ctx_with_key(value="wrong-key")
 
         responses = [r async for r in servicer.Process(stream, ctx)]
 
         assert responses == []
-        assert ctx.aborted_with is not None
         assert ctx.aborted_with[0] == grpc.StatusCode.PERMISSION_DENIED
     finally:
         await queue.stop()
 
 
 # ---------------------------------------------------------------------------
-# FDS response shape — empty streamed_response, not plain CommonResponse
+# Envoy 1.36 FDS contract — body responses must wrap in streamed_response
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_body_response_uses_streamed_response_shape():
-    """Envoy 1.36 in FDS mode rejects a plain CommonResponse — must wrap
-    in BodyMutation.streamed_response. See spike-findings doc."""
+async def test_body_response_uses_the_streamed_response_envelope_required_by_envoy_136_fds():
+    """Envoy 1.36 in FULL_DUPLEX_STREAMED mode rejects a plain
+    CommonResponse on body messages — the body_mutation must wrap a
+    streamed_response (even when empty). Regression test against
+    reverting the envelope."""
     servicer, _publish, queue = _make_servicer()
     await queue.start()
     try:
         stream = _stream_from(
             [
-                _http_headers_message(
-                    headers={}, is_request=True, request_id="shape-test"
-                ),
-                _http_body_message(body=b"some body", is_request=True),
+                _http_headers_message(headers={}, is_request=True, request_id="shape"),
+                _http_body_message(body=b"body", is_request=True),
             ]
         )
 
         responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-        body_resp = responses[1].request_body
-        # The path that matters: streamed_response field must be set
-        # (even if empty) on the body_mutation.
-        assert body_resp.response.body_mutation.HasField("streamed_response")
+        body_response = responses[1].request_body
+        assert body_response.response.body_mutation.HasField("streamed_response")
     finally:
         await queue.stop()
