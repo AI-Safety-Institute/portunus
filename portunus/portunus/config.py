@@ -184,6 +184,47 @@ class RelayConfig(BaseModel):
     )
 
 
+class GrpcConfig(BaseModel):
+    """gRPC server configuration for Envoy ext_authz / ext_proc filters.
+
+    The gRPC server runs alongside the existing FastAPI app and serves
+    Envoy's external_authorization_v3 and external_processor_v3 services.
+    It is opt-in via ``enabled`` so existing deployments aren't affected
+    until they explicitly turn it on.
+
+    Attributes:
+        enabled: Whether to start the gRPC server alongside FastAPI.
+        port: TCP port the gRPC server binds to.
+        max_concurrent_streams: Per-connection HTTP/2 stream limit. Envoy
+            opens one stream per request for ext_authz and one per stream
+            for ext_proc, so the limit should comfortably exceed the
+            expected concurrent-request count from any one Envoy task.
+        graceful_shutdown_seconds: How long to give in-flight RPCs to
+            complete on SIGTERM before forcing termination.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to start the gRPC server",
+    )
+    port: int = Field(
+        default=9000,
+        description="TCP port the gRPC server binds to",
+        ge=1,
+        le=65535,
+    )
+    max_concurrent_streams: int = Field(
+        default=1000,
+        description="Per-connection HTTP/2 stream limit",
+        ge=1,
+    )
+    graceful_shutdown_seconds: int = Field(
+        default=30,
+        description="Grace period for in-flight RPCs on SIGTERM",
+        ge=0,
+    )
+
+
 class PortunusConfig(BaseModel):
     """Main configuration for the Portunus service.
 
@@ -193,6 +234,7 @@ class PortunusConfig(BaseModel):
         log_level: Logging level
         api_key_header: Header name to use for the API key
         api_key_prefix: Prefix to use for the API key
+        grpc: gRPC server configuration (Envoy ext_authz / ext_proc)
     """
 
     # Service settings
@@ -211,6 +253,10 @@ class PortunusConfig(BaseModel):
     relay: RelayConfig = Field(
         default_factory=RelayConfig,
         description="WebSocket relay configuration",
+    )
+    grpc: GrpcConfig = Field(
+        default_factory=GrpcConfig,
+        description="gRPC server configuration",
     )
     log_level: str = Field(
         default="INFO",
@@ -300,6 +346,17 @@ def get_config() -> PortunusConfig:
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
     )
 
+    grpc = GrpcConfig(
+        enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
+        port=int(os.environ.get("GRPC_PORT", "9000")),
+        max_concurrent_streams=int(
+            os.environ.get("GRPC_MAX_CONCURRENT_STREAMS", "1000")
+        ),
+        graceful_shutdown_seconds=int(
+            os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
+        ),
+    )
+
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -308,6 +365,7 @@ def get_config() -> PortunusConfig:
         aws=aws,
         kinesis=kinesis,
         relay=relay,
+        grpc=grpc,
     )
 
 

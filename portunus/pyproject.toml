@@ -19,6 +19,16 @@ dependencies = [
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
     "websockets>=12.0,<14",
+    # gRPC servers for Envoy ext_authz / ext_proc filters. xds-protos>=1.80
+    # ships the stable v3 namespace (older versions only have v3alpha and
+    # lack FULL_DUPLEX_STREAMED). See docs/decisions/extproc-spike-findings.md
+    # for the version-compatibility notes from the May 2026 spike.
+    "grpcio>=1.66.0,<2",
+    "xds-protos>=1.80.0",
+    "googleapis-common-protos>=1.65.0,<2",
+    # wsproto for sans-IO WebSocket frame parsing in the ext_proc Process
+    # service (used by a follow-up PR — declared here so PR 1's lock includes it).
+    "wsproto>=1.2.0,<2",
 ]
 
 [dependency-groups]

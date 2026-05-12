@@ -326,7 +326,11 @@ class AuthPayload:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
         except Exception as e:
-            msg = f"Failed to decode authorization payload: {e}, payload: {raw_payload}"
+            # Never include raw_payload in the message: the base64 blob
+            # contains temporary AWS credentials and would surface in error
+            # responses, structured logs, and Envoy access logs. The `from e`
+            # chain preserves the underlying decode error for debugging.
+            msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
 
     def to_dict(self) -> Dict[str, Any]:

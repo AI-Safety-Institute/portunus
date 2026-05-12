@@ -568,13 +568,30 @@ async def ping(request: Request) -> dict:
 async def lifespan(app: FastAPI):
     """Manage application lifecycle.
 
-    Starts the WS log queue on startup, drains active WS connections
-    and cleans up Redis on shutdown.
+    Starts the WS log queue on startup, optionally starts the gRPC server
+    for Envoy ext_authz / ext_proc, drains active WS connections and gRPC
+    streams on shutdown, and cleans up Redis.
     """
     await start_log_queue(num_workers=config.relay.max_connections)
+
+    # gRPC server (Envoy ext_authz / ext_proc). Default-off — controlled by
+    # config.grpc.enabled. When off, this is a no-op and existing
+    # deployments are unaffected.
+    from portunus.grpc.server import start_grpc_server, stop_grpc_server
+
+    grpc_server = await start_grpc_server(
+        config=config.grpc,
+        auth_service=auth_service,
+        publish_service=publish_service,
+    )
+
     yield
 
-    # Cancel WS connections first so they stop producing log items
+    # Stop the gRPC server first so it stops accepting new ext_proc / ext_authz
+    # streams before we tear down the publish path they depend on.
+    await stop_grpc_server(grpc_server, grace_seconds=config.grpc.graceful_shutdown_seconds)
+
+    # Cancel WS connections so they stop producing log items
     if _active_ws_connections:
         logger.info(
             f"Draining {len(_active_ws_connections)} active WebSocket connections"
