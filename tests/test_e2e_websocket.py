@@ -126,66 +126,31 @@ def read_kinesis_records(stream_name: str) -> list[dict]:
     return records
 
 
-@pytest.mark.slow
-class TestWebSocketAuth:
-    """Test WebSocket authentication through Envoy -> Portunus."""
-
-    @pytest.mark.asyncio
-    async def test_ws_without_auth_rejected(self, ws_docker_setup):
-        """WS connection without auth header is rejected by Portunus."""
-        try:
-            ws = await websockets.connect(PROXY_WS_URL, open_timeout=5)
-            try:
-                await asyncio.wait_for(ws.recv(), timeout=3)
-                pytest.fail("Expected close, got message")
-            except ConnectionClosed as e:
-                assert get_close_code(e) in (4001, 4003)
-        except InvalidStatusCode as e:
-            assert e.status_code in (400, 401, 403)
-
-    @pytest.mark.asyncio
-    async def test_ws_with_invalid_auth_rejected(self, ws_docker_setup):
-        """WS connection with invalid auth payload is rejected."""
-        try:
-            ws = await websockets.connect(
-                PROXY_WS_URL,
-                extra_headers={"Authorization": "Bearer invalid_payload"},
-                open_timeout=5,
-            )
-            try:
-                await asyncio.wait_for(ws.recv(), timeout=3)
-                pytest.fail("Expected close, got message")
-            except ConnectionClosed as e:
-                assert get_close_code(e) in (4001, 4003)
-        except InvalidStatusCode as e:
-            assert e.status_code in (401, 403)
+# NOTE: The following tests were removed because they are covered by the
+# behaviour suite in tests/test_behaviours_ws.py — duplicates were dropped
+# rather than maintained in two places:
+#   - TestWebSocketAuth.test_ws_without_auth_rejected
+#       → test_ws_upgrade_without_authorization_header_is_rejected_before_upgrade
+#   - TestWebSocketAuth.test_ws_with_invalid_auth_rejected
+#       → same behaviour ("auth failure on upgrade is rejected"); the
+#         malformed-vs-missing-header distinction is a single failure
+#         path through the auth gate
+#   - TestWebSocketRelay.test_message_echo
+#       → test_text_message_round_trips_through_portunus_to_echo_upstream
+# What remains in TestWebSocketRelay below covers Kinesis-record assertions
+# (different test family — observability) and Envoy routing checks that
+# don't fit the corpus shape.
 
 
 @pytest.mark.slow
 class TestWebSocketRelay:
-    """Test full bidirectional WebSocket relay through Envoy -> Portunus -> ws-echo."""
+    """Kinesis-record observability through the WS relay.
 
-    @pytest.mark.asyncio
-    async def test_message_echo(self, ws_docker_setup):
-        """Messages sent to the relay are echoed back by ws-echo upstream."""
-        auth_header = make_auth_header()
-        ws = await websockets.connect(
-            PROXY_WS_URL,
-            extra_headers={"Authorization": auth_header},
-            open_timeout=5,
-        )
-        try:
-            # Send and receive echo
-            await ws.send("hello portunus")
-            echo = await asyncio.wait_for(ws.recv(), timeout=5)
-            assert echo == "hello portunus"
-
-            # Second message
-            await ws.send("second message")
-            echo2 = await asyncio.wait_for(ws.recv(), timeout=5)
-            assert echo2 == "second message"
-        finally:
-            await ws.close()
+    The bidirectional-relay happy-path tests live in
+    tests/test_behaviours_ws.py. The remaining tests here cover the
+    observability arm — that WS sessions produce the expected records in
+    Kinesis (via LocalStack) for downstream auditing.
+    """
 
     @pytest.mark.asyncio
     async def test_messages_logged_to_kinesis(self, ws_docker_setup):

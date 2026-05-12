@@ -21,90 +21,20 @@ def test_custom_header_prefix_on_ping(docker_setup):
     assert response.headers.get("x-aisi-proxy-ping") == "true"
 
 
-def test_request_without_payload(api_key_header: str, docker_setup):
-    response = requests.get("http://localhost:8888/get")
-
-    assert response.status_code in (401, 500), response.content
-    error_data = response.json()
-    assert "error" in error_data
-    if response.status_code == 401:
-        assert "Authorization header is required" in error_data["error"]["message"]
-    else:
-        assert "Internal proxy error" in error_data["error"]["message"]
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        "invalid",  # This one still fails with "Failed to decode"
-    ],
-)
-def test_request_with_invalid_payload(
-    payload: str, api_key_prefix: str, api_key_header: str, docker_setup
-):
-    response = requests.get(
-        "http://localhost:8888/get",
-        headers={api_key_header: f"{api_key_prefix}{payload}"},
-    )
-
-    assert response.status_code in (401, 500), response.content
-    error_data = response.json()
-    assert "error" in error_data
-    if response.status_code == 401:
-        assert (
-            "Failed to decode" in error_data["error"]["message"]
-            or "Authorization failed" in error_data["error"]["message"]
-        )
-    else:
-        assert "Internal proxy error" in error_data["error"]["message"]
-
-
-@pytest.mark.parametrize(
-    "docker_setup",
-    [
-        '{"secret": "test-key", "host": "api.openai.com"}',
-    ],
-    indirect=True,
-)
-def test_auth_fails_when_target_host_mismatches(
-    api_key_prefix: str, api_key_header: str, docker_setup
-):
-    """Test auth fails when secret has host restriction that doesn't match target."""
-    payload = encode_base64({"credentials": {}, "secret_arn": ""})
-    response = requests.get(
-        "http://localhost:8888/get",
-        headers={api_key_header: f"{api_key_prefix}{payload}"},
-    )
-
-    assert response.status_code == 403, response.content
-
-    error_data = response.json()
-    assert "error" in error_data
-    assert "API key is not valid for target host" in error_data["error"]["message"]
-
-
-@pytest.mark.parametrize(
-    "docker_setup",
-    ["xyz"],
-    indirect=True,
-)
-def test_auth_succeeds_with_plain_text_key(
-    api_key_prefix: str, api_key_header: str, docker_setup
-):
-    """Test that authentication succeeds with plain text mock API key."""
-    payload = encode_base64({"credentials": {}, "secret_arn": ""})
-    response = requests.get(
-        "http://localhost:8888/get",
-        headers={api_key_header: f"{api_key_prefix}{payload}"},
-    )
-
-    assert response.status_code == 200, response.content
-    # Verify the Authorization header was set to the mock API key
-    response_data = response.json()
-    assert "Authorization" in response_data["headers"]
-    # The current behavior is just returning the API key without prefix
-    # This makes the test pass with the current implementation
-    assert response_data["headers"]["Authorization"] == api_key_prefix + docker_setup
+# NOTE: The following tests were removed because they are covered by the
+# behaviour corpus in tests/test_behaviours.py — duplicates were dropped
+# rather than maintained in two places:
+#   - test_request_without_payload
+#       → request_without_authorization_header_is_rejected
+#   - test_request_with_invalid_payload
+#       → request_with_malformed_base64_payload_is_rejected
+#   - test_auth_fails_when_target_host_mismatches
+#       → secret_with_mismatching_host_is_rejected_with_403
+#   - test_auth_succeeds_with_plain_text_key
+#       → valid_request_with_plaintext_secret_reaches_upstream
+# The tests that remain in this file cover behaviours not yet in the
+# corpus (custom response-header prefix, request signing, error-response
+# diagnostics) — migrate into the corpus when shapes align.
 
 
 # Manually test with:
