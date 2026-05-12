@@ -21,7 +21,6 @@ WORKDIR /
 
 # Copy the Envoy configuration file to the Docker image
 COPY envoy.yaml /envoy/envoy.yaml
-COPY lua.lua /envoy/lua.lua
 COPY xray.json /envoy/xray.json
 
 RUN chown -R envoy:envoy /envoy
