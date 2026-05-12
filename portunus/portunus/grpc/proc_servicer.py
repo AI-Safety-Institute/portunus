@@ -48,12 +48,14 @@ from envoy.service.ext_proc.v3 import (  # type: ignore[import-not-found]
     external_processor_pb2_grpc as proc_grpc,
 )
 
+from portunus.config import config
 from portunus.grpc.frame_observer import (
     Direction,
     FrameObserver,
     ObservedFrame,
     build_observer,
 )
+from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.grpc.publish_queue import BoundedPublishQueue, PublishTask
 from portunus.services.publish_service import PublishService
 from portunus.util import generate_iso_timestamp
@@ -125,6 +127,16 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         context: grpc.aio.ServicerContext,
     ) -> AsyncIterator[proc_pb2.ProcessingResponse]:
         """Handle one ext_proc stream from start to end."""
+        # Identity check at stream open. ext_proc streams are long-lived,
+        # so this fires once per stream rather than per ProcessingRequest.
+        received_proxy_key = extract_proxy_key(context)
+        if not is_valid_proxy_key(received_proxy_key, config.grpc.proxy_api_key):
+            await context.abort(
+                grpc.StatusCode.PERMISSION_DENIED,
+                "Missing or invalid proxy identity",
+            )
+            return
+
         state: Optional[_StreamState] = None
         try:
             async for request in request_iterator:

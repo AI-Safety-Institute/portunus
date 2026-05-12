@@ -50,6 +50,7 @@ from portunus.exceptions import (
 from portunus.models import AuthPayload
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_service import PublishService
+from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.services.signing_service import (
     SignableRequest,
     SignatureHeaders,
@@ -99,6 +100,19 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         """
         request_id = self._extract_request_id(request)
         headers = _http_headers(request)
+
+        # Identity check: proxy presents a pre-shared key via gRPC
+        # initial_metadata. SC namespace membership is broader than
+        # "you are the api-key-proxy", so this is the gate that proves
+        # caller identity. With validation disabled (empty expected key)
+        # this becomes a no-op — only safe in tests.
+        received_proxy_key = extract_proxy_key(context)
+        if not is_valid_proxy_key(received_proxy_key, config.grpc.proxy_api_key):
+            return _denied(
+                code=401,
+                body="Missing or invalid proxy identity",
+                request_id=request_id,
+            )
 
         try:
             raw_payload = headers.get(_DEFAULT_PAYLOAD_HEADER, "")

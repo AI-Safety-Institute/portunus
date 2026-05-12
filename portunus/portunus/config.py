@@ -165,6 +165,15 @@ class GrpcConfig(BaseModel):
             expected concurrent-request count from any one Envoy task.
         graceful_shutdown_seconds: How long to give in-flight RPCs to
             complete on SIGTERM before forcing termination.
+        proxy_api_key: Pre-shared key proving the caller is a sanctioned
+            Envoy proxy. The proxy injects this as gRPC ``initial_metadata``
+            on every Check / Process call under the ``x-portunus-proxy-key``
+            metadata key; the servicer rejects the call with
+            ``PERMISSION_DENIED`` if missing or wrong. Service Connect
+            namespace membership gates network reachability, but the
+            namespace is broader than "the api-key-proxy fleet" (any
+            tenant-001 service is in it). This key is the identity factor.
+            When empty, the validation is skipped — only do that in tests.
     """
 
     enabled: bool = Field(
@@ -186,6 +195,13 @@ class GrpcConfig(BaseModel):
         default=30,
         description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
+    )
+    proxy_api_key: str = Field(
+        default="",
+        description=(
+            "Pre-shared key the proxy presents as `x-portunus-proxy-key` "
+            "gRPC metadata. Empty disables validation (tests only)."
+        ),
     )
 
 
@@ -306,6 +322,7 @@ def get_config() -> PortunusConfig:
         graceful_shutdown_seconds=int(
             os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
         ),
+        proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
     )
 
     return PortunusConfig(

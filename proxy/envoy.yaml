@@ -146,6 +146,14 @@ static_resources:
                 envoy_grpc:
                   cluster_name: portunus_grpc_cluster
                 timeout: 5s
+                # Identity check — proves the caller is a sanctioned
+                # proxy, paired with the AWS credential payload that
+                # proves authorisation. SC namespace membership gates
+                # network reachability but is broader than the proxy
+                # fleet; this key is the additional gate.
+                initial_metadata:
+                - key: x-portunus-proxy-key
+                  value: "${PORTUNUS_API_KEY}"
               failure_mode_allow: false
               # Do not forward customer request body to Portunus — only
               # headers are needed for the auth decision. The customer
@@ -176,6 +184,11 @@ static_resources:
                 envoy_grpc:
                   cluster_name: portunus_grpc_cluster
                 timeout: 30s
+                # Same identity gate as ext_authz above; checked once
+                # per stream at stream open.
+                initial_metadata:
+                - key: x-portunus-proxy-key
+                  value: "${PORTUNUS_API_KEY}"
               failure_mode_allow: true
               processing_mode:
                 request_header_mode: SEND

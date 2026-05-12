@@ -14,6 +14,12 @@ export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-""}
 # Portunus host. Customer-facing REST is no longer reached from the proxy.
 export PORTUNUS_GRPC_PORT=${PORTUNUS_GRPC_PORT:-9000}
 
+# Pre-shared key proving the proxy's identity to Portunus's gRPC server.
+# Injected by the api-key-proxy task definition from Secrets Manager;
+# substituted into the ext_authz / ext_proc filter configs in envoy.yaml
+# as the static `x-portunus-proxy-key` gRPC initial_metadata value.
+export PORTUNUS_API_KEY=${PORTUNUS_API_KEY:-""}
+
 # TARGET_HOST_HTTP2_OPTIONS
 if [ -z "$TARGET_HOST_HTTP2_OPTIONS" ]; then
   export TARGET_HOST_HTTP2_OPTIONS=$(yq -o json <<EOF

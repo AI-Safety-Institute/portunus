@@ -102,13 +102,44 @@ def _check_request(
 
 class _MockContext:
     """Minimal grpc.aio.ServicerContext stand-in. Tests don't call into
-    the gRPC framing layer — just into the servicer's Check method."""
+    the gRPC framing layer — just into the servicer's Check method.
 
-    def __init__(self) -> None:
+    ``metadata`` is the (key, value) iterable returned by
+    invocation_metadata(); default empty so by default the proxy-key
+    validation in Check fails closed.
+    """
+
+    def __init__(self, *, metadata: Optional[list[tuple[str, str]]] = None) -> None:
         self.aborted_with: Optional[tuple[grpc.StatusCode, str]] = None
+        self._metadata = list(metadata or [])
+
+    def invocation_metadata(self) -> list[tuple[str, str]]:
+        return self._metadata
 
     async def abort(self, code: grpc.StatusCode, details: str) -> None:
         self.aborted_with = (code, details)
+
+
+# Tests run with config.grpc.proxy_api_key set to a known value; the
+# proxy-key validation is on. _ctx_with_key produces a context that
+# carries the matching key in invocation metadata.
+_PROXY_KEY = "test-proxy-key-shhh"
+
+
+def _ctx_with_key(value: Optional[str] = _PROXY_KEY) -> _MockContext:
+    metadata: list[tuple[str, str]] = []
+    if value is not None:
+        metadata.append(("x-portunus-proxy-key", value))
+    return _MockContext(metadata=metadata)
+
+
+@pytest.fixture(autouse=True)
+def _enable_proxy_key_validation(monkeypatch):
+    """Force the validation on for every test in this module."""
+    from portunus.config import config as portunus_config
+
+    monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", _PROXY_KEY)
+    yield
 
 
 def _make_servicer(
@@ -163,7 +194,7 @@ async def test_ok_response_carries_upstream_api_key():
     servicer, _auth, _publish, _sign = _make_servicer()
     request = _check_request()
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.HasField("ok_response"), (
         "Expected ok_response on a successful auth"
@@ -177,7 +208,7 @@ async def test_metadata_publish_called_synchronously_before_ok():
     servicer, _auth, publish, _sign = _make_servicer()
     request = _check_request()
 
-    await servicer.Check(request, _MockContext())
+    await servicer.Check(request, _ctx_with_key())
 
     publish.publish_metadata.assert_awaited_once()
     args, kwargs = publish.publish_metadata.await_args
@@ -192,6 +223,53 @@ async def test_metadata_publish_called_synchronously_before_ok():
 
 
 # ---------------------------------------------------------------------------
+# Proxy-key identity check — the gate that proves the caller is a sanctioned
+# Envoy proxy. Service Connect namespace gates network reachability, but the
+# namespace is broader than the proxy fleet alone.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_missing_proxy_key_returns_401():
+    servicer, _auth, _publish, _sign = _make_servicer()
+    request = _check_request()
+
+    response = await servicer.Check(request, _ctx_with_key(value=None))
+
+    assert response.HasField("denied_response")
+    assert response.denied_response.status.code == 401
+    assert "proxy identity" in response.denied_response.body.lower()
+
+
+@pytest.mark.asyncio
+async def test_wrong_proxy_key_returns_401():
+    servicer, _auth, _publish, _sign = _make_servicer()
+    request = _check_request()
+
+    response = await servicer.Check(request, _ctx_with_key(value="wrong-key"))
+
+    assert response.denied_response.status.code == 401
+    assert "proxy identity" in response.denied_response.body.lower()
+
+
+@pytest.mark.asyncio
+async def test_empty_expected_key_disables_validation(monkeypatch):
+    """Empty config disables the check — tests-only mode."""
+    from portunus.config import config as portunus_config
+
+    monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", "")
+    servicer, _auth, _publish, _sign = _make_servicer()
+    request = _check_request()
+
+    # No metadata at all
+    response = await servicer.Check(request, _MockContext())
+
+    assert response.HasField("ok_response"), (
+        "Empty proxy_api_key config should skip validation"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Sad paths — each exception class maps to a specific HTTP status
 # ---------------------------------------------------------------------------
 
@@ -201,7 +279,7 @@ async def test_missing_authorization_header_returns_401():
     servicer, _auth, _publish, _sign = _make_servicer()
     request = _check_request(payload_header=None)
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.HasField("denied_response")
     assert response.denied_response.status.code == 401
@@ -214,7 +292,7 @@ async def test_payload_error_returns_401():
     )
     request = _check_request()
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.denied_response.status.code == 401
 
@@ -226,7 +304,7 @@ async def test_credentials_error_returns_401():
     )
     request = _check_request()
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.denied_response.status.code == 401
 
@@ -238,7 +316,7 @@ async def test_authentication_error_returns_403():
     )
     request = _check_request()
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.denied_response.status.code == 403
 
@@ -257,7 +335,7 @@ async def test_kinesis_failure_fails_request_closed():
     )
     request = _check_request()
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.HasField("denied_response")
     assert response.denied_response.status.code == 503
@@ -270,7 +348,7 @@ async def test_kinesis_timeout_fails_request_closed():
     )
     request = _check_request()
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.HasField("denied_response")
     assert response.denied_response.status.code == 503
@@ -288,7 +366,7 @@ async def test_unexpected_exception_returns_500_not_traceback():
     )
     request = _check_request()
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     assert response.denied_response.status.code == 500
     assert "Internal server error" in response.denied_response.body
@@ -309,7 +387,7 @@ async def test_denied_response_carries_debug_id_header():
     )
     request = _check_request(request_id="req-debug-123")
 
-    response = await servicer.Check(request, _MockContext())
+    response = await servicer.Check(request, _ctx_with_key())
 
     debug_headers = [
         h.header.value

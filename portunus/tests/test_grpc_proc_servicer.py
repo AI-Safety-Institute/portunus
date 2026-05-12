@@ -13,6 +13,7 @@ import asyncio
 from typing import AsyncIterator, Optional
 from unittest.mock import AsyncMock, MagicMock
 
+import grpc
 import pytest
 from envoy.config.core.v3 import base_pb2
 from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
@@ -80,9 +81,41 @@ async def _stream_from(items: list) -> AsyncIterator:
 
 
 class _MockContext:
-    """Minimal grpc.aio.ServicerContext stand-in."""
+    """Minimal grpc.aio.ServicerContext stand-in.
 
-    pass
+    ``metadata`` is what invocation_metadata() returns. Tests set this
+    so the per-stream proxy-key check passes (or doesn't, for the
+    negative-path tests).
+    """
+
+    def __init__(self, *, metadata: Optional[list[tuple[str, str]]] = None) -> None:
+        self.aborted_with: Optional[tuple] = None
+        self._metadata = list(metadata or [])
+
+    def invocation_metadata(self) -> list[tuple[str, str]]:
+        return self._metadata
+
+    async def abort(self, code, details: str) -> None:
+        self.aborted_with = (code, details)
+
+
+_PROXY_KEY = "test-proxy-key-shhh"
+
+
+def _ctx_with_key(value: Optional[str] = _PROXY_KEY) -> _MockContext:
+    metadata: list[tuple[str, str]] = []
+    if value is not None:
+        metadata.append(("x-portunus-proxy-key", value))
+    return _MockContext(metadata=metadata)
+
+
+@pytest.fixture(autouse=True)
+def _enable_proxy_key_validation(monkeypatch):
+    """Force proxy-key validation on for every test in this module."""
+    from portunus.config import config as portunus_config
+
+    monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", _PROXY_KEY)
+    yield
 
 
 def _make_servicer(*, queue_maxsize: int = 10_000) -> tuple[
@@ -121,7 +154,7 @@ async def test_http_request_headers_dispatched_to_publish_request_headers():
             ]
         )
 
-        responses = [r async for r in servicer.Process(stream, _MockContext())]
+        responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
         # One response per request message — an empty body response per FDS.
         assert len(responses) == 1
@@ -149,7 +182,7 @@ async def test_http_response_body_dispatched_to_publish_response_body():
             ]
         )
 
-        async for _ in servicer.Process(stream, _MockContext()):
+        async for _ in servicer.Process(stream, _ctx_with_key()):
             pass
 
         await asyncio.sleep(0.1)
@@ -181,7 +214,7 @@ async def test_websocket_metadata_promotes_stream_to_ws_mode():
             ]
         )
 
-        async for _ in servicer.Process(stream, _MockContext()):
+        async for _ in servicer.Process(stream, _ctx_with_key()):
             pass
 
         # State for ws-1 has been popped already (stream ended), but we
@@ -225,7 +258,7 @@ async def test_body_chunks_drop_when_queue_full_and_metric_increments():
         ]
     )
 
-    async for _ in servicer.Process(stream, _MockContext()):
+    async for _ in servicer.Process(stream, _ctx_with_key()):
         pass
 
     # First two fit; the rest get dropped. (request_headers got the
@@ -265,7 +298,7 @@ async def test_drain_injects_ws_close_1012_on_active_ws_stream():
 
         async def driver() -> list:
             results = []
-            async for r in servicer.Process(iterator(), _MockContext()):
+            async for r in servicer.Process(iterator(), _ctx_with_key()):
                 results.append(r)
             return results
 
@@ -291,6 +324,59 @@ async def test_drain_injects_ws_close_1012_on_active_ws_stream():
 
 
 # ---------------------------------------------------------------------------
+# Proxy-key identity check — once per stream, at stream open
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_missing_proxy_key_aborts_stream_with_permission_denied():
+    servicer, _publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={}, is_request=True, request_id="no-key"
+                )
+            ]
+        )
+        ctx = _ctx_with_key(value=None)
+
+        responses = [r async for r in servicer.Process(stream, ctx)]
+
+        assert responses == [], "Process should abort before yielding any response"
+        assert ctx.aborted_with is not None
+        code, detail = ctx.aborted_with
+        assert code == grpc.StatusCode.PERMISSION_DENIED
+        assert "proxy identity" in detail.lower()
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_wrong_proxy_key_aborts_stream_with_permission_denied():
+    servicer, _publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={}, is_request=True, request_id="wrong-key"
+                )
+            ]
+        )
+        ctx = _ctx_with_key(value="wrong")
+
+        responses = [r async for r in servicer.Process(stream, ctx)]
+
+        assert responses == []
+        assert ctx.aborted_with is not None
+        assert ctx.aborted_with[0] == grpc.StatusCode.PERMISSION_DENIED
+    finally:
+        await queue.stop()
+
+
+# ---------------------------------------------------------------------------
 # FDS response shape — empty streamed_response, not plain CommonResponse
 # ---------------------------------------------------------------------------
 
@@ -311,7 +397,7 @@ async def test_body_response_uses_streamed_response_shape():
             ]
         )
 
-        responses = [r async for r in servicer.Process(stream, _MockContext())]
+        responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
         body_resp = responses[1].request_body
         # The path that matters: streamed_response field must be set
