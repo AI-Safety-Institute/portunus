@@ -67,6 +67,22 @@ static_resources:
           - upgrade_type: websocket
           route_config:
             name: local_route
+            # Strip and re-set internal `x-portunus-*` headers at the
+            # virtual_host level so they're applied before any route
+            # selection runs. Without this, a client can forge
+            # `x-portunus-target-host` and bypass Portunus's
+            # secret.host validation, sending a key bound to provider A
+            # through provider B's proxy. The `x-portunus-target-host`
+            # value MUST be authoritative from the proxy config, not
+            # from the client.
+            request_headers_to_remove:
+              - x-portunus-debug-id
+              - x-portunus-proxy-key
+            request_headers_to_add:
+              - header:
+                  key: x-portunus-target-host
+                  value: "${TARGET_HOST}"
+                append_action: OVERWRITE_IF_EXISTS_OR_ADD
             virtual_hosts:
             - name: local_service
               domains: ["*"]
