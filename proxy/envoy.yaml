@@ -208,11 +208,12 @@ static_resources:
     # task into one Portunus task. STRICT_DNS resolves every address from
     # the response and load-balances across them via lb_policy.
     type: STRICT_DNS
-    # Re-resolve every 5s so new Portunus tasks come into rotation quickly
-    # after autoscaling or rolling deploy. Pair with Cloud Map's default
-    # 60s record TTL — Envoy honours the TTL when respect_dns_ttl=true.
+    # Re-resolve every 5s so new Portunus tasks come into rotation
+    # within the refresh interval after autoscaling or a rolling deploy.
+    # We do NOT set respect_dns_ttl=true — when it's set, Envoy honours
+    # the record TTL instead of dns_refresh_rate, and Cloud Map's default
+    # 60s TTL would then dominate, making rotation 60s rather than 5s.
     dns_refresh_rate: 5s
-    respect_dns_ttl: true
     dns_lookup_family: V4_ONLY
     lb_policy: ROUND_ROBIN
     common_http_protocol_options:
