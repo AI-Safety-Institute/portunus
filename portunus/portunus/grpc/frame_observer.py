@@ -7,8 +7,7 @@ possibly compressed via ``permessage-deflate``. This module wraps
 :mod:`wsproto` to surface logical frames as
 :class:`ObservedFrame` events the Process service can publish.
 
-Key behaviours that survived the May 2026 spike (see
-``docs/decisions/extproc-spike-findings.md``):
+Key behaviours that survived prototyping:
 
 - Use :class:`wsproto.connection.Connection` directly, not the
   ``WSConnection`` wrapper. The wrapper starts in ``CONNECTING`` state

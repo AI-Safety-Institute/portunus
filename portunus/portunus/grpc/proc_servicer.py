@@ -423,7 +423,7 @@ def _empty_body_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
 
     A bare ``CommonResponse()`` triggers "Spurious response message 3"
     and tears the connection. The fix is the doubly-nested empty
-    streamed_response marker; see docs/decisions/extproc-spike-findings.md.
+    streamed_response marker.
     """
     body_response = proc_pb2.BodyResponse(
         response=proc_pb2.CommonResponse(
