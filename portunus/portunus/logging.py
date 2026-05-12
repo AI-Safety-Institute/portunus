@@ -123,7 +123,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         trace_id, parent_id, sampled = parse_trace_header(aws_trace_header)
         app_title = request.app.title.replace(" ", "_").lower()
 
-        # turn /log/<id> into just /log for segment name
+        # X-Ray segment name suffix: first path component only, so request
+        # IDs / dynamic path segments don't blow out the cardinality.
         if len(request.url.path.split("/")) > 1:
             safe_path = request.url.path.split("/")[1]
         else:

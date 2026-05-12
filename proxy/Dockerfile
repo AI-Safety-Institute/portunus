@@ -1,25 +1,15 @@
-# Start from the Envoy Alpine Linux image.
-# 1.36 is the LTS-track release with graceful side-stream closing on
-# ext_proc streams. FULL_DUPLEX_STREAMED requires >=1.34.
+# Envoy 1.36 LTS — required for ext_proc FULL_DUPLEX_STREAMED + graceful
+# side-stream closing (FDS requires >=1.34).
 FROM envoyproxy/envoy:v1.36.0
 
-# Update the package lists
-RUN apt update
+# gettext for envsubst (used in entrypoint.sh), wget for the yq binary.
+RUN apt update && apt install -y gettext wget
 
-# Install gettext for envsubst and luarocks
-RUN apt install -y gettext luarocks wget
-
-# Install yq (YAML processor) from GitHub releases
+# yq (YAML processor) — entrypoint.sh uses it to synthesise transport
+# socket configs as JSON-encoded env vars.
 RUN wget https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_amd64 -O /usr/bin/yq && \
     chmod +x /usr/bin/yq
 
-# Copy and install the proxy-utils library (dependencies declared in rockspec)
-COPY lib /tmp/proxy-utils-lib
-WORKDIR /tmp/proxy-utils-lib
-RUN luarocks-5.1 make proxy-utils-1.0-0.rockspec
-WORKDIR /
-
-# Copy the Envoy configuration file to the Docker image
 COPY envoy.yaml /envoy/envoy.yaml
 COPY xray.json /envoy/xray.json
 

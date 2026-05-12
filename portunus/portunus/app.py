@@ -1,15 +1,13 @@
 """Main FastAPI application for Portunus.
 
-After the gRPC migration, the FastAPI surface only hosts:
+The FastAPI surface hosts the admin endpoints:
 
-- ``GET /ping`` — health check used by ECS / ALB readiness probes.
+- ``GET /ping`` — health check for ECS / ALB readiness.
 - ``POST /cache/flush`` — operator cache invalidation.
 
-Auth (previously ``POST /authorise``) and observability (previously the
-six ``POST /log/{id}/...`` endpoints) now live on the gRPC server in
-:mod:`portunus.grpc`. The WebSocket relay (previously ``WS /{path}``)
-is gone — Envoy proxies WebSockets directly to upstream with the
-``ext_proc`` filter observing frames.
+Customer-facing auth and observability run on the gRPC server in
+:mod:`portunus.grpc` as Envoy ext_authz / ext_proc filters; WebSockets
+flow through Envoy directly to upstream with ext_proc observing frames.
 """
 
 import logging
