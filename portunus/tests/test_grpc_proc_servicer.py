@@ -24,7 +24,6 @@ from google.protobuf import struct_pb2
 from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.grpc.publish_queue import BoundedPublishQueue
 
-
 # ---------------------------------------------------------------------------
 # Fake publish service — records what was published so assertions can read
 # the data flowing through, rather than counting internal method calls.
@@ -41,8 +40,10 @@ class _PublishedItem:
 
 
 class FakePublishService:
-    """Captures every publish-* call. ``items`` is the ordered record of
-    everything the servicer dispatched."""
+    """Captures every publish-* call. ``items`` is the ordered record of.
+
+    everything the servicer dispatched.
+    """
 
     def __init__(self) -> None:
         self.items: list[_PublishedItem] = []
@@ -93,7 +94,9 @@ def _http_headers_message(
         end_of_stream=False,
     )
     kwargs: dict = (
-        {"request_headers": headers_msg} if is_request else {"response_headers": headers_msg}
+        {"request_headers": headers_msg}
+        if is_request
+        else {"response_headers": headers_msg}
     )
     if websocket_metadata:
         kwargs["metadata_context"] = base_pb2.Metadata(
@@ -160,9 +163,11 @@ def _make_servicer(
 
 
 async def _drain_queue(queue: BoundedPublishQueue, *, timeout: float = 1.0) -> None:
-    """Wait for the queue to fully drain so publish-side assertions see all
+    """Wait for the queue to fully drain so publish-side assertions see all.
+
     items the servicer dispatched. Avoids a fixed ``sleep(0.1)`` that
-    relies on workers being faster than wall-clock."""
+    relies on workers being faster than wall-clock.
+    """
     end = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < end:
         if queue.qsize() == 0:
@@ -244,10 +249,12 @@ def _ws_frame(payload: bytes) -> bytes:
 
 @pytest.mark.asyncio
 async def test_websocket_stream_publishes_decoded_message_text_not_raw_frame_bytes():
-    """A WS-tagged stream means the servicer should parse frames via
+    """A WS-tagged stream means the servicer should parse frames via.
+
     wsproto and publish the decoded message payload. If the metadata flag
     were ignored the publish would carry raw frame bytes (header + body).
-    Observing the decoded payload confirms the WS path is in effect."""
+    Observing the decoded payload confirms the WS path is in effect.
+    """
     servicer, publish, queue = _make_servicer()
     await queue.start()
     try:
@@ -269,8 +276,9 @@ async def test_websocket_stream_publishes_decoded_message_text_not_raw_frame_byt
 
         # The body publish should be the decoded "hello", not the framed bytes.
         body_items = publish.of_kind("response_body")
-        assert any(item.payload.get("body_bytes") == b"hello" for item in body_items), (
-            f"Expected decoded 'hello'; got {[i.payload.get('body_bytes') for i in body_items]!r}"
+        decoded = [i.payload.get("body_bytes") for i in body_items]
+        assert any(b == b"hello" for b in decoded), (
+            f"Expected decoded 'hello'; got {decoded!r}"
         )
     finally:
         await queue.stop()
@@ -284,10 +292,12 @@ async def test_websocket_stream_publishes_decoded_message_text_not_raw_frame_byt
 
 @pytest.mark.asyncio
 async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_counter():
-    """Tiny queue + no workers running → put_nowait will fail past
+    """Tiny queue + no workers running → put_nowait will fail past.
+
     capacity, the servicer should swallow those bodies and bump the drop
     counter. The customer's request must still receive its per-message
-    Envoy response."""
+    Envoy response.
+    """
     servicer, _publish, queue = _make_servicer(queue_maxsize=2)
     # NB: workers deliberately not started so the queue stays full.
 
@@ -317,9 +327,11 @@ async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_cou
 
 @pytest.mark.asyncio
 async def test_drain_injects_ws_close_frame_with_code_1012_on_active_ws_stream():
-    """When the servicer is asked to drain, every active WS stream gets a
+    """When the servicer is asked to drain, every active WS stream gets a.
+
     close frame injected into its response so clients learn the server is
-    going away. We observe the close frame bytes on the second response."""
+    going away. We observe the close frame bytes on the second response.
+    """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
     try:
@@ -347,10 +359,7 @@ async def test_drain_injects_ws_close_frame_with_code_1012_on_active_ws_stream()
         results = await asyncio.wait_for(task, timeout=2.0)
 
         assert len(results) == 2
-        body = (
-            results[1]
-            .response_body.response.body_mutation.streamed_response.body
-        )
+        body = results[1].response_body.response.body_mutation.streamed_response.body
         # WS close frame: 0x88 = FIN|close opcode; then 2-byte big-endian code.
         assert body[0] == 0x88
         assert int.from_bytes(body[2:4], "big") == 1012
@@ -411,11 +420,13 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 
 @pytest.mark.asyncio
-async def test_body_response_uses_the_streamed_response_envelope_required_by_envoy_136_fds():
-    """Envoy 1.36 in FULL_DUPLEX_STREAMED mode rejects a plain
+async def test_body_response_uses_streamed_response_envelope_required_by_envoy():
+    """Envoy 1.36 in FULL_DUPLEX_STREAMED mode rejects a plain.
+
     CommonResponse on body messages — the body_mutation must wrap a
     streamed_response (even when empty). Regression test against
-    reverting the envelope."""
+    reverting the envelope.
+    """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
     try:

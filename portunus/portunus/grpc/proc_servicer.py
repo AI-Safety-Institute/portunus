@@ -45,6 +45,8 @@ import grpc
 from envoy.config.core.v3 import base_pb2  # type: ignore[import-not-found]
 from envoy.service.ext_proc.v3 import (  # type: ignore[import-not-found]
     external_processor_pb2 as proc_pb2,
+)
+from envoy.service.ext_proc.v3 import (
     external_processor_pb2_grpc as proc_grpc,
 )
 
@@ -165,13 +167,15 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
     # Stream setup
     # ------------------------------------------------------------------
 
-    def _initialise_stream(
-        self, first: proc_pb2.ProcessingRequest
-    ) -> _StreamState:
+    def _initialise_stream(self, first: proc_pb2.ProcessingRequest) -> _StreamState:
         """Inspect the first ProcessingRequest and build per-stream state."""
         request_id = _extract_request_id(first)
         mode = _extract_mode(first)
-        observer = build_observer(response_extensions_header=None) if mode == StreamMode.WS_UPGRADE else None
+        observer = (
+            build_observer(response_extensions_header=None)
+            if mode == StreamMode.WS_UPGRADE
+            else None
+        )
         return _StreamState(request_id=request_id, mode=mode, observer=observer)
 
     # ------------------------------------------------------------------
@@ -196,7 +200,10 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             yield _empty_body_response(request_side=True)
         elif request.HasField("request_body"):
             self._on_body_chunk(
-                state, request.request_body, direction=Direction.REQUEST, timestamp=timestamp
+                state,
+                request.request_body,
+                direction=Direction.REQUEST,
+                timestamp=timestamp,
             )
             yield _empty_body_response(request_side=True)
         elif request.HasField("request_trailers"):
@@ -207,11 +214,16 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             yield _empty_body_response(request_side=False)
         elif request.HasField("response_body"):
             self._on_body_chunk(
-                state, request.response_body, direction=Direction.RESPONSE, timestamp=timestamp
+                state,
+                request.response_body,
+                direction=Direction.RESPONSE,
+                timestamp=timestamp,
             )
             yield _empty_body_response(request_side=False)
         elif request.HasField("response_trailers"):
-            await self._on_response_trailers(state, request.response_trailers, timestamp)
+            await self._on_response_trailers(
+                state, request.response_trailers, timestamp
+            )
             yield _empty_trailers_response(request_side=False)
         # else: unknown variant — ignore. Envoy adds new ProcessingRequest
         # cases occasionally and we want forward-compat.

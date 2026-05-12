@@ -21,8 +21,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 import grpc
-from envoy.service.auth.v3 import external_auth_pb2_grpc  # type: ignore[import-not-found]
-from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc  # type: ignore[import-not-found]
+from envoy.service.auth.v3 import (
+    external_auth_pb2_grpc,  # type: ignore[import-not-found]
+)
+from envoy.service.ext_proc.v3 import (
+    external_processor_pb2_grpc as proc_grpc,  # type: ignore[import-not-found]
+)
 
 from portunus.config import GrpcConfig
 from portunus.grpc.auth_servicer import PortunusAuthServicer
@@ -72,9 +76,7 @@ async def start_grpc_server(
         the feature flag is off.
     """
     if not config.enabled:
-        logger.info(
-            "gRPC server disabled (config.grpc.enabled=false); skipping start"
-        )
+        logger.info("gRPC server disabled (config.grpc.enabled=false); skipping start")
         return None
 
     server = grpc.aio.server(

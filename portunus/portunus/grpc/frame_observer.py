@@ -32,7 +32,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterator, Optional
 
-from wsproto.connection import Connection, ConnectionType  # type: ignore[import-untyped]
+from wsproto.connection import (  # type: ignore[import-untyped]
+    Connection,
+    ConnectionType,
+)
 from wsproto.events import (  # type: ignore[import-untyped]
     BytesMessage,
     CloseConnection,
@@ -95,12 +98,8 @@ def build_observer(
     extensions_req = [PerMessageDeflate()] if deflate else []
     extensions_resp = [PerMessageDeflate()] if deflate else []
     return FrameObserver(
-        request_conn=Connection(
-            ConnectionType.SERVER, extensions=extensions_req
-        ),
-        response_conn=Connection(
-            ConnectionType.CLIENT, extensions=extensions_resp
-        ),
+        request_conn=Connection(ConnectionType.SERVER, extensions=extensions_req),
+        response_conn=Connection(ConnectionType.CLIENT, extensions=extensions_resp),
     )
 
 
@@ -157,14 +156,24 @@ class FrameObserver:
     def _map_event(direction: Direction, event) -> Iterator[ObservedFrame]:
         """Convert a wsproto event into one or more :class:`ObservedFrame`."""
         if isinstance(event, TextMessage):
-            payload = event.data.encode("utf-8") if isinstance(event.data, str) else event.data
+            payload = (
+                event.data.encode("utf-8")
+                if isinstance(event.data, str)
+                else event.data
+            )
             yield ObservedFrame(direction=direction, opcode="text", payload=payload)
         elif isinstance(event, BytesMessage):
-            yield ObservedFrame(direction=direction, opcode="binary", payload=event.data)
+            yield ObservedFrame(
+                direction=direction, opcode="binary", payload=event.data
+            )
         elif isinstance(event, Ping):
-            yield ObservedFrame(direction=direction, opcode="ping", payload=event.payload)
+            yield ObservedFrame(
+                direction=direction, opcode="ping", payload=event.payload
+            )
         elif isinstance(event, Pong):
-            yield ObservedFrame(direction=direction, opcode="pong", payload=event.payload)
+            yield ObservedFrame(
+                direction=direction, opcode="pong", payload=event.payload
+            )
         elif isinstance(event, CloseConnection):
             yield ObservedFrame(
                 direction=direction,

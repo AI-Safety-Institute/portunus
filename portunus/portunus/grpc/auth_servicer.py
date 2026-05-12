@@ -47,10 +47,10 @@ from portunus.exceptions import (
     FetchSecretError,
     PayloadError,
 )
+from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.models import AuthPayload
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_service import PublishService
-from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.services.signing_service import (
     SignableRequest,
     SignatureHeaders,
@@ -135,10 +135,8 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             # gets the raw header value via ext_authz and has to do it
             # here. Tolerate the prefix being absent: clients that send
             # the bare payload still work.
-            if config.api_key_prefix and raw_payload.startswith(
-                config.api_key_prefix
-            ):
-                raw_payload = raw_payload[len(config.api_key_prefix):]
+            if config.api_key_prefix and raw_payload.startswith(config.api_key_prefix):
+                raw_payload = raw_payload[len(config.api_key_prefix) :]
 
             target_host = headers.get(_TARGET_HOST_HEADER) or None
 

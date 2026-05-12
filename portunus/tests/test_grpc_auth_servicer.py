@@ -28,11 +28,10 @@ from portunus.exceptions import (
     PayloadError,
 )
 from portunus.grpc.auth_servicer import (
-    PortunusAuthServicer,
     _METADATA_PUBLISH_TIMEOUT_S,
+    PortunusAuthServicer,
 )
 from portunus.models import AuthResult, PrincipalInfo
-
 
 # ---------------------------------------------------------------------------
 # Fakes — explicit collaborator stand-ins. Prefer these over ``MagicMock``
@@ -136,8 +135,10 @@ class _SignCall:
 
 
 class FakeSignRequest:
-    """Replaces ``sign_request_fn``. Returns the configured headers (default
-    empty: no signing) and records each call for later inspection."""
+    """Replaces ``sign_request_fn``. Returns the configured headers (default.
+
+    empty: no signing) and records each call for later inspection.
+    """
 
     def __init__(self, returns: Optional[dict] = None) -> None:
         self.returns = returns or {}
@@ -175,9 +176,7 @@ _VALID_PAYLOAD = base64.b64encode(
                 "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
                 "session_token": "FQoGZXIvYXdzEPj//////////wEaDExample",
             },
-            "secret_arn": (
-                "arn:aws:secretsmanager:eu-west-2:111111111111:secret:test"
-            ),
+            "secret_arn": ("arn:aws:secretsmanager:eu-west-2:111111111111:secret:test"),
         }
     ).encode()
 ).decode()
@@ -236,8 +235,10 @@ def _ctx_with_key(value: Optional[str] = _PROXY_KEY) -> _FakeContext:
 
 @pytest.fixture(autouse=True)
 def _enable_proxy_key_validation(monkeypatch):
-    """Force proxy-key validation on by default. Tests that need it off
-    re-monkeypatch within their own body."""
+    """Force proxy-key validation on by default. Tests that need it off.
+
+    re-monkeypatch within their own body.
+    """
     from portunus.config import config as portunus_config
 
     monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", _PROXY_KEY)
@@ -285,13 +286,15 @@ async def test_successful_auth_substitutes_upstream_api_key_in_authorization_hea
 
 @pytest.mark.asyncio
 async def test_configured_bearer_prefix_is_stripped_before_decoding_payload():
-    """The legacy REST path's Lua filter stripped the API key prefix
+    """The legacy REST path's Lua filter stripped the API key prefix.
+
     before sending the payload to /authorise. ext_authz receives the
     raw header value via Envoy, so the servicer has to strip it.
 
     Regression test for the deployed-env bug where the servicer was
     base64-decoding the literal string 'Bearer <payload>' and failing
-    every real client request."""
+    every real client request.
+    """
     servicer, auth, _publish, _sign = _make_servicer()
     request = _check_request(payload_header=f"Bearer {_VALID_PAYLOAD}")
 
@@ -309,8 +312,10 @@ async def test_configured_bearer_prefix_is_stripped_before_decoding_payload():
 
 @pytest.mark.asyncio
 async def test_bare_payload_without_prefix_still_works():
-    """Clients that pre-strip the prefix (or use a prefix-less header
-    like x-api-key) shouldn't be regressed by the strip logic."""
+    """Clients that pre-strip the prefix (or use a prefix-less header.
+
+    like x-api-key) shouldn't be regressed by the strip logic.
+    """
     servicer, auth, _publish, _sign = _make_servicer()
     request = _check_request(payload_header=_VALID_PAYLOAD)  # no Bearer
 
@@ -322,7 +327,8 @@ async def test_bare_payload_without_prefix_still_works():
 
 @pytest.mark.asyncio
 async def test_target_host_from_request_header_is_passed_through_to_auth_service():
-    """The auth service's host-validation needs the target_host the proxy
+    """The auth service's host-validation needs the target_host the proxy.
+
     is serving. Today the servicer reads it from the
     ``x-portunus-target-host`` HTTP header — this test pins that
     propagation.
@@ -342,7 +348,8 @@ async def test_target_host_from_request_header_is_passed_through_to_auth_service
 
 @pytest.mark.asyncio
 async def test_metadata_publish_completes_before_servicer_returns_ok():
-    """The synchronous-publish contract: a 200 from the proxy is a
+    """The synchronous-publish contract: a 200 from the proxy is a.
+
     promise that the auth record was durably published, not just queued.
 
     Observed by checking the publish record exists by the time Check
@@ -376,7 +383,9 @@ async def test_missing_proxy_key_metadata_is_rejected_with_401_and_does_not_call
     assert response.HasField("denied_response")
     assert response.denied_response.status.code == 401
     assert "proxy identity" in response.denied_response.body.lower()
-    assert auth.auth_calls == [], "Auth backend should never be reached without a valid proxy key"
+    assert (
+        auth.auth_calls == []
+    ), "Auth backend should never be reached without a valid proxy key"
 
 
 @pytest.mark.asyncio
@@ -392,9 +401,11 @@ async def test_wrong_proxy_key_is_rejected_with_401_and_does_not_call_auth():
 
 @pytest.mark.asyncio
 async def test_empty_proxy_api_key_config_disables_the_identity_check(monkeypatch):
-    """Operator escape hatch — an unset config skips the validation so a
+    """Operator escape hatch — an unset config skips the validation so a.
+
     blank-slate dev environment doesn't require a pre-shared key. Tested
-    end-to-end here because the empty-string default is load-bearing."""
+    end-to-end here because the empty-string default is load-bearing.
+    """
     from portunus.config import config as portunus_config
 
     monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", "")
@@ -443,9 +454,11 @@ async def test_credentials_error_from_auth_service_is_rejected_with_401():
 
 @pytest.mark.asyncio
 async def test_authentication_error_from_auth_service_is_rejected_with_403():
-    """``AuthenticationError`` is what host-validation mismatch raises, so
+    """``AuthenticationError`` is what host-validation mismatch raises, so.
+
     this is the unit-level analog of the
-    ``secret_with_mismatching_host_is_rejected_with_403`` behaviour test."""
+    ``secret_with_mismatching_host_is_rejected_with_403`` behaviour test.
+    """
     auth = FakeAuthService(raises=AuthenticationError("identity mismatch"))
     servicer, _auth, _publish, _sign = _make_servicer(auth=auth)
 
@@ -481,9 +494,11 @@ async def test_publish_timeout_denies_the_request_with_503():
 
 @pytest.mark.asyncio
 async def test_publish_failure_means_the_publish_record_is_absent():
-    """Complement to the 503 test: prove the failed publish didn't leave
+    """Complement to the 503 test: prove the failed publish didn't leave.
+
     a half-written record. Tightens the fail-closed guarantee against a
-    future change that might catch-and-continue on publish error."""
+    future change that might catch-and-continue on publish error.
+    """
     publish = FakePublishService(raises=RuntimeError("Kinesis is down"))
     servicer, _auth, _, _sign = _make_servicer(publish=publish)
 
