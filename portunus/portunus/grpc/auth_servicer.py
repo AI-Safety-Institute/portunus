@@ -123,6 +123,17 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                     request_id=request_id,
                 )
 
+            # Strip the configured API key prefix (typically "Bearer ") so
+            # the remainder is the bare base64-encoded payload. The legacy
+            # REST path stripped this in the Lua filter; the gRPC path
+            # gets the raw header value via ext_authz and has to do it
+            # here. Tolerate the prefix being absent: clients that send
+            # the bare payload still work.
+            if config.api_key_prefix and raw_payload.startswith(
+                config.api_key_prefix
+            ):
+                raw_payload = raw_payload[len(config.api_key_prefix):]
+
             target_host = headers.get(_TARGET_HOST_HEADER) or None
 
             payload = AuthPayload.from_contents(raw_payload, target_host=None)
