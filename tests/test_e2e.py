@@ -155,10 +155,14 @@ def test_401_passthrough_for_missing_credentials(
 def test_error_response_contains_trace_id(
     api_key_prefix: str, api_key_header: str, docker_setup: str
 ):
-    """Test that error responses contain a trace ID for debugging.
+    """Test that error responses contain a correlation ID for debugging.
 
-    This verifies that when auth fails, the error response includes
-    a trace ID that can be used for debugging and correlation.
+    The exact field name changed across the Lua → gRPC migration:
+    legacy responses set ``x_amzn_trace_id`` (X-Ray's HTTP header
+    parsed into snake_case JSON); the new ext_authz response uses
+    ``request_id`` (Envoy's x-request-id). Either is acceptable —
+    the contract this test pins is "a correlatable ID is present
+    so on-call has something to grep for in CloudWatch."
     """
     response = requests.get(
         "http://localhost:8888/get",
@@ -170,9 +174,14 @@ def test_error_response_contains_trace_id(
 
     error_data = response.json()
     assert "error" in error_data
+    assert (
+        "x_amzn_trace_id" in error_data["error"]
+        or "request_id" in error_data["error"]
+    ), error_data
 
-    # Verify trace ID is present in response
-    assert "x_amzn_trace_id" in error_data["error"]
-
-    # Verify trace ID header is also set
-    assert "X-Amzn-Trace-Id" in response.headers
+    # And a debug ID header is present so operators can correlate without
+    # reading the body.
+    assert (
+        "X-Amzn-Trace-Id" in response.headers
+        or "x-portunus-debug-id" in response.headers
+    ), dict(response.headers)
