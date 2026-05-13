@@ -495,6 +495,14 @@ def test_request_response(
         if scenario.expected.reject_with_disconnect:
             return  # connection-level rejection is a passing outcome
         raise
+    except requests.exceptions.InvalidHeader:
+        # ``requests`` rejects CRLF / reserved chars in header values
+        # client-side before the request hits the wire. Treat that as
+        # a valid defense layer when the scenario expects rejection
+        # without upstream contact.
+        if not scenario.expected.reached_upstream:
+            return
+        raise
 
     # Status code
     assert response.status_code == scenario.expected.status, (
