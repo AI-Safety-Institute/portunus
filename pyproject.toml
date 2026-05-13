@@ -22,6 +22,8 @@ dev = [
     "types-grpcio>=1.0.0",
     "types-protobuf>=4.24.0",
     "inspect-ai>=0.3.0",
+    "openai>=1.0.0",  # inspect-ai's openai/ provider; required for the
+                       # inspect compat tests against httpbun's /llm/ mock.
     "pre-commit>=3.7.1,<4",
     "pytest>=8.4.1,<9",
     "pytest-asyncio>=1.1.0,<2",
