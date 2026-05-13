@@ -19,6 +19,9 @@ dev = [
     "types-pyyaml>=6.0.12.20240724,<7",
     "types-aiobotocore>=2.24.1,<3",
     "types-aws-xray-sdk>=2.14.0.20250708,<3",
+    "types-grpcio>=1.0.0",
+    "types-protobuf>=4.24.0",
+    "inspect-ai>=0.3.0",
     "pre-commit>=3.7.1,<4",
     "pytest>=8.4.1,<9",
     "pytest-asyncio>=1.1.0,<2",
@@ -65,9 +68,23 @@ exclude = [
     "^\\.venv/.*",
 ]
 
+# Generated protobuf modules and grpcio's untyped sub-packages don't ship
+# stubs; their import-not-found / import-untyped errors are environmental,
+# not type errors we can fix in source.
+[[tool.mypy.overrides]]
+module = [
+    "envoy.*",
+    "google.rpc.*",
+    "wsproto.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = [
     "tests"
+]
+markers = [
+    "slow: marks tests as slow (requiring Docker, network, etc.)",
 ]
 # Exclude directories from test discovery
 norecursedirs = [

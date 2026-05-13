@@ -31,7 +31,6 @@ from typing import Literal, Optional
 
 import pytest
 import requests
-
 from conftest import create_localstack_secret, encode_base64
 
 PROXY_URL = "http://localhost:8888"
@@ -40,12 +39,12 @@ PROXY_URL = "http://localhost:8888"
 # Adding a new strategy means seeding the corresponding secret in the
 # `seeded_secrets` fixture below.
 AuthMode = Literal[
-    "valid_plaintext",      # Plaintext secret, no host restriction.
-    "valid_host_match",     # JSON secret with host == proxy's TARGET_HOST.
+    "valid_plaintext",  # Plaintext secret, no host restriction.
+    "valid_host_match",  # JSON secret with host == proxy's TARGET_HOST.
     "valid_host_mismatch",  # JSON secret with host != proxy's TARGET_HOST.
-    "none",                 # No Authorization header at all.
-    "malformed_base64",     # Authorization present but not valid base64.
-    "malformed_json",       # Decodes to base64 but the JSON inside is broken.
+    "none",  # No Authorization header at all.
+    "malformed_base64",  # Authorization present but not valid base64.
+    "malformed_json",  # Decodes to base64 but the JSON inside is broken.
 ]
 
 
@@ -115,26 +114,45 @@ def _read_localstack_metadata_records() -> list[dict]:
 
     shard_iter = subprocess.run(
         [
-            "docker", "exec", "localstack-main", "awslocal", "kinesis",
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "kinesis",
             "get-shard-iterator",
-            "--stream-name", _METADATA_STREAM,
-            "--shard-id", "shardId-000000000000",
-            "--shard-iterator-type", "TRIM_HORIZON",
-            "--region", "eu-west-2",
-            "--query", "ShardIterator", "--output", "text",
+            "--stream-name",
+            _METADATA_STREAM,
+            "--shard-id",
+            "shardId-000000000000",
+            "--shard-iterator-type",
+            "TRIM_HORIZON",
+            "--region",
+            "eu-west-2",
+            "--query",
+            "ShardIterator",
+            "--output",
+            "text",
         ],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if shard_iter.returncode != 0:
         return []
     records_result = subprocess.run(
         [
-            "docker", "exec", "localstack-main", "awslocal", "kinesis",
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "kinesis",
             "get-records",
-            "--shard-iterator", shard_iter.stdout.strip(),
-            "--region", "eu-west-2",
+            "--shard-iterator",
+            shard_iter.stdout.strip(),
+            "--region",
+            "eu-west-2",
         ],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if records_result.returncode != 0:
         return []
@@ -401,6 +419,7 @@ def _build_authorization_header(
     if auth == "malformed_json":
         # Decodes to base64 but the bytes are not valid JSON.
         import base64
+
         garbage = base64.b64encode(b"this is not json").decode("ascii")
         return f"{api_key_prefix}{garbage}"
 
@@ -495,9 +514,12 @@ def test_request_response(
 def _wait_for_metadata_record_count(
     *, baseline: int, expected_delta: int, timeout: float = 5.0
 ) -> int:
-    """Poll LocalStack Kinesis until either the expected count appears or
-    ``timeout`` elapses. Returns the final observed delta so the caller
-    can produce a precise failure message."""
+    """Poll LocalStack Kinesis for the expected record count.
+
+    Polls until either the expected count appears or ``timeout`` elapses.
+    Returns the final observed delta so the caller can produce a precise
+    failure message.
+    """
     import time
 
     deadline = time.monotonic() + timeout
@@ -535,9 +557,7 @@ def test_metadata_telemetry(
 
     expected = scenario.expected.expected_metadata_records
     assert expected is not None  # parametrise filter guarantees this
-    delta = _wait_for_metadata_record_count(
-        baseline=baseline, expected_delta=expected
-    )
+    delta = _wait_for_metadata_record_count(baseline=baseline, expected_delta=expected)
     assert delta == expected, (
         f"[{scenario.name}] expected {expected} metadata record(s) on the "
         f"metadata stream, got {delta} within timeout"

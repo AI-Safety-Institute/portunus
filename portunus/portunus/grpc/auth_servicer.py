@@ -31,13 +31,10 @@ import uuid
 from typing import Callable, Optional
 
 import grpc
-from envoy.config.core.v3 import base_pb2  # type: ignore[import-not-found]
-from envoy.service.auth.v3 import (  # type: ignore[import-not-found]
-    external_auth_pb2,
-    external_auth_pb2_grpc,
-)
-from envoy.type.v3 import http_status_pb2  # type: ignore[import-not-found]
-from google.rpc import status_pb2  # type: ignore[import-not-found]
+from envoy.config.core.v3 import base_pb2
+from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
+from envoy.type.v3 import http_status_pb2
+from google.rpc import status_pb2
 from pydantic import ValidationError
 
 from portunus.config import config

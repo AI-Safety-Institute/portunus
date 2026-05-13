@@ -260,7 +260,9 @@ def _make_servicer(
     publish = publish or FakePublishService()
     sign = sign or FakeSignRequest()
     servicer = PortunusAuthServicer(
-        auth_service=auth, publish_service=publish, sign_request_fn=sign
+        auth_service=auth,  # type: ignore[arg-type]
+        publish_service=publish,  # type: ignore[arg-type]
+        sign_request_fn=sign,  # type: ignore[arg-type]
     )
     return servicer, auth, publish, sign
 

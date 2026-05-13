@@ -21,12 +21,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import grpc
-from envoy.service.auth.v3 import (
-    external_auth_pb2_grpc,  # type: ignore[import-not-found]
-)
-from envoy.service.ext_proc.v3 import (
-    external_processor_pb2_grpc as proc_grpc,  # type: ignore[import-not-found]
-)
+from envoy.service.auth.v3 import external_auth_pb2_grpc
+from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 
 from portunus.config import GrpcConfig
 from portunus.grpc.auth_servicer import PortunusAuthServicer

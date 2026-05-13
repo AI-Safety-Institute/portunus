@@ -28,14 +28,11 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 # Add portunus to the path so conftest helpers import cleanly.
-sys.path.append(
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "portunus")
-)
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "portunus"))
 os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
 from conftest import encode_base64  # noqa: E402
-
 
 PROXY_WS_BASE = "ws://localhost:8888/ws"
 
@@ -48,7 +45,8 @@ def _auth_header(api_key_prefix: str = "Bearer ") -> str:
 def _close_code(exc: ConnectionClosed) -> int:
     """Pull the observed close code out of a ConnectionClosed exception.
 
-    websockets v12 / v13 disagree on field names; this normalises both."""
+    websockets v12 / v13 disagree on field names; this normalises both.
+    """
     if hasattr(exc, "rcvd") and exc.rcvd is not None:
         return exc.rcvd.code
     return exc.code  # type: ignore[attr-defined]
@@ -99,9 +97,12 @@ async def test_binary_message_round_trips_through_portunus_to_echo_upstream(
 async def test_upstream_close_after_n_messages_propagates_to_client_with_code_1000(
     docker_setup,
 ):
-    """ws-echo's /close-after/2 echoes two messages then closes with code
+    """Upstream close-after-N propagates the close code through Portunus.
+
+    ws-echo's /close-after/2 echoes two messages then closes with code
     1000. The client should observe the same close code, not a hang or a
-    transport-level error."""
+    transport-level error.
+    """
     headers = {"Authorization": _auth_header()}
     async with websockets.connect(
         f"{PROXY_WS_BASE}/close-after/2", additional_headers=headers
@@ -128,10 +129,13 @@ async def test_upstream_close_after_n_messages_propagates_to_client_with_code_10
 async def test_abrupt_upstream_tcp_reset_surfaces_to_client_as_connection_error(
     docker_setup,
 ):
-    """/echo-then-die echoes one message then drops the TCP socket without
+    """Abrupt upstream TCP reset surfaces to the client.
+
+    /echo-then-die echoes one message then drops the TCP socket without
     a close frame. The client must see a connection error (not a hang)
     within a couple of seconds — Portunus should propagate the broken
-    upstream rather than holding the client open."""
+    upstream rather than holding the client open.
+    """
     headers = {"Authorization": _auth_header()}
     async with websockets.connect(
         f"{PROXY_WS_BASE}/echo-then-die", additional_headers=headers
@@ -154,9 +158,12 @@ async def test_abrupt_upstream_tcp_reset_surfaces_to_client_as_connection_error(
 async def test_upstream_malformed_frame_terminates_session_within_timeout(
     docker_setup,
 ):
-    """/malformed accepts the handshake then writes invalid frame bytes.
+    """Malformed upstream frame bytes terminate the session.
+
+    /malformed accepts the handshake then writes invalid frame bytes.
     The client must see the session terminate within a reasonable window
-    rather than the corrupt bytes being relayed through verbatim."""
+    rather than the corrupt bytes being relayed through verbatim.
+    """
     headers = {"Authorization": _auth_header()}
     async with websockets.connect(
         f"{PROXY_WS_BASE}/malformed", additional_headers=headers
@@ -177,9 +184,11 @@ async def test_upstream_malformed_frame_terminates_session_within_timeout(
 async def test_ws_upgrade_without_authorization_header_is_rejected_before_upgrade(
     docker_setup,
 ):
-    """No Authorization header → the upgrade must fail at the HTTP layer.
+    """Missing Authorization fails at the HTTP upgrade layer.
+
     websockets surfaces this as ``InvalidStatusCode`` (or its v13 successor)
-    rather than a successful connection that immediately closes."""
+    rather than a successful connection that immediately closes.
+    """
     from websockets.exceptions import InvalidStatusCode
 
     with pytest.raises((InvalidStatusCode, ConnectionClosed)):

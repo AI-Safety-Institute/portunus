@@ -28,7 +28,6 @@ import uuid
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-
 CLOSE_AFTER_PREFIX = "/close-after/"
 
 
@@ -40,7 +39,7 @@ async def _handler(websocket: WebSocketServerProtocol) -> None:
         return
 
     if path.startswith(CLOSE_AFTER_PREFIX):
-        n_str = path[len(CLOSE_AFTER_PREFIX):]
+        n_str = path[len(CLOSE_AFTER_PREFIX) :]
         try:
             n = int(n_str)
         except ValueError:
@@ -137,23 +136,35 @@ async def _openai_responses_mock(websocket: WebSocketServerProtocol) -> None:
 
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
 
-    await websocket.send(json.dumps({
-        "type": "response.created",
-        "response": {"id": response_id, "status": "in_progress"},
-    }))
+    await websocket.send(
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "status": "in_progress"},
+            }
+        )
+    )
 
     for i in range(chunks):
         await asyncio.sleep(interval)
-        await websocket.send(json.dumps({
-            "type": "response.output_text.delta",
-            "response_id": response_id,
-            "delta": f"chunk-{i} ",
-        }))
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "response.output_text.delta",
+                    "response_id": response_id,
+                    "delta": f"chunk-{i} ",
+                }
+            )
+        )
 
-    await websocket.send(json.dumps({
-        "type": "response.completed",
-        "response": {"id": response_id, "status": "completed"},
-    }))
+    await websocket.send(
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {"id": response_id, "status": "completed"},
+            }
+        )
+    )
 
 
 def _process_request(path: str, headers):

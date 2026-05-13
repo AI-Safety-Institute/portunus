@@ -51,9 +51,10 @@ def extract_target_host(context: grpc.aio.ServicerContext) -> Optional[str]:
 
 def _read_metadata(context: grpc.aio.ServicerContext, key_name: str) -> Optional[str]:
     try:
-        for key, value in context.invocation_metadata() or []:
+        for entry in context.invocation_metadata() or []:
+            key, value = entry[0], entry[1]
             if key.lower() == key_name:
-                return value
+                return value if isinstance(value, str) else value.decode("utf-8")
     except Exception:
         return None
     return None

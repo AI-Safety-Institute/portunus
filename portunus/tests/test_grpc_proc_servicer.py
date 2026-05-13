@@ -160,7 +160,10 @@ def _make_servicer(
 ) -> tuple[PortunusProcessServicer, FakePublishService, BoundedPublishQueue]:
     publish = publish or FakePublishService()
     queue = BoundedPublishQueue(maxsize=queue_maxsize, num_workers=2)
-    servicer = PortunusProcessServicer(publish_service=publish, publish_queue=queue)
+    servicer = PortunusProcessServicer(
+        publish_service=publish,  # type: ignore[arg-type]
+        publish_queue=queue,
+    )
     return servicer, publish, queue
 
 
@@ -507,9 +510,7 @@ async def test_ws_stream_emits_a_summary_with_frame_counts_and_close_code():
                 _http_body_message(
                     body=_ws_frame(b"second-server-frame"), is_request=False
                 ),
-                _http_body_message(
-                    body=_ws_server_close_frame(1000), is_request=False
-                ),
+                _http_body_message(body=_ws_server_close_frame(1000), is_request=False),
             ]
         )
 
@@ -649,9 +650,7 @@ async def test_streamed_response_body_chunks_have_monotonic_chunk_ids():
     try:
         stream = _stream_from(
             [
-                _http_headers_message(
-                    headers={}, is_request=True, request_id="sse-1"
-                ),
+                _http_headers_message(headers={}, is_request=True, request_id="sse-1"),
                 _http_body_message(body=b"chunk-a", is_request=False),
                 _http_body_message(body=b"chunk-b", is_request=False),
                 _http_body_message(
@@ -691,9 +690,7 @@ async def test_terminal_body_chunk_carries_total_count_in_num_chunks():
                 ),
                 _http_body_message(body=b"first", is_request=False),
                 _http_body_message(body=b"second", is_request=False),
-                _http_body_message(
-                    body=b"third", is_request=False, end_of_stream=True
-                ),
+                _http_body_message(body=b"third", is_request=False, end_of_stream=True),
             ]
         )
 
@@ -724,9 +721,7 @@ async def test_request_and_response_chunk_ids_are_independent():
                     headers={}, is_request=True, request_id="bidir-1"
                 ),
                 _http_body_message(body=b"req-0", is_request=True),
-                _http_body_message(
-                    body=b"req-1", is_request=True, end_of_stream=True
-                ),
+                _http_body_message(body=b"req-1", is_request=True, end_of_stream=True),
                 _http_body_message(body=b"resp-0", is_request=False),
                 _http_body_message(
                     body=b"resp-1", is_request=False, end_of_stream=True

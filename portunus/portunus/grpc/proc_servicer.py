@@ -43,13 +43,9 @@ from enum import Enum
 from typing import AsyncIterator, Optional
 
 import grpc
-from envoy.config.core.v3 import base_pb2  # type: ignore[import-not-found]
-from envoy.service.ext_proc.v3 import (  # type: ignore[import-not-found]
-    external_processor_pb2 as proc_pb2,
-)
-from envoy.service.ext_proc.v3 import (
-    external_processor_pb2_grpc as proc_grpc,
-)
+from envoy.config.core.v3 import base_pb2
+from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
+from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 
 from portunus.config import config
 from portunus.grpc.frame_observer import (

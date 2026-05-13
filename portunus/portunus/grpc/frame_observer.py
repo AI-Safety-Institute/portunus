@@ -32,18 +32,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterator, Optional
 
-from wsproto.connection import (  # type: ignore[import-untyped]
-    Connection,
-    ConnectionType,
-)
-from wsproto.events import (  # type: ignore[import-untyped]
+from wsproto.connection import Connection, ConnectionType
+from wsproto.events import (
     BytesMessage,
     CloseConnection,
     Ping,
     Pong,
     TextMessage,
 )
-from wsproto.extensions import PerMessageDeflate  # type: ignore[import-untyped]
+from wsproto.extensions import PerMessageDeflate
 
 logger = logging.getLogger("api.access")
 
@@ -95,8 +92,8 @@ def build_observer(
     any extensions.
     """
     deflate = _negotiated_deflate(response_extensions_header)
-    extensions_req = [PerMessageDeflate()] if deflate else []
-    extensions_resp = [PerMessageDeflate()] if deflate else []
+    extensions_req: list = [PerMessageDeflate()] if deflate else []
+    extensions_resp: list = [PerMessageDeflate()] if deflate else []
     return FrameObserver(
         request_conn=Connection(ConnectionType.SERVER, extensions=extensions_req),
         response_conn=Connection(ConnectionType.CLIENT, extensions=extensions_resp),
