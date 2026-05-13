@@ -94,23 +94,16 @@ class _StreamState:
     # First close frame observed wins — populated by _submit_frame.
     close_code: Optional[int] = None
     close_initiator: Optional[str] = None
-    # Per-direction HTTP body buffers. ext_proc delivers HTTP bodies as
-    # a stream of body messages; the joined-log schema downstream
-    # expects ONE body record per direction (``chunk_id=0, num_chunks=1``).
-    # We buffer here and emit once on ``end_of_stream`` (or on stream
-    # finalisation, see the ``Process`` finally block), so streaming
-    # responses — where the last chunk carries the token-count event
-    # for Anthropic / OpenAI SSE — make it into the audit trail with
-    # the same wire shape as a non-streamed body. WS streams go through
-    # ``_submit_frame`` instead; each frame is its own logical record.
-    request_body_buffer: bytearray = field(default_factory=bytearray)
-    response_body_buffer: bytearray = field(default_factory=bytearray)
-    request_body_truncated: bool = False
-    response_body_truncated: bool = False
-    request_body_published: bool = False
-    response_body_published: bool = False
-    request_body_first_timestamp: str = ""
-    response_body_first_timestamp: str = ""
+    # Monotonic body-chunk counters per direction. ext_proc delivers
+    # bodies as a stream of chunks; we emit one Kinesis record per
+    # chunk with a sequential ``chunk_id`` so the akp Glue ETL
+    # (``infra/pipelines/process_raw_data.py:reassemble_body_chunks``)
+    # can groupBy(request_id) and concat body bytes ordered by
+    # chunk_id at aggregation time. The joined-log schema consumed
+    # by aisitok is unchanged — Glue still emits one body record per
+    # request_id after reassembly.
+    request_chunk_id: int = 0
+    response_chunk_id: int = 0
 
 
 # ext_proc routes Envoy attaches filter_metadata to indicate WS upgrade.
@@ -198,15 +191,6 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 self._active.pop(state.stream_id, None)
                 if state.mode == StreamMode.WS_UPGRADE:
                     await self._emit_ws_summary(state)
-                else:
-                    # Flush any buffered HTTP body bytes that never
-                    # received an ``end_of_stream=true`` signal —
-                    # typical when the client disconnects mid-stream
-                    # or the upstream resets. Without this, the
-                    # streaming-response audit trail would silently
-                    # lose every connection that didn't end cleanly.
-                    self._flush_http_body(state, direction=Direction.REQUEST)
-                    self._flush_http_body(state, direction=Direction.RESPONSE)
 
     # ------------------------------------------------------------------
     # Stream setup
@@ -407,92 +391,46 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         timestamp: str,
         end_of_stream: bool,
     ) -> None:
-        """Buffer a body chunk; emit one record per direction at EOS.
+        """Publish one body chunk per ext_proc message with a monotonic id.
 
-        ext_proc delivers an HTTP body as a stream of chunks. The
-        joined-log schema downstream expects ONE body record per
-        direction (``chunk_id=0, num_chunks=1``) carrying the full
-        body bytes — same shape regardless of whether the upstream
-        streamed the response or sent it in one go. We accumulate
-        chunks here and emit a single publish call on the terminal
-        chunk so streaming-response observability (Anthropic /
-        OpenAI SSE, where the token-count event lands many chunks
-        in) survives the joined-log ETL without changing the
-        consumer's wire contract.
+        Each chunk lands as its own Kinesis record with a sequential
+        ``chunk_id`` per direction and ``num_chunks=0`` (sentinel:
+        total unknown until aggregation). The akp Glue ETL in
+        ``infra/pipelines/process_raw_data.py:reassemble_body_chunks``
+        groups by ``request_id``, sorts by ``chunk_id``, and
+        concatenates body bytes, so the joined-log output consumed by
+        aisitok stays at one body record per direction — same schema
+        as the legacy Lua-filter path.
 
-        Memory is bounded by ``config.kinesis.max_record_size`` per
-        direction; chunks beyond that are dropped with the
-        ``truncated`` flag set, and the record is published with the
-        truncated prefix so downstream knows the bytes were capped.
+        Keeping the aggregation downstream means portunus holds no
+        body bytes in memory beyond the in-flight ext_proc chunk, and
+        streaming responses (Anthropic / OpenAI SSE) flow to Kinesis
+        chunk-by-chunk rather than being held until end_of_stream.
+
+        ``end_of_stream`` is unused in the wire format — Glue derives
+        the total count via ``count(*)`` after the groupBy. We keep
+        the flag in the signature so the dispatch site can wire it
+        through if a future schema change reintroduces an explicit
+        end-of-stream marker.
         """
+        del end_of_stream
         if direction == Direction.REQUEST:
-            buffer = state.request_body_buffer
-            cap_hit = state.request_body_truncated
-            first_ts = state.request_body_first_timestamp
-        else:
-            buffer = state.response_body_buffer
-            cap_hit = state.response_body_truncated
-            first_ts = state.response_body_first_timestamp
-
-        if not first_ts:
-            # First chunk anchors the record's ``timestamp`` field —
-            # the timestamp of the FIRST observed byte on this
-            # direction, matching the Lua-filter behaviour.
-            if direction == Direction.REQUEST:
-                state.request_body_first_timestamp = timestamp
-                first_ts = timestamp
-            else:
-                state.response_body_first_timestamp = timestamp
-                first_ts = timestamp
-
-        if not cap_hit:
-            cap = config.kinesis.max_record_size
-            room = cap - len(buffer)
-            if room <= 0:
-                if direction == Direction.REQUEST:
-                    state.request_body_truncated = True
-                else:
-                    state.response_body_truncated = True
-            elif len(body) > room:
-                buffer.extend(body[:room])
-                if direction == Direction.REQUEST:
-                    state.request_body_truncated = True
-                else:
-                    state.response_body_truncated = True
-            else:
-                buffer.extend(body)
-
-        if end_of_stream:
-            self._flush_http_body(state, direction=direction)
-
-    def _flush_http_body(self, state: _StreamState, *, direction: Direction) -> None:
-        """Publish the accumulated body for one direction. Idempotent."""
-        if direction == Direction.REQUEST:
-            if state.request_body_published:
-                return
-            state.request_body_published = True
-            body_bytes = bytes(state.request_body_buffer)
-            timestamp = state.request_body_first_timestamp or generate_iso_timestamp()
+            chunk_id = state.request_chunk_id
+            state.request_chunk_id += 1
             publish_method = self._publish.publish_request_body
         else:
-            if state.response_body_published:
-                return
-            state.response_body_published = True
-            body_bytes = bytes(state.response_body_buffer)
-            timestamp = state.response_body_first_timestamp or generate_iso_timestamp()
+            chunk_id = state.response_chunk_id
+            state.response_chunk_id += 1
             publish_method = self._publish.publish_response_body
-
-        if not body_bytes:
-            return
 
         self._queue.submit_droppable(
             PublishTask(
                 coro_fn=lambda: publish_method(
                     request_id=state.request_id,
-                    body_bytes=body_bytes,
+                    body_bytes=body,
                     timestamp=timestamp,
-                    chunk_id=0,
-                    num_chunks=1,
+                    chunk_id=chunk_id,
+                    num_chunks=0,
                 ),
                 label=f"{direction.value}_body",
             )

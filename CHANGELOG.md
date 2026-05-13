@@ -30,16 +30,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   Signing-disabled tenants see no change in latency beyond the buffer
   cost. Replaces the legacy Lua filter that performed the same work
   inline.
-- HTTP bodies are accumulated server-side across all ext_proc body
-  messages for a stream and published as one Kinesis record per
-  direction with the existing `chunk_id=0, num_chunks=1` wire shape.
-  Streaming responses (Anthropic Messages, OpenAI SSE) no longer lose
-  every chunk past the first to the joined-log ETL's `chunk_id=0`
-  filter — the full body, including the terminal token-count event,
-  lands in one record. Memory is bounded per direction by
-  `KINESIS_MAX_RECORD_SIZE` (default 1 MB); excess is truncated
-  rather than dropped wholesale. The joined-log consumer schema is
-  unchanged.
+- HTTP body records now use a `chunk_id`-per-message wire format:
+  each ext_proc body chunk lands as its own Kinesis record with a
+  monotonic `chunk_id` per direction and `num_chunks=0` (sentinel:
+  total derived at aggregation time). Aggregation happens in the
+  akp Glue ETL — the same `reassemble_body_chunks` step that
+  already handled multi-chunk bodies. The joined-log output
+  consumed by aisitok is unchanged: one body record per direction
+  with the concatenated payload. Streaming responses (Anthropic
+  Messages, OpenAI SSE) now flow chunk-by-chunk through Kinesis
+  rather than being held until end_of_stream.
 - Denied auth responses are JSON (`{"error": {"message": ..., "request_id": ...}}`)
   with `content-type: application/json`, `x-{prefix}-error: true`, and
   `x-portunus-debug-id`. Header prefix is `PORTUNUS_HEADER_PREFIX`.
