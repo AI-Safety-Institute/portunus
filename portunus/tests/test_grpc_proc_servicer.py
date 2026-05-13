@@ -342,9 +342,9 @@ async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_cou
     """Tiny queue + no workers running → put_nowait will fail past.
 
     capacity, the servicer should swallow those bodies and bump the drop
-    counter. In FULL_DUPLEX_STREAMED mode body chunks don't generate
-    ProcessingResponse messages, so we observe only the headers response
-    and the drop counter to confirm the customer-facing contract holds.
+    counter. The customer-facing contract is that every ProcessingRequest
+    still gets a matching ProcessingResponse (header or body), regardless
+    of whether the publish queue swallowed the body record.
     """
     servicer, _publish, queue = _make_servicer(queue_maxsize=2)
     # NB: workers deliberately not started so the queue stays full.
@@ -361,11 +361,7 @@ async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_cou
 
     responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-    # One response for the request_headers message; body messages get no
-    # ProcessingResponse in FDS mode (returning one is "spurious" to Envoy).
-    assert len(responses) == 1
-    assert responses[0].HasField("request_headers")
-    # At least one drop must have been counted.
+    assert len(responses) == 5
     assert queue.dropped_total >= 1
 
 
@@ -464,18 +460,19 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 
 # ---------------------------------------------------------------------------
-# Envoy 1.36 FDS contract — no ProcessingResponse per body chunk
+# Envoy 1.36 FDS contract — every body chunk gets a streamed_response;
+# the terminal chunk mirrors end_of_stream so Envoy unblocks the HCM
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_body_messages_get_no_processing_response_in_fds_mode():
-    """Envoy 1.36 in FULL_DUPLEX_STREAMED logs.
+async def test_body_response_mirrors_end_of_stream_so_envoy_can_finalise():
+    """FDS mode keeps the response stream open until the processor sets.
 
-    "Spurious response message 3 received on gRPC stream" and fails the
-    filter with a 500 if the processor sends a ProcessingResponse for
-    every body chunk. The servicer must observe body bytes silently and
-    only respond to headers/trailers.
+    ``streamed_response.end_of_stream=true`` on the terminal chunk.
+    Without that, Envoy holds the HCM and the client sees a 30-second
+    timeout. Confirm we forward the flag from the incoming body
+    message to the response.
     """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
@@ -483,17 +480,53 @@ async def test_body_messages_get_no_processing_response_in_fds_mode():
         stream = _stream_from(
             [
                 _http_headers_message(headers={}, is_request=True, request_id="shape"),
-                _http_body_message(body=b"body", is_request=True),
-                _http_body_message(body=b"more", is_request=True, end_of_stream=True),
+                _http_body_message(body=b"first", is_request=True),
+                _http_body_message(body=b"last", is_request=True, end_of_stream=True),
             ]
         )
 
         responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-        # Exactly one response — for the request_headers message. No
-        # response for request_body messages.
+        # headers → 1 response. bodies → 2 responses. Total 3.
+        assert len(responses) == 3
+
+        # Each body response wraps a streamed_response envelope (the
+        # Envoy 1.36 FDS requirement) and the terminal chunk carries
+        # end_of_stream=true.
+        first_body = responses[1].request_body
+        last_body = responses[2].request_body
+        assert first_body.response.body_mutation.HasField("streamed_response")
+        assert (
+            first_body.response.body_mutation.streamed_response.end_of_stream is False
+        )
+        assert last_body.response.body_mutation.streamed_response.end_of_stream is True
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_headers_response_uses_headers_field_not_body_field():
+    """Yielding ``request_body=BodyResponse(...)`` for a request_headers.
+
+    message generates "Spurious response message 3" in Envoy and fails
+    the filter with a 500. The response for a headers message must use
+    the matching ``request_headers`` / ``response_headers`` oneof field
+    carrying a ``HeadersResponse``.
+    """
+    servicer, _publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(headers={}, is_request=True, request_id="shape"),
+            ]
+        )
+
+        responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
+
         assert len(responses) == 1
         assert responses[0].HasField("request_headers")
+        assert not responses[0].HasField("request_body")
     finally:
         await queue.stop()
 

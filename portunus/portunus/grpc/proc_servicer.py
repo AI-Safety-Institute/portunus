@@ -227,11 +227,10 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.REQUEST,
                 timestamp=timestamp,
             )
-            # FULL_DUPLEX_STREAMED body mode: Envoy does not expect a
-            # ProcessingResponse per body chunk. Returning one triggers
-            # "Spurious response message 3" warnings and fails the
-            # filter with a 500. Body bytes are observed silently and
-            # published asynchronously via the queue.
+            yield _empty_body_response(
+                request_side=True,
+                end_of_stream=request.request_body.end_of_stream,
+            )
         elif request.HasField("request_trailers"):
             await self._on_request_trailers(state, request.request_trailers, timestamp)
             yield _empty_trailers_response(request_side=True)
@@ -245,7 +244,10 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.RESPONSE,
                 timestamp=timestamp,
             )
-            # See request_body comment.
+            yield _empty_body_response(
+                request_side=False,
+                end_of_stream=request.response_body.end_of_stream,
+            )
         elif request.HasField("response_trailers"):
             await self._on_response_trailers(
                 state, request.response_trailers, timestamp
@@ -569,6 +571,31 @@ def _empty_headers_response(*, request_side: bool) -> proc_pb2.ProcessingRespons
     if request_side:
         return proc_pb2.ProcessingResponse(request_headers=hdr)
     return proc_pb2.ProcessingResponse(response_headers=hdr)
+
+
+def _empty_body_response(
+    *, request_side: bool, end_of_stream: bool = False
+) -> proc_pb2.ProcessingResponse:
+    """The body response shape Envoy 1.36 requires in FDS mode.
+
+    A bare ``CommonResponse()`` triggers "Spurious response message 3"
+    and tears the connection. The fix is the doubly-nested empty
+    streamed_response marker; mirror the incoming chunk's
+    ``end_of_stream`` so Envoy can unblock the HCM on the terminal
+    chunk and release the response to the client.
+    """
+    body_response = proc_pb2.BodyResponse(
+        response=proc_pb2.CommonResponse(
+            body_mutation=proc_pb2.BodyMutation(
+                streamed_response=proc_pb2.StreamedBodyResponse(
+                    end_of_stream=end_of_stream,
+                )
+            )
+        )
+    )
+    if request_side:
+        return proc_pb2.ProcessingResponse(request_body=body_response)
+    return proc_pb2.ProcessingResponse(response_body=body_response)
 
 
 def _empty_trailers_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
