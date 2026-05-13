@@ -149,6 +149,15 @@ services:
       KINESIS_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
       KINESIS_RESPONSE_BODY_STREAM: portunus-stream-response-body
       KINESIS_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
+      # gRPC ext_authz + ext_proc server: required for the new Envoy filter
+      # chain to function. Without this, ext_authz connects-refused → 403.
+      GRPC_ENABLED: "true"
+      GRPC_PORT: "9000"
+      # Empty proxy_api_key disables the proxy-identity check (test-only mode);
+      # docker-compose's proxy container reaches this server over the
+      # ``app_network`` bridge, not over Service Connect, so the SC-namespace
+      # identity gate that motivates the key in prod doesn't apply locally.
+      GRPC_PROXY_API_KEY: ""
 
   ws-echo:
     build: ws-echo
