@@ -93,6 +93,12 @@ class _StreamState:
     # First close frame observed wins — populated by _submit_frame.
     close_code: Optional[int] = None
     close_initiator: Optional[str] = None
+    # Monotonic body-chunk counters per direction. Used to assign
+    # ``chunk_id`` so the joined-log ETL can reassemble streamed
+    # responses (Anthropic/OpenAI SSE) where the token-count event
+    # lands several chunks in.
+    request_chunk_id: int = 0
+    response_chunk_id: int = 0
 
 
 # ext_proc routes Envoy attaches filter_metadata to indicate WS upgrade.
@@ -351,7 +357,11 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 self._submit_frame(state, frame, timestamp)
         else:
             self._submit_http_body(
-                state, msg.body, direction=direction, timestamp=timestamp
+                state,
+                msg.body,
+                direction=direction,
+                timestamp=timestamp,
+                end_of_stream=msg.end_of_stream,
             )
 
     def _submit_http_body(
@@ -361,20 +371,38 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         *,
         direction: Direction,
         timestamp: str,
+        end_of_stream: bool,
     ) -> None:
-        publish_method = (
-            self._publish.publish_request_body
-            if direction == Direction.REQUEST
-            else self._publish.publish_response_body
-        )
+        """Publish one HTTP body chunk with a monotonic per-direction id.
+
+        Streamed responses (Anthropic / OpenAI SSE) span many ext_proc
+        body messages. Each chunk gets its own ``chunk_id`` so the
+        joined-log ETL can reconstruct the full body, instead of every
+        chunk claiming to be chunk 0 and overwriting the previous one.
+
+        ``num_chunks`` carries the total only on the terminal chunk
+        (where Envoy sets ``end_of_stream=true``); intermediate chunks
+        publish ``num_chunks=0`` as the sentinel "more to come". The ETL
+        side filters or aggregates accordingly.
+        """
+        if direction == Direction.REQUEST:
+            chunk_id = state.request_chunk_id
+            state.request_chunk_id += 1
+            publish_method = self._publish.publish_request_body
+        else:
+            chunk_id = state.response_chunk_id
+            state.response_chunk_id += 1
+            publish_method = self._publish.publish_response_body
+
+        num_chunks = chunk_id + 1 if end_of_stream else 0
         self._queue.submit_droppable(
             PublishTask(
                 coro_fn=lambda: publish_method(
                     request_id=state.request_id,
                     body_bytes=body,
                     timestamp=timestamp,
-                    chunk_id=0,
-                    num_chunks=1,
+                    chunk_id=chunk_id,
+                    num_chunks=num_chunks,
                 ),
                 label=f"{direction.value}_body",
             )

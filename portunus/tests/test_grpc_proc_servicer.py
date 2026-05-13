@@ -109,8 +109,10 @@ def _http_headers_message(
     return proc_pb2.ProcessingRequest(**kwargs)
 
 
-def _http_body_message(*, body: bytes, is_request: bool) -> proc_pb2.ProcessingRequest:
-    body_msg = proc_pb2.HttpBody(body=body, end_of_stream=False)
+def _http_body_message(
+    *, body: bytes, is_request: bool, end_of_stream: bool = False
+) -> proc_pb2.ProcessingRequest:
+    body_msg = proc_pb2.HttpBody(body=body, end_of_stream=end_of_stream)
     if is_request:
         return proc_pb2.ProcessingRequest(request_body=body_msg)
     return proc_pb2.ProcessingRequest(response_body=body_msg)
@@ -624,5 +626,121 @@ async def test_ws_summary_close_code_is_none_when_no_close_frame_observed():
         assert record.close_code is None
         assert record.close_initiator is None
         assert record.server_text_frames == 1
+    finally:
+        await queue.stop()
+
+
+# ---------------------------------------------------------------------------
+# Body chunking — each HTTP body chunk gets a monotonic id per direction so
+# streamed responses (Anthropic/OpenAI SSE) can be reassembled downstream.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_streamed_response_body_chunks_have_monotonic_chunk_ids():
+    """Each response body chunk gets a unique, monotonically-increasing.
+
+    chunk_id. Without this, an SSE stream's later chunks (where Anthropic
+    puts the message_delta carrying output_tokens) all claim chunk_id=0
+    and overwrite earlier records or each other.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={}, is_request=True, request_id="sse-1"
+                ),
+                _http_body_message(body=b"chunk-a", is_request=False),
+                _http_body_message(body=b"chunk-b", is_request=False),
+                _http_body_message(
+                    body=b"chunk-c", is_request=False, end_of_stream=True
+                ),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        bodies = publish.of_kind("response_body")
+        ids_in_order = [b.payload["chunk_id"] for b in bodies]
+        bytes_in_order = [b.payload["body_bytes"] for b in bodies]
+        assert ids_in_order == [0, 1, 2]
+        assert bytes_in_order == [b"chunk-a", b"chunk-b", b"chunk-c"]
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_body_chunk_carries_total_count_in_num_chunks():
+    """The chunk with ``end_of_stream=True`` publishes ``num_chunks`` equal.
+
+    to the total chunk count for that direction. Intermediate chunks
+    publish ``num_chunks=0`` as the sentinel "more to come" so the ETL
+    can recognise complete vs partial response bodies.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={}, is_request=True, request_id="sse-final"
+                ),
+                _http_body_message(body=b"first", is_request=False),
+                _http_body_message(body=b"second", is_request=False),
+                _http_body_message(
+                    body=b"third", is_request=False, end_of_stream=True
+                ),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        bodies = publish.of_kind("response_body")
+        num_chunks = [b.payload["num_chunks"] for b in bodies]
+        assert num_chunks == [0, 0, 3]
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_and_response_chunk_ids_are_independent():
+    """Request-side and response-side chunk counters are separate so a.
+
+    request-body chunk and a response-body chunk can both legitimately
+    be ``chunk_id=0`` — they're disambiguated by direction.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={}, is_request=True, request_id="bidir-1"
+                ),
+                _http_body_message(body=b"req-0", is_request=True),
+                _http_body_message(
+                    body=b"req-1", is_request=True, end_of_stream=True
+                ),
+                _http_body_message(body=b"resp-0", is_request=False),
+                _http_body_message(
+                    body=b"resp-1", is_request=False, end_of_stream=True
+                ),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        req_ids = [b.payload["chunk_id"] for b in publish.of_kind("request_body")]
+        resp_ids = [b.payload["chunk_id"] for b in publish.of_kind("response_body")]
+        assert req_ids == [0, 1]
+        assert resp_ids == [0, 1]
     finally:
         await queue.stop()
