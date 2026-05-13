@@ -77,6 +77,13 @@ static_resources:
               - x-portunus-debug-id
               - x-portunus-proxy-key
               - x-portunus-target-host
+              # Internal signal set by ext_authz #1 to gate the
+              # composite-filter dispatch to ext_authz #2. Strip on
+              # inbound so a client can't force the signing pass
+              # (which would just buffer and waste cycles, but still
+              # not what we want), and the upstream provider never
+              # sees this proxy-internal header.
+              - x-portunus-signing-required
             virtual_hosts:
             - name: local_service
               domains: ["*"]
@@ -210,11 +217,13 @@ static_resources:
           # ---------------------------------------------------------------
           # composite — conditionally invokes ext_authz #2 (signing).
           # ---------------------------------------------------------------
-          # Matches on ``dynamic_metadata.envoy.filters.http.ext_authz.
-          # signing_required`` (set by ext_authz #1 above). For
-          # ``"true"`` the inner ext_authz #2 fires; for any other
-          # value the composite is a no-op and the body streams
-          # past — unsigned tenants pay no buffering cost.
+          # Matches on the ``x-portunus-signing-required: true`` request
+          # header that ext_authz #1 adds when the tenant's secret
+          # carries a ``signing_key``. For unsigned tenants the header
+          # is absent and the composite filter is a no-op (request
+          # body streams past, end-to-end). Client-supplied versions
+          # of the header are stripped at route_config so this is a
+          # trusted internal signal.
           - name: envoy.filters.http.composite
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
@@ -227,10 +236,8 @@ static_resources:
                   input:
                     name: signing-required
                     typed_config:
-                      "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestMetadataMatchInput
-                      filter: envoy.filters.http.ext_authz
-                      path:
-                      - key: signing_required
+                      "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput
+                      header_name: x-portunus-signing-required
                   exact_match_map:
                     map:
                       "true":

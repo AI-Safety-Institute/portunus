@@ -596,8 +596,9 @@ async def test_denied_response_carries_request_id_in_x_portunus_debug_id_header(
 
 # ---------------------------------------------------------------------------
 # Request signing — two-pass design via ext_authz #1 (auth) + #2 (signing).
-# The composite filter ahead of #2 gates on dynamic_metadata.signing_required;
-# the signing pass re-uses the cached auth result.
+# The composite filter ahead of #2 gates on the x-portunus-signing-required
+# request header (set by the auth pass, stripped at the route before reaching
+# upstream); the signing pass re-uses the cached auth result.
 # ---------------------------------------------------------------------------
 
 
@@ -615,10 +616,13 @@ def _signing_ctx() -> "_FakeContext":
 async def test_auth_pass_for_signing_tenant_sets_signing_required_metadata():
     """The auth pass (ext_authz #1) signals the composite filter to fire.
 
-    ext_authz #2 by setting ``signing_required: true`` in
-    ``CheckResponse.dynamic_metadata``. The header mutations on this
-    pass cover only the upstream api_key — Content-Digest and the
-    signature headers are produced by the separate signing pass.
+    ext_authz #2 by setting the ``x-portunus-signing-required: true``
+    request header. The composite matcher gates on that header and
+    dispatches ext_authz #2. The header is stripped at the route's
+    ``request_headers_to_remove`` so it never reaches upstream. Header
+    mutations on this pass cover only the upstream api_key —
+    Content-Digest and signature headers are produced by the signing
+    pass.
     """
     from portunus.models import SigningKey
 
@@ -646,16 +650,21 @@ async def test_auth_pass_for_signing_tenant_sets_signing_required_metadata():
     assert "Signature" not in response_headers
     # No signing call on this pass — that's the signing pass's job.
     assert sign.calls == []
-    # dynamic_metadata signals the composite filter.
-    assert dict(response.dynamic_metadata) == {"signing_required": True}
+    # x-portunus-signing-required header signals the composite filter.
+    assert response_headers["x-portunus-signing-required"] == "true"
+    # Header is also stripped from any forged inbound copy (defence in depth).
+    assert "x-portunus-signing-required" in [
+        h for h in response.ok_response.headers_to_remove
+    ]
 
 
 @pytest.mark.asyncio
 async def test_auth_pass_for_non_signing_tenant_sets_signing_required_false():
-    """Tenants without a ``signing_key`` set ``signing_required: false`` so the.
+    """Tenants without a ``signing_key`` omit the signing-required header so the.
 
     composite filter skips ext_authz #2 entirely and the body never
-    has to be buffered for that request.
+    has to be buffered for that request. The header is still listed
+    in ``headers_to_remove`` to defang any forged inbound copy.
     """
     servicer, _auth, _publish, sign = _make_servicer()
 
@@ -663,7 +672,13 @@ async def test_auth_pass_for_non_signing_tenant_sets_signing_required_false():
 
     assert response.HasField("ok_response")
     assert sign.calls == []
-    assert dict(response.dynamic_metadata) == {"signing_required": False}
+    response_headers = {
+        h.header.key: h.header.value for h in response.ok_response.headers
+    }
+    assert "x-portunus-signing-required" not in response_headers
+    assert "x-portunus-signing-required" in [
+        h for h in response.ok_response.headers_to_remove
+    ]
 
 
 @pytest.mark.asyncio

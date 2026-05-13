@@ -405,10 +405,13 @@ def _ok(
     - Add ``Content-Digest``, ``Signature`` and ``Signature-Input``
       (signing pass only).
 
-    ``signing_required`` (auth pass only) is attached as
-    ``dynamic_metadata`` so the composite filter ahead of ext_authz #2
-    can gate on it. Only the boolean — no credentials, no signing key
-    — to keep filter_metadata free of anything sensitive.
+    ``signing_required`` (auth pass only) is signalled as a request
+    header (``x-portunus-signing-required: true``) so the composite
+    filter ahead of ext_authz #2 can gate on it via the standard
+    ``HttpRequestHeaderMatchInput`` matcher. The header is added by
+    Envoy after ext_authz returns and stripped at the route_config
+    above before upstream forwarding — clients cannot forge it
+    inbound and the upstream provider never sees it.
     """
     headers_to_add: list[base_pb2.HeaderValueOption] = []
     headers_to_remove: list[str] = []
@@ -425,6 +428,22 @@ def _ok(
         )
         if config.api_key_header.lower() != "authorization":
             headers_to_remove.append("authorization")
+
+    # Always strip any client-supplied x-portunus-signing-required;
+    # ext_authz #1 is the single source of truth for whether the
+    # composite filter should dispatch to ext_authz #2.
+    if signing_required is not None:
+        headers_to_remove.append("x-portunus-signing-required")
+        if signing_required:
+            headers_to_add.append(
+                base_pb2.HeaderValueOption(
+                    header=base_pb2.HeaderValue(
+                        key="x-portunus-signing-required",
+                        value="true",
+                    ),
+                    append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
+                )
+            )
 
     if content_digest is not None:
         headers_to_add.append(
@@ -446,16 +465,13 @@ def _ok(
                 )
             )
 
-    response = external_auth_pb2.CheckResponse(
+    return external_auth_pb2.CheckResponse(
         status=status_pb2.Status(code=0),  # OK
         ok_response=external_auth_pb2.OkHttpResponse(
             headers=headers_to_add,
             headers_to_remove=headers_to_remove,
         ),
     )
-    if signing_required is not None:
-        response.dynamic_metadata["signing_required"] = signing_required
-    return response
 
 
 def _denied(
