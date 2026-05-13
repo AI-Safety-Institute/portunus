@@ -501,8 +501,26 @@ def _extract_request_id(req: proc_pb2.ProcessingRequest) -> str:
     if req.HasField("request_headers"):
         for h in req.request_headers.headers.headers:
             if h.key.lower() == "x-request-id":
-                return h.value
+                value = _header_value(h)
+                if value:
+                    return value
     return str(uuid.uuid4())
+
+
+def _header_value(h) -> str:
+    """Read the populated value out of an Envoy HeaderValue.
+
+    Envoy 1.20+ moved canonical storage from the deprecated string
+    ``value`` field to ``raw_value`` (bytes). Modern Envoy versions
+    populate only ``raw_value`` — reading ``value`` returns ``""``,
+    which is how an empty PartitionKey ended up on every Kinesis
+    publish call. Prefer ``raw_value``, fall back to ``value`` for
+    older runtimes.
+    """
+    raw = getattr(h, "raw_value", b"") or b""
+    if raw:
+        return raw.decode("utf-8", errors="replace")
+    return h.value or ""
 
 
 def _extract_mode(req: proc_pb2.ProcessingRequest) -> StreamMode:
@@ -533,7 +551,9 @@ def _headers_to_dict(http_headers: base_pb2.HeaderMap) -> dict[str, str]:
     import base64
 
     return {
-        h.key.lower(): base64.b64encode(h.value.encode("utf-8")).decode("ascii")
+        h.key.lower(): base64.b64encode(_header_value(h).encode("utf-8")).decode(
+            "ascii"
+        )
         for h in http_headers.headers
     }
 

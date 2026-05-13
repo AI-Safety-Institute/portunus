@@ -222,6 +222,43 @@ async def test_http_request_headers_are_published_with_their_headers_intact():
 
 
 @pytest.mark.asyncio
+async def test_headers_are_read_from_raw_value_field_when_value_is_empty():
+    """Envoy 1.20+ populates HeaderValue.raw_value (bytes) and leaves the.
+
+    deprecated ``value`` string empty. Reading only ``value`` returns
+    ``""`` and an empty x-request-id breaks Kinesis (PartitionKey min
+    length=1). Build a HeaderMap that only sets raw_value and confirm
+    the servicer reads it correctly.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        header_list = [
+            base_pb2.HeaderValue(key="x-request-id", raw_value=b"req-from-raw"),
+            base_pb2.HeaderValue(key="x-foo", raw_value=b"bar"),
+        ]
+        headers_msg = proc_pb2.HttpHeaders(
+            headers=base_pb2.HeaderMap(headers=header_list),
+            end_of_stream=False,
+        )
+        stream = _stream_from([proc_pb2.ProcessingRequest(request_headers=headers_msg)])
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        import base64
+
+        published = publish.of_kind("request_headers")
+        assert len(published) == 1
+        assert published[0].request_id == "req-from-raw"
+        encoded = published[0].payload["headers"]["x-foo"]
+        assert base64.b64decode(encoded).decode() == "bar"
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
 async def test_http_response_body_chunks_are_published_with_their_bytes_intact():
     servicer, publish, queue = _make_servicer()
     await queue.start()
