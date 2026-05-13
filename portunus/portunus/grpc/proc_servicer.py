@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -59,6 +60,7 @@ from portunus.grpc.frame_observer import (
 )
 from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.grpc.publish_queue import BoundedPublishQueue, PublishTask
+from portunus.models import WSSummaryRecord
 from portunus.services.publish_service import PublishService
 from portunus.util import generate_iso_timestamp
 
@@ -81,6 +83,16 @@ class _StreamState:
     observer: Optional[FrameObserver] = None
     upstream_extensions: Optional[str] = None
     drain_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    # Wall-clock and monotonic start for the summary record.
+    started_at_iso: str = ""
+    started_at_monotonic: float = 0.0
+    # Per-direction frame counters, keyed by opcode ("text", "binary",
+    # "ping", "pong", "close"). Populated only for WS streams.
+    client_frame_counts: dict[str, int] = field(default_factory=dict)
+    server_frame_counts: dict[str, int] = field(default_factory=dict)
+    # First close frame observed wins — populated by _submit_frame.
+    close_code: Optional[int] = None
+    close_initiator: Optional[str] = None
 
 
 # ext_proc routes Envoy attaches filter_metadata to indicate WS upgrade.
@@ -162,6 +174,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         finally:
             if state is not None:
                 self._active.pop(state.request_id, None)
+                if state.mode == StreamMode.WS_UPGRADE:
+                    await self._emit_ws_summary(state)
 
     # ------------------------------------------------------------------
     # Stream setup
@@ -176,7 +190,13 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             if mode == StreamMode.WS_UPGRADE
             else None
         )
-        return _StreamState(request_id=request_id, mode=mode, observer=observer)
+        return _StreamState(
+            request_id=request_id,
+            mode=mode,
+            observer=observer,
+            started_at_iso=generate_iso_timestamp(),
+            started_at_monotonic=time.monotonic(),
+        )
 
     # ------------------------------------------------------------------
     # Per-message dispatch
@@ -360,6 +380,40 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             )
         )
 
+    async def _emit_ws_summary(self, state: _StreamState) -> None:
+        """Build and submit the per-connection WS summary record.
+
+        Submitted via the blocking queue path: WS summaries are one record
+        per connection — low volume, and the connection-level shape
+        (durations, close codes) is exactly the slice analytics queries
+        will reach for, so we'd rather backpressure than drop.
+        """
+        duration = max(0.0, time.monotonic() - state.started_at_monotonic)
+        record = WSSummaryRecord(
+            request_id=state.request_id,
+            timestamp=state.started_at_iso,
+            published_at=generate_iso_timestamp(),
+            duration_seconds=duration,
+            close_code=state.close_code,
+            close_initiator=state.close_initiator,
+            client_text_frames=state.client_frame_counts.get("text", 0),
+            client_binary_frames=state.client_frame_counts.get("binary", 0),
+            client_ping_frames=state.client_frame_counts.get("ping", 0),
+            client_pong_frames=state.client_frame_counts.get("pong", 0),
+            client_close_frames=state.client_frame_counts.get("close", 0),
+            server_text_frames=state.server_frame_counts.get("text", 0),
+            server_binary_frames=state.server_frame_counts.get("binary", 0),
+            server_ping_frames=state.server_frame_counts.get("ping", 0),
+            server_pong_frames=state.server_frame_counts.get("pong", 0),
+            server_close_frames=state.server_frame_counts.get("close", 0),
+        )
+        await self._queue.submit_blocking(
+            PublishTask(
+                coro_fn=lambda: self._publish.publish_ws_summary(record=record),
+                label="ws_summary",
+            )
+        )
+
     def _submit_frame(
         self,
         state: _StreamState,
@@ -372,6 +426,18 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         downstream consumers (Glue ETL) can reconstruct frame-level
         attribution without needing a new schema.
         """
+        counters = (
+            state.client_frame_counts
+            if frame.direction == Direction.REQUEST
+            else state.server_frame_counts
+        )
+        counters[frame.opcode] = counters.get(frame.opcode, 0) + 1
+        if frame.opcode == "close" and state.close_code is None:
+            state.close_code = frame.close_code
+            state.close_initiator = (
+                "client" if frame.direction == Direction.REQUEST else "server"
+            )
+
         publish_method = (
             self._publish.publish_request_body
             if frame.direction == Direction.REQUEST

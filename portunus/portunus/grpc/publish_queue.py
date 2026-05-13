@@ -64,6 +64,10 @@ class BoundedPublishQueue:
     def published_total(self) -> int:
         return self._published_total
 
+    def qsize(self) -> int:
+        """Current queue depth — convenience for tests that drain on size."""
+        return self._queue.qsize()
+
     async def start(self) -> None:
         """Spawn the worker pool. Idempotent — calling twice is a no-op."""
         if self._workers:

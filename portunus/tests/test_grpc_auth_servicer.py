@@ -61,14 +61,16 @@ class FakePublishService:
         *,
         delay: float = 0.0,
         raises: Optional[BaseException] = None,
+        returns: bool = True,
     ) -> None:
         self.records: list[_PublishRecord] = []
         self._delay = delay
         self._raises = raises
+        self._returns = returns
 
     async def publish_metadata(
         self, *, request_id: str, principal_info: PrincipalInfo, **_: Any
-    ) -> None:
+    ) -> bool:
         if self._delay:
             await asyncio.sleep(self._delay)
         if self._raises is not None:
@@ -80,6 +82,7 @@ class FakePublishService:
                 when=asyncio.get_event_loop().time(),
             )
         )
+        return self._returns
 
 
 @dataclass
@@ -326,16 +329,34 @@ async def test_bare_payload_without_prefix_still_works():
 
 
 @pytest.mark.asyncio
-async def test_target_host_from_request_header_is_passed_through_to_auth_service():
-    """The auth service's host-validation needs the target_host the proxy.
+async def test_target_host_from_grpc_invocation_metadata_is_passed_to_auth_service():
+    """target_host is sourced from gRPC ``invocation_metadata`` — the only.
 
-    is serving. Today the servicer reads it from the
-    ``x-portunus-target-host`` HTTP header — this test pins that
-    propagation.
+    channel Envoy can write that clients can't reach. Reading from the
+    HTTP request header would let a client forge a different host and
+    pass auth's secret.host check.
+    """
+    servicer, auth, _publish, _sign = _make_servicer()
+    ctx = _FakeContext(
+        metadata=[
+            ("x-portunus-proxy-key", _PROXY_KEY),
+            ("x-portunus-target-host", "api.anthropic.com"),
+        ]
+    )
 
-    NB: there is a separate behaviour-level bug (tracked) where the
-    header is forgeable by the client. That's a fix on the Envoy side,
-    not on the servicer.
+    # The HTTP header is set to something else to verify we ignore it.
+    await servicer.Check(_check_request(target_host="evil.example.com"), ctx)
+
+    assert auth.auth_calls and auth.auth_calls[0].target_host == "api.anthropic.com"
+
+
+@pytest.mark.asyncio
+async def test_target_host_http_header_is_ignored_to_prevent_client_forgery():
+    """If the only target_host is in the HTTP request headers (no gRPC.
+
+    metadata channel), the servicer should pass ``None`` to auth rather
+    than trusting the client-forgeable header. The forgery vector exists
+    because route_config header rewrites land *after* ext_authz.
     """
     servicer, auth, _publish, _sign = _make_servicer()
 
@@ -343,7 +364,7 @@ async def test_target_host_from_request_header_is_passed_through_to_auth_service
         _check_request(target_host="api.anthropic.com"), _ctx_with_key()
     )
 
-    assert auth.auth_calls and auth.auth_calls[0].target_host == "api.anthropic.com"
+    assert auth.auth_calls and auth.auth_calls[0].target_host is None
 
 
 @pytest.mark.asyncio

@@ -203,10 +203,15 @@ async def test_http_request_headers_are_published_with_their_headers_intact():
             pass
         await _drain_queue(queue)
 
+        import base64
+
         request_headers = publish.of_kind("request_headers")
         assert len(request_headers) == 1
         assert request_headers[0].request_id == "req-123"
-        assert request_headers[0].payload["headers"]["x-foo"] == "bar"
+        # Wire format is base64-encoded for aisitok compatibility — see
+        # _headers_to_dict in proc_servicer.
+        encoded = request_headers[0].payload["headers"]["x-foo"]
+        assert base64.b64decode(encoded).decode() == "bar"
     finally:
         await queue.stop()
 
@@ -441,5 +446,183 @@ async def test_body_response_uses_streamed_response_envelope_required_by_envoy()
 
         body_response = responses[1].request_body
         assert body_response.response.body_mutation.HasField("streamed_response")
+    finally:
+        await queue.stop()
+
+
+# ---------------------------------------------------------------------------
+# WS summary record — emitted once per upgraded connection at stream end
+# ---------------------------------------------------------------------------
+
+
+def _ws_client_text_frame(payload: bytes) -> bytes:
+    """Masked text frame from client → server.
+
+    RFC 6455 §5.3 requires the MASK bit set and a 4-byte masking key for
+    all client-originated frames. wsproto's SERVER-role Connection rejects
+    unmasked client frames as a protocol violation.
+    """
+    mask_key = b"\x00\x00\x00\x00"  # all-zero mask → payload bytes unchanged
+    return (
+        bytes([0x81, 0x80 | len(payload)])  # FIN | text opcode, MASK | length
+        + mask_key
+        + bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+    )
+
+
+def _ws_server_close_frame(code: int) -> bytes:
+    """Unmasked close frame from server → client carrying a status code."""
+    payload = code.to_bytes(2, "big")
+    return bytes([0x88, len(payload)]) + payload
+
+
+@pytest.mark.asyncio
+async def test_ws_stream_emits_a_summary_with_frame_counts_and_close_code():
+    """At stream finalisation, an upgraded WS connection should produce.
+
+    exactly one summary record carrying directional frame counts and the
+    observed close code. The summary is what analytics queries reach for
+    instead of aggregating body records.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-summary-1",
+                ),
+                _http_body_message(
+                    body=_ws_client_text_frame(b"ping-from-client"),
+                    is_request=True,
+                ),
+                _http_body_message(
+                    body=_ws_frame(b"first-server-frame"), is_request=False
+                ),
+                _http_body_message(
+                    body=_ws_frame(b"second-server-frame"), is_request=False
+                ),
+                _http_body_message(
+                    body=_ws_server_close_frame(1000), is_request=False
+                ),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        summaries = publish.of_kind("ws_summary")
+        assert len(summaries) == 1, f"Expected one summary, got {summaries}"
+        record = summaries[0].payload["record"]
+        assert record.request_id == "ws-summary-1"
+        assert record.client_text_frames == 1
+        assert record.server_text_frames == 2
+        assert record.server_close_frames == 1
+        assert record.close_code == 1000
+        assert record.close_initiator == "server"
+        assert record.duration_seconds >= 0.0
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_summary_close_initiator_is_client_when_client_sends_close():
+    """A close frame from the client side should be attributed correctly."""
+    # RFC 6455 §5.5.1 close frame: opcode 0x8, masked from client, payload =
+    # 2-byte big-endian status code (optionally + reason).
+    mask_key = b"\x00\x00\x00\x00"
+    payload = (1001).to_bytes(2, "big")
+    client_close = (
+        bytes([0x88, 0x80 | len(payload)])
+        + mask_key
+        + bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+    )
+
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-client-close",
+                ),
+                _http_body_message(body=client_close, is_request=True),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        record = publish.of_kind("ws_summary")[0].payload["record"]
+        assert record.client_close_frames == 1
+        assert record.close_code == 1001
+        assert record.close_initiator == "client"
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_http_stream_does_not_emit_a_ws_summary():
+    """Plain HTTP streams must not produce ws_summary records — the.
+
+    summary is connection-shaped and only meaningful for upgraded WS.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(headers={}, is_request=True, request_id="http-1"),
+                _http_body_message(body=b"hello", is_request=True),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        assert publish.of_kind("ws_summary") == []
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_summary_close_code_is_none_when_no_close_frame_observed():
+    """If a WS stream ends without a close frame (e.g. TCP reset, drain).
+
+    the summary should still publish, but with ``close_code = None`` so
+    analytics can distinguish clean closes from abrupt drops.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-no-close",
+                ),
+                _http_body_message(body=_ws_frame(b"only-message"), is_request=False),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        record = publish.of_kind("ws_summary")[0].payload["record"]
+        assert record.close_code is None
+        assert record.close_initiator is None
+        assert record.server_text_frames == 1
     finally:
         await queue.stop()

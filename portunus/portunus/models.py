@@ -1003,6 +1003,103 @@ class ResponseTrailersRecord:
 
 
 @dataclass
+class WSSummaryRecord:
+    """Per-connection WebSocket summary record.
+
+    Emitted once when the ext_proc stream terminates for an upgraded
+    WebSocket connection. Frame-level records on the body streams remain
+    the source of truth for content; this record adds a cheap, joinable
+    view of connection-level shape (duration, frame counts per direction,
+    close code) so analytics queries don't have to aggregate the body
+    stream.
+
+    Attributes:
+        request_id: Matches the metadata / headers / body records.
+        timestamp: ISO-8601 timestamp of the upgrade (stream start).
+        published_at: ISO-8601 timestamp when this record was published.
+        duration_seconds: Wall-clock duration of the upgraded stream from
+            first ProcessingRequest to the ``finally`` cleanup.
+        close_code: WebSocket close status code observed in a close frame,
+            or ``None`` if the stream ended without one (e.g. drop, TCP
+            reset, server drain).
+        close_initiator: Which side sent the close frame — ``"client"``,
+            ``"server"``, or ``None`` if no close was observed.
+        client_text_frames: Count of text frames client → server.
+        client_binary_frames: Count of binary frames client → server.
+        client_ping_frames: Count of ping frames client → server.
+        client_pong_frames: Count of pong frames client → server.
+        client_close_frames: Count of close frames client → server.
+        server_text_frames: Count of text frames server → client.
+        server_binary_frames: Count of binary frames server → client.
+        server_ping_frames: Count of ping frames server → client.
+        server_pong_frames: Count of pong frames server → client.
+        server_close_frames: Count of close frames server → client.
+    """
+
+    request_id: str
+    timestamp: str
+    published_at: str
+    duration_seconds: float
+    close_code: Optional[int] = None
+    close_initiator: Optional[str] = None
+    client_text_frames: int = 0
+    client_binary_frames: int = 0
+    client_ping_frames: int = 0
+    client_pong_frames: int = 0
+    client_close_frames: int = 0
+    server_text_frames: int = 0
+    server_binary_frames: int = 0
+    server_ping_frames: int = 0
+    server_pong_frames: int = 0
+    server_close_frames: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for Kinesis publishing."""
+        return {
+            "record_type": "ws_summary",
+            "request_id": self.request_id,
+            "timestamp": self.timestamp,
+            "published_at": self.published_at,
+            "duration_seconds": self.duration_seconds,
+            "close_code": self.close_code,
+            "close_initiator": self.close_initiator,
+            "client_text_frames": self.client_text_frames,
+            "client_binary_frames": self.client_binary_frames,
+            "client_ping_frames": self.client_ping_frames,
+            "client_pong_frames": self.client_pong_frames,
+            "client_close_frames": self.client_close_frames,
+            "server_text_frames": self.server_text_frames,
+            "server_binary_frames": self.server_binary_frames,
+            "server_ping_frames": self.server_ping_frames,
+            "server_pong_frames": self.server_pong_frames,
+            "server_close_frames": self.server_close_frames,
+        }
+
+    @classmethod
+    def glue_schema(cls) -> List[Dict[str, str]]:
+        """Return Glue table schema for this record type."""
+        return [
+            {"name": "record_type", "type": "string"},
+            {"name": "request_id", "type": "string"},
+            {"name": "timestamp", "type": "string"},
+            {"name": "published_at", "type": "string"},
+            {"name": "duration_seconds", "type": "double"},
+            {"name": "close_code", "type": "int"},
+            {"name": "close_initiator", "type": "string"},
+            {"name": "client_text_frames", "type": "bigint"},
+            {"name": "client_binary_frames", "type": "bigint"},
+            {"name": "client_ping_frames", "type": "bigint"},
+            {"name": "client_pong_frames", "type": "bigint"},
+            {"name": "client_close_frames", "type": "bigint"},
+            {"name": "server_text_frames", "type": "bigint"},
+            {"name": "server_binary_frames", "type": "bigint"},
+            {"name": "server_ping_frames", "type": "bigint"},
+            {"name": "server_pong_frames", "type": "bigint"},
+            {"name": "server_close_frames", "type": "bigint"},
+        ]
+
+
+@dataclass
 class JoinedLogRecord:
     """Joined log record combining all streams for analysis.
 

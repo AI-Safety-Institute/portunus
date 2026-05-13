@@ -77,6 +77,7 @@ class KinesisConfig(BaseModel):
         response_headers_stream_name: Firehose stream name for response headers
         response_body_stream_name: Firehose stream name for response bodies
         response_trailers_stream_name: Firehose stream name for response trailers
+        ws_summary_stream_name: Stream name for per-connection WebSocket summaries
         max_record_size: Maximum size in bytes for a single Kinesis record
     """
 
@@ -107,6 +108,10 @@ class KinesisConfig(BaseModel):
     response_trailers_stream_name: Optional[str] = Field(
         default=None,
         description="Kinesis Firehose stream name for response trailers",
+    )
+    ws_summary_stream_name: Optional[str] = Field(
+        default=None,
+        description="Kinesis stream for one summary record per WebSocket connection",
     )
     max_record_size: int = Field(
         default=900000,
@@ -310,6 +315,7 @@ def get_config() -> PortunusConfig:
         response_trailers_stream_name=os.environ.get(
             "KINESIS_RESPONSE_TRAILERS_STREAM", None
         ),
+        ws_summary_stream_name=os.environ.get("KINESIS_WS_SUMMARY_STREAM", None),
         max_record_size=int(os.environ.get("KINESIS_MAX_RECORD_SIZE", "1000000")),
     )
 
