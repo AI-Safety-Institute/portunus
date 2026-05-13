@@ -78,6 +78,12 @@ class ExpectedResponse:
     # assertion for this scenario (use for cases where the recorded
     # behaviour isn't pinned yet). 0 = explicitly assert NO record.
     expected_metadata_records: Optional[int] = None
+    # If True, a connection-level rejection (RemoteDisconnected /
+    # ConnectionError) from the proxy is treated as a passing outcome,
+    # in addition to the configured ``status``. Use for scenarios where
+    # Envoy may reject at the connection layer before producing an HTTP
+    # response — e.g. oversized headers exceeding the proxy buffer.
+    reject_with_disconnect: bool = False
 
 
 @dataclass(frozen=True)
@@ -322,10 +328,15 @@ SCENARIOS: list[Scenario] = [
             auth="none",
             headers={"authorization": "Bearer " + ("A" * 1_000_000)},
         ),
-        # The exact status depends on Envoy's header size limits; the key
-        # property is that we get a clean error response, not a crash or
-        # a 200. Tighten this when we pick a canonical status.
-        expected=ExpectedResponse(status=431, reached_upstream=False),
+        # Envoy's hard header buffer limit (60KB) is well below 1MB, so
+        # the proxy rejects the connection before any HTTP response.
+        # `requests` surfaces this as ``RemoteDisconnected``; the test
+        # treats that as a passing outcome alongside 431.
+        expected=ExpectedResponse(
+            status=431,
+            reached_upstream=False,
+            reject_with_disconnect=True,
+        ),
     ),
     Scenario(
         name="forged_x_portunus_debug_id_header_does_not_reach_upstream",
@@ -475,7 +486,14 @@ def test_request_response(
     cache TTL, drain) belong in their own test functions or files; see the
     module docstring.
     """
-    response = _fire_scenario(scenario, seeded_secrets, api_key_header, api_key_prefix)
+    try:
+        response = _fire_scenario(
+            scenario, seeded_secrets, api_key_header, api_key_prefix
+        )
+    except requests.exceptions.ConnectionError:
+        if scenario.expected.reject_with_disconnect:
+            return  # connection-level rejection is a passing outcome
+        raise
 
     # Status code
     assert response.status_code == scenario.expected.status, (
