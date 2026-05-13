@@ -22,6 +22,7 @@ import grpc
 import pytest
 from envoy.config.core.v3 import base_pb2
 from envoy.service.auth.v3 import attribute_context_pb2, external_auth_pb2
+from envoy.type.v3 import http_status_pb2
 
 from portunus.exceptions import (
     AuthenticationError,
@@ -594,29 +595,32 @@ async def test_denied_response_carries_request_id_in_x_portunus_debug_id_header(
 
 
 # ---------------------------------------------------------------------------
-# Request signing — Content-Digest + Signature / Signature-Input headers
+# Request signing — two-pass design via ext_authz #1 (auth) + #2 (signing).
+# The composite filter ahead of #2 gates on dynamic_metadata.signing_required;
+# the signing pass re-uses the cached auth result.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_signing_tenant_gets_content_digest_and_signature_headers():
-    """When the auth result carries a ``signing_key``, the Check service must:.
-
-    (a) compute Content-Digest = sha-256(body) over the buffered request
-        body and add it as a response-header mutation;
-    (b) build a SignableRequest from the CheckRequest shape, invoke the
-        signing service, and add the returned Signature /
-        Signature-Input headers to the OkHttpResponse.
-    """
-    import base64
-    import hashlib
-
-    from portunus.models import SigningKey
-
-    body = b'{"key3": "value3", "key1": "value1", "key2": "value2"}'
-    expected_digest = (
-        f"sha-256=:{base64.b64encode(hashlib.sha256(body).digest()).decode('ascii')}:"
+def _signing_ctx() -> "_FakeContext":
+    """Build a gRPC context tagged for the signing pass (ext_authz #2)."""
+    return _FakeContext(
+        metadata=[
+            ("x-portunus-proxy-key", _PROXY_KEY),
+            ("x-portunus-pass", "signing"),
+        ]
     )
+
+
+@pytest.mark.asyncio
+async def test_auth_pass_for_signing_tenant_sets_signing_required_metadata():
+    """The auth pass (ext_authz #1) signals the composite filter to fire.
+
+    ext_authz #2 by setting ``signing_required: true`` in
+    ``CheckResponse.dynamic_metadata``. The header mutations on this
+    pass cover only the upstream api_key — Content-Digest and the
+    signature headers are produced by the separate signing pass.
+    """
+    from portunus.models import SigningKey
 
     signing_key = SigningKey(
         kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
@@ -629,8 +633,70 @@ async def test_signing_tenant_gets_content_digest_and_signature_headers():
             principal_info=_principal_info(),
         )
     )
+    servicer, _auth, _publish, sign = _make_servicer(auth=auth)
+
+    response = await servicer.Check(_check_request(), _ctx_with_key())
+
+    assert response.HasField("ok_response")
+    response_headers = {
+        h.header.key: h.header.value for h in response.ok_response.headers
+    }
+    assert response_headers["authorization"] == "Bearer sk-upstream-test-key"
+    assert "Content-Digest" not in response_headers
+    assert "Signature" not in response_headers
+    # No signing call on this pass — that's the signing pass's job.
+    assert sign.calls == []
+    # dynamic_metadata signals the composite filter.
+    assert dict(response.dynamic_metadata) == {"signing_required": True}
+
+
+@pytest.mark.asyncio
+async def test_auth_pass_for_non_signing_tenant_sets_signing_required_false():
+    """Tenants without a ``signing_key`` set ``signing_required: false`` so the.
+
+    composite filter skips ext_authz #2 entirely and the body never
+    has to be buffered for that request.
+    """
+    servicer, _auth, _publish, sign = _make_servicer()
+
+    response = await servicer.Check(_check_request(), _ctx_with_key())
+
+    assert response.HasField("ok_response")
+    assert sign.calls == []
+    assert dict(response.dynamic_metadata) == {"signing_required": False}
+
+
+@pytest.mark.asyncio
+async def test_signing_pass_computes_digest_and_returns_signature_headers():
+    """ext_authz #2 (signing pass) buffers the body, computes.
+
+    Content-Digest, re-authenticates (cache hit in prod), signs, and
+    returns Content-Digest + Signature + Signature-Input as header
+    mutations. The api_key was already set by ext_authz #1, so this
+    pass does not re-mutate authorization.
+    """
+    import base64
+    import hashlib
+
+    from portunus.models import SigningKey
+
+    body = b'{"key3": "value3", "key1": "value1", "key2": "value2"}'
+    expected_digest = (
+        f"sha-256=:{base64.b64encode(hashlib.sha256(body).digest()).decode('ascii')}:"
+    )
+    signing_key = SigningKey(
+        kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
+        provider_id="signingkey_1234abcd",
+    )
+    auth = FakeAuthService(
+        result=AuthResult(
+            api_key="sk-upstream-test-key",
+            signing_key=signing_key,
+            principal_info=_principal_info(),
+        )
+    )
     sig_input = (
-        'sig1=("@method" "@target-uri" "content-digest");' 'keyid="signingkey_1234abcd"'
+        'sig1=("@method" "@target-uri" "content-digest");keyid="signingkey_1234abcd"'
     )
     sign = FakeSignRequest(
         returns={
@@ -640,49 +706,37 @@ async def test_signing_tenant_gets_content_digest_and_signature_headers():
     )
     servicer, _auth, _publish, _sign = _make_servicer(auth=auth, sign=sign)
 
-    ctx = _FakeContext(
-        metadata=[
-            ("x-portunus-proxy-key", _PROXY_KEY),
-            ("x-portunus-target-host", "api.anthropic.com"),
-        ]
-    )
-    response = await servicer.Check(_check_request(body=body), ctx)
+    response = await servicer.Check(_check_request(body=body), _signing_ctx())
 
     assert response.HasField("ok_response"), response
-
     response_headers = {
         h.header.key: h.header.value for h in response.ok_response.headers
     }
-    assert response_headers.get("Content-Digest") == expected_digest
+    assert "authorization" not in response_headers  # not re-mutated
+    assert response_headers["Content-Digest"] == expected_digest
     assert response_headers["Signature"].startswith("sig1=:")
     assert "Signature-Input" in response_headers
-
-    # And the signing service was called once with the digest threaded through.
     assert len(sign.calls) == 1
-    signable_arg = sign.calls[0].args[0]
-    assert signable_arg.content_digest == expected_digest
+    assert sign.calls[0].args[0].content_digest == expected_digest
 
 
 @pytest.mark.asyncio
-async def test_non_signing_tenant_request_body_is_ignored():
-    """Tenants without a signing_key should not have Content-Digest added.
+async def test_signing_pass_fails_closed_if_auth_no_longer_has_signing_key():
+    """If ext_authz #2 fires but the auth result lacks ``signing_key`` (e.g..
 
-    even when ext_authz buffers a body (which it now does for every
-    route). The body bytes reach Check but are unused for non-signed
-    tenants — the OkHttpResponse should be the same shape as before
-    body buffering was introduced.
+    the secret was edited between passes), fail closed rather than
+    silently forwarding without a signature.
     """
-    servicer, _auth, _publish, sign = _make_servicer()
-
-    response = await servicer.Check(
-        _check_request(body=b'{"foo":"bar"}'),
-        _ctx_with_key(),
+    auth = FakeAuthService(
+        result=AuthResult(
+            api_key="sk-upstream-test-key",
+            signing_key=None,
+            principal_info=_principal_info(),
+        )
     )
+    servicer, _auth, _publish, _sign = _make_servicer(auth=auth)
 
-    assert response.HasField("ok_response")
-    response_headers = {
-        h.header.key: h.header.value for h in response.ok_response.headers
-    }
-    assert "Content-Digest" not in response_headers
-    assert "Signature" not in response_headers
-    assert sign.calls == []
+    response = await servicer.Check(_check_request(body=b"{}"), _signing_ctx())
+
+    assert response.HasField("denied_response"), response
+    assert response.denied_response.status.code == http_status_pb2.InternalServerError

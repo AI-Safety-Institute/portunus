@@ -165,15 +165,20 @@ static_resources:
                     key: x-${PORTUNUS_HEADER_PREFIX}-rate-limit
                     value: "true"
               local_rate_limit_per_downstream_connection: false
-          # Auth via Portunus gRPC ext_authz. Replaces the Lua filter that
-          # previously POSTed to /authorise. Returns header mutations to
-          # rewrite the customer's payload header into the upstream API key
-          # (and optional Signature / Signature-Input).
+          # ---------------------------------------------------------------
+          # ext_authz #1 — header-only auth pass.
+          # ---------------------------------------------------------------
+          # Authenticates the request from headers alone (the
+          # Authorization payload). No body buffering on this filter.
+          # On success: returns the upstream api_key as a header
+          # mutation AND sets ``signing_required: bool`` in
+          # CheckResponse.dynamic_metadata under the
+          # ``envoy.filters.http.ext_authz`` namespace. The composite
+          # filter that follows uses that boolean to gate ext_authz #2.
           #
-          # failure_mode_allow: false — if Portunus is unreachable, Envoy
-          # returns 5xx rather than forwarding unauthenticated requests.
-          # This is the security half of the asymmetry; see ext_proc below
-          # for the availability half.
+          # failure_mode_allow: false — if Portunus is unreachable,
+          # Envoy returns 5xx rather than forwarding unauthenticated
+          # requests.
           - name: envoy.filters.http.ext_authz
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
@@ -199,20 +204,71 @@ static_resources:
                 - key: x-portunus-target-host
                   value: "${TARGET_HOST}"
               failure_mode_allow: false
-              # Buffer the request body so the Check service can compute
-              # ``Content-Digest`` for tenants that require RFC 9421
-              # request signing (Anthropic-style signed requests). The
-              # body is sent alongside headers as
-              # ``attributes.request.http.body`` and released after Check
-              # returns; signing-disabled tenants ignore it. Capped at
-              # 1 MiB — bodies larger than the cap are forwarded with
-              # ``allow_partial_message`` so unsigned routes aren't
-              # rejected outright, but signed routes with bodies over
-              # the cap will fail the upstream's signature check.
-              with_request_body:
-                max_request_bytes: 1048576
-                allow_partial_message: true
-                pack_as_bytes: true
+              # No ``with_request_body``: this is the header-only
+              # auth pass. ext_authz #2 below buffers the body for
+              # signing-required tenants only.
+          # ---------------------------------------------------------------
+          # composite — conditionally invokes ext_authz #2 (signing).
+          # ---------------------------------------------------------------
+          # Matches on ``dynamic_metadata.envoy.filters.http.ext_authz.
+          # signing_required`` (set by ext_authz #1 above). For
+          # ``"true"`` the inner ext_authz #2 fires; for any other
+          # value the composite is a no-op and the body streams
+          # past — unsigned tenants pay no buffering cost.
+          - name: envoy.filters.http.composite
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
+              extension_config:
+                name: composite
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.composite.v3.Composite
+              xds_matcher:
+                matcher_tree:
+                  input:
+                    name: signing-required
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestMetadataMatchInput
+                      filter: envoy.filters.http.ext_authz
+                      path:
+                      - key: signing_required
+                  exact_match_map:
+                    map:
+                      "true":
+                        action:
+                          name: signing-ext-authz
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.filters.http.composite.v3.ExecuteFilterAction
+                            typed_config:
+                              name: envoy.filters.http.ext_authz
+                              typed_config:
+                                "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                                transport_api_version: V3
+                                grpc_service:
+                                  envoy_grpc:
+                                    cluster_name: portunus_grpc_cluster
+                                  timeout: 5s
+                                  initial_metadata:
+                                  - key: x-portunus-proxy-key
+                                    value: "${PORTUNUS_API_KEY}"
+                                  - key: x-portunus-target-host
+                                    value: "${TARGET_HOST}"
+                                  # Routes the CheckRequest to the
+                                  # signing-pass branch in Portunus's
+                                  # Check method (auth pass is the default
+                                  # when this header is absent).
+                                  - key: x-portunus-pass
+                                    value: signing
+                                failure_mode_allow: false
+                                # ext_authz #2 buffers the body so the
+                                # signing pass can compute Content-Digest.
+                                # Only fires for signing-required tenants
+                                # (gated by the matcher above), so unsigned
+                                # routes never reach this filter — they
+                                # stream end-to-end without buffering.
+                                with_request_body:
+                                  max_request_bytes: 1048576
+                                  allow_partial_message: true
+                                  pack_as_bytes: true
           # Observability via Portunus gRPC ext_proc. Replaces the Lua filter's
           # /log/{id}/* sub-calls. Streams request/response headers, body
           # chunks, and trailers into Portunus's Process service, which

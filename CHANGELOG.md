@@ -22,14 +22,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 - Request signing (Content-Digest + RFC 9421 Signature/Signature-Input)
-  reimplemented in the ext_authz path. Envoy's ext_authz filter buffers
-  the request body via `with_request_body` (capped at 1 MiB) and ships
-  it to the Check service alongside the headers; tenants with a
-  `signing_key` get Content-Digest computed over the body and the
-  signature headers added before the request reaches upstream.
-  Signing-disabled tenants see no change in latency beyond the buffer
-  cost. Replaces the legacy Lua filter that performed the same work
-  inline.
+  reimplemented as a two-filter ext_authz chain:
+  - **ext_authz #1** runs on headers only — no body buffering. On
+    success it returns the upstream api_key as a header mutation and
+    sets `signing_required: <bool>` in
+    `CheckResponse.dynamic_metadata`.
+  - A **composite filter** matches on that metadata and conditionally
+    invokes **ext_authz #2**, which has `with_request_body` set,
+    re-authenticates against the Redis cache, computes Content-Digest
+    over the buffered body, signs via KMS, and returns Content-Digest +
+    Signature + Signature-Input as header mutations.
+
+  Net: unsigned tenants stream end-to-end with no body buffering at any
+  filter; signed tenants buffer only inside ext_authz #2. The pass is
+  discriminated server-side by a `x-portunus-pass: signing` gRPC
+  initial_metadata header set in envoy.yaml on the inner filter — same
+  forgery-resistant channel used for `x-portunus-proxy-key` and
+  `x-portunus-target-host`.
 - HTTP body records now use a `chunk_id`-per-message wire format:
   each ext_proc body chunk lands as its own Kinesis record with a
   monotonic `chunk_id` per direction and `num_chunks=0` (sentinel:

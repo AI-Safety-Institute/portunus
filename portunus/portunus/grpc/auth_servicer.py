@@ -103,13 +103,27 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
     ) -> external_auth_pb2.CheckResponse:
         """Handle an Envoy ext_authz Check call.
 
-        Returns ``CheckResponse`` with either ``ok_response`` (allow with
-        header mutations) or ``denied_response`` (deny with HTTP status).
+        Two passes share this entry point, discriminated by
+        ``attributes.context_extensions["pass"]``:
+
+        - ``"auth"`` (default): headers-only authentication. Returns the
+          upstream api_key as a header mutation and, for tenants whose
+          secret carries a ``signing_key``, sets ``dynamic_metadata`` so
+          the composite filter ahead of the signing-pass ext_authz #2
+          can gate on it.
+
+        - ``"signing"``: ext_authz #2 only fires for signing-required
+          tenants. The composite filter has already gated on
+          dynamic_metadata; this pass buffers the body (via the
+          filter's ``with_request_body``), reads the signing context
+          from ``metadata_context``, computes Content-Digest, signs,
+          and returns Content-Digest + Signature + Signature-Input as
+          header mutations.
+
         Never raises — failures are reported as ``denied_response`` so
         the Envoy filter's failure_mode_allow contract is unambiguous.
         """
         request_id = self._extract_request_id(request)
-        headers = _http_headers(request)
 
         # Identity check: proxy presents a pre-shared key via gRPC
         # initial_metadata. SC namespace membership is broader than
@@ -124,6 +138,19 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                 request_id=request_id,
             )
 
+        pass_name = _extract_pass(context)
+        if pass_name == "signing":
+            return await self._signing_pass(request, context, request_id)
+        return await self._auth_pass(request, context, request_id)
+
+    async def _auth_pass(
+        self,
+        request: external_auth_pb2.CheckRequest,
+        context: grpc.aio.ServicerContext,
+        request_id: str,
+    ) -> external_auth_pb2.CheckResponse:
+        """Header-only auth. Sets dynamic_metadata for the signing-pass gate."""
+        headers = _http_headers(request)
         try:
             raw_payload = headers.get(_DEFAULT_PAYLOAD_HEADER, "")
             if not raw_payload:
@@ -168,43 +195,6 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                     request_id=request_id,
                 )
 
-            signature_headers: Optional[SignatureHeaders] = None
-            content_digest: Optional[str] = None
-            if auth_result.signing_key is not None:
-                # Tenants with a KMS signing key (Anthropic-style signed
-                # requests) need Content-Digest computed over the request
-                # body and a Signature / Signature-Input pair derived from
-                # it. ext_authz is configured with ``with_request_body``
-                # in envoy.yaml so the body reaches this servicer in
-                # ``request.attributes.request.http.body``; the
-                # SignableRequest is built from the CheckRequest itself
-                # rather than via Envoy filter metadata (the legacy Lua
-                # path built it client-side; here we just have the same
-                # information directly).
-                body_bytes = _request_body_bytes(request)
-                content_digest = _content_digest(body_bytes)
-                try:
-                    signable = _signable_request_from_check(
-                        request, headers, content_digest, target_host
-                    )
-                    signature_headers = self._sign(
-                        signable,
-                        auth_result.signing_key,
-                        auth_result.api_key,
-                        payload.credentials,
-                    )
-                except ValidationError as e:
-                    logger.error(
-                        "Failed to build signable request (request_id=%s): %s",
-                        request_id,
-                        e,
-                    )
-                    return _denied(
-                        code=500,
-                        body="Invalid request signing parameters",
-                        request_id=request_id,
-                    )
-
             # Synchronous Kinesis publish — fail-closed if it errors or
             # times out, so every request reaching upstream has its
             # principal info recorded.
@@ -217,10 +207,6 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                         secret_arn=payload.secret_arn,
                     )
                 if not published:
-                    # publish_metadata returns False (no exception) when
-                    # the Kinesis stream isn't configured. Treat as a
-                    # fail-closed audit gap rather than silently
-                    # admitting the request.
                     logger.critical(
                         "Metadata publish returned False — likely unconfigured stream "
                         "(request_id=%s)",
@@ -254,9 +240,10 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
 
             return _ok(
                 api_key=auth_result.api_key,
-                signature_headers=signature_headers,
-                content_digest=content_digest,
+                signature_headers=None,
+                content_digest=None,
                 request_id=request_id,
+                signing_required=auth_result.signing_key is not None,
             )
 
         except PayloadError as e:
@@ -277,6 +264,108 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             )
             return _denied(
                 code=500, body="Internal server error", request_id=request_id
+            )
+
+    async def _signing_pass(
+        self,
+        request: external_auth_pb2.CheckRequest,
+        context: grpc.aio.ServicerContext,
+        request_id: str,
+    ) -> external_auth_pb2.CheckResponse:
+        """Buffered-body pass that computes Content-Digest and signs.
+
+        The composite filter ahead of this gates on dynamic_metadata
+        (set by ``_auth_pass``) so we only fire for signing-required
+        tenants. We re-authenticate here to recover the
+        ``signing_key`` + ``api_key`` + credentials — the auth result
+        is cached in Redis from the first pass so this is a cache hit,
+        not a fresh STS / Secrets Manager round-trip.
+
+        Carrying the signing context via dynamic_metadata was
+        considered and rejected: putting AWS credentials in
+        filter_metadata leaks them to every downstream filter
+        (including ext_proc, which has no business seeing them). A
+        boolean gate plus a cache hit gives the same effect with
+        nothing sensitive on the metadata channel.
+        """
+        try:
+            headers = _http_headers(request)
+            raw_payload = headers.get(_DEFAULT_PAYLOAD_HEADER, "")
+            if config.api_key_prefix and raw_payload.startswith(config.api_key_prefix):
+                raw_payload = raw_payload[len(config.api_key_prefix) :]
+            target_host = _extract_target_host(context)
+            payload = AuthPayload.from_contents(raw_payload, target_host=None)
+            async with asyncio.timeout(_AUTH_TIMEOUT_S):
+                auth_result = await self._auth.authenticate(
+                    payload, request_id, target_host
+                )
+
+            if auth_result.signing_key is None:
+                # Composite-filter / matcher contract violation: we
+                # shouldn't be here without a signing key. Fail closed.
+                logger.error(
+                    "Signing pass invoked but auth_result has no signing_key "
+                    "(request_id=%s)",
+                    request_id,
+                )
+                return _denied(
+                    code=500,
+                    body="Signing misconfiguration",
+                    request_id=request_id,
+                )
+
+            body_bytes = _request_body_bytes(request)
+            content_digest = _content_digest(body_bytes)
+            try:
+                signable = _signable_request_from_check(
+                    request, headers, content_digest, target_host
+                )
+                signature_headers = self._sign(
+                    signable,
+                    auth_result.signing_key,
+                    auth_result.api_key,
+                    payload.credentials,
+                )
+            except ValidationError as e:
+                logger.error(
+                    "Failed to build signable request (request_id=%s): %s",
+                    request_id,
+                    e,
+                )
+                return _denied(
+                    code=500,
+                    body="Invalid request signing parameters",
+                    request_id=request_id,
+                )
+
+            return _ok(
+                api_key=None,  # already set by ext_authz #1; don't re-mutate
+                signature_headers=signature_headers,
+                content_digest=content_digest,
+                request_id=request_id,
+                signing_required=None,
+            )
+        except (PayloadError, CredentialsError, AuthenticationError) as e:
+            logger.error(
+                "Re-auth failed in signing pass (request_id=%s): %s",
+                request_id,
+                e,
+            )
+            return _denied(
+                code=401,
+                body=e.message,
+                request_id=request_id,
+            )
+        except Exception as e:
+            logger.exception(
+                "Unhandled error in signing pass (request_id=%s): %s",
+                request_id,
+                e,
+            )
+            return _denied(
+                code=500,
+                body="Signing failed",
+                request_id=request_id,
             )
 
     @staticmethod
@@ -300,36 +389,42 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
 
 def _ok(
     *,
-    api_key: str,
+    api_key: Optional[str],
     signature_headers: Optional[SignatureHeaders],
     content_digest: Optional[str],
     request_id: str,
+    signing_required: Optional[bool],
 ) -> external_auth_pb2.CheckResponse:
     """Build a CheckResponse that allows the request with header mutations.
 
     Mutates the upstream request to:
 
-    - Overwrite ``{api_key_header}`` with the upstream key (configurable;
-      default ``authorization``).
+    - Overwrite ``{api_key_header}`` with the upstream key (auth pass only).
     - Remove any client-supplied ``authorization`` so the proxy-shaped
       ``portunus-<payload>`` form doesn't leak to the upstream provider.
-    - Add ``Content-Digest``, ``Signature`` and ``Signature-Input`` if
-      request signing was required for this provider.
+    - Add ``Content-Digest``, ``Signature`` and ``Signature-Input``
+      (signing pass only).
+
+    ``signing_required`` (auth pass only) is attached as
+    ``dynamic_metadata`` so the composite filter ahead of ext_authz #2
+    can gate on it. Only the boolean — no credentials, no signing key
+    — to keep filter_metadata free of anything sensitive.
     """
     headers_to_add: list[base_pb2.HeaderValueOption] = []
     headers_to_remove: list[str] = []
 
-    headers_to_add.append(
-        base_pb2.HeaderValueOption(
-            header=base_pb2.HeaderValue(
-                key=config.api_key_header,
-                value=f"{config.api_key_prefix}{api_key}",
-            ),
-            append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
+    if api_key is not None:
+        headers_to_add.append(
+            base_pb2.HeaderValueOption(
+                header=base_pb2.HeaderValue(
+                    key=config.api_key_header,
+                    value=f"{config.api_key_prefix}{api_key}",
+                ),
+                append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
+            )
         )
-    )
-    if config.api_key_header.lower() != "authorization":
-        headers_to_remove.append("authorization")
+        if config.api_key_header.lower() != "authorization":
+            headers_to_remove.append("authorization")
 
     if content_digest is not None:
         headers_to_add.append(
@@ -351,13 +446,16 @@ def _ok(
                 )
             )
 
-    return external_auth_pb2.CheckResponse(
+    response = external_auth_pb2.CheckResponse(
         status=status_pb2.Status(code=0),  # OK
         ok_response=external_auth_pb2.OkHttpResponse(
             headers=headers_to_add,
             headers_to_remove=headers_to_remove,
         ),
     )
+    if signing_required is not None:
+        response.dynamic_metadata["signing_required"] = signing_required
+    return response
 
 
 def _denied(
@@ -430,6 +528,26 @@ def _http_headers(
         }
     except Exception:
         return {}
+
+
+def _extract_pass(context: grpc.aio.ServicerContext) -> str:
+    """Read the ext_authz pass discriminator from gRPC ``initial_metadata``.
+
+    Each ext_authz filter in the proxy declares its own
+    ``initial_metadata`` block (see envoy.yaml); ext_authz #1 omits
+    ``x-portunus-pass`` (default = ``"auth"``), ext_authz #2 sets
+    ``x-portunus-pass: signing``. Reading from invocation_metadata
+    (which is the gRPC-channel-scoped metadata Envoy sends per call)
+    is the same forgery-resistant channel we already use for
+    ``x-portunus-proxy-key`` and ``x-portunus-target-host``.
+    """
+    try:
+        for key, value in context.invocation_metadata() or []:
+            if key.lower() == "x-portunus-pass":
+                return value if isinstance(value, str) else value.decode("utf-8")
+    except Exception:
+        pass
+    return "auth"
 
 
 def _request_body_bytes(request: external_auth_pb2.CheckRequest) -> bytes:
