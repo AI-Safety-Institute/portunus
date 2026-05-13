@@ -68,9 +68,7 @@ async def test_text_message_round_trips_through_portunus_to_echo_upstream(
     docker_setup,
 ):
     headers = {"Authorization": _auth_header()}
-    async with _ws_connect(
-        f"{PROXY_WS_BASE}/echo", additional_headers=headers
-    ) as ws:
+    async with _ws_connect(f"{PROXY_WS_BASE}/echo", additional_headers=headers) as ws:
         await ws.send("hello")
         reply = await asyncio.wait_for(ws.recv(), timeout=5)
     assert reply == "hello"
@@ -83,9 +81,7 @@ async def test_binary_message_round_trips_through_portunus_to_echo_upstream(
 ):
     headers = {"Authorization": _auth_header()}
     payload = bytes(range(256))  # full byte-value sweep
-    async with _ws_connect(
-        f"{PROXY_WS_BASE}/echo", additional_headers=headers
-    ) as ws:
+    async with _ws_connect(f"{PROXY_WS_BASE}/echo", additional_headers=headers) as ws:
         await ws.send(payload)
         reply = await asyncio.wait_for(ws.recv(), timeout=5)
     assert reply == payload
