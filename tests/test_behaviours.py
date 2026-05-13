@@ -341,13 +341,14 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         name="forged_x_portunus_debug_id_header_does_not_reach_upstream",
         request=RequestSpec(
-            path="/headers",
+            # /anything (not /headers) so the corpus runner's "method"
+            # echo marker fires; the body still includes the request
+            # header set under .headers so the forged value would be
+            # visible if it leaked through.
+            path="/anything",
             auth="valid_plaintext",
             headers={"x-portunus-debug-id": "forged-by-client"},
         ),
-        # /headers echoes the request headers. The forged value must not
-        # appear in the upstream-visible header set — defense in depth
-        # for the internal-headers contract.
         expected=ExpectedResponse(
             status=200,
             reached_upstream=True,
