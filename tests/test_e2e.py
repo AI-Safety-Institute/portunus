@@ -175,8 +175,7 @@ def test_error_response_contains_trace_id(
     error_data = response.json()
     assert "error" in error_data
     assert (
-        "x_amzn_trace_id" in error_data["error"]
-        or "request_id" in error_data["error"]
+        "x_amzn_trace_id" in error_data["error"] or "request_id" in error_data["error"]
     ), error_data
 
     # And a debug ID header is present so operators can correlate without
