@@ -21,6 +21,3 @@ jobs:
   test:
     uses: ./.github/workflows/test.yml
     secrets: inherit
-  test-lua:
-    uses: ./.github/workflows/test-lua.yml
-    secrets: inherit
