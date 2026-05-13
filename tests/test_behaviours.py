@@ -195,8 +195,11 @@ SCENARIOS: list[Scenario] = [
     ),
     Scenario(
         name="custom_client_header_is_forwarded_to_upstream",
+        # Uses /anything (not /headers) because the corpus runner's
+        # reach marker is httpbun's "method" echo, which /anything
+        # includes but /headers does not.
         request=RequestSpec(
-            path="/headers",
+            path="/anything",
             headers={"x-custom-client-header": "client-value-42"},
             auth="valid_plaintext",
         ),
