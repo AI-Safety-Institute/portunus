@@ -3,7 +3,36 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.5.0]
+## [Unreleased]
+
+### Added
+- `envoy.filters.http.ext_authz` + `envoy.filters.http.ext_proc` gRPC
+  pipeline replacing the previous Lua-driven REST callouts. Auth runs
+  synchronously via `PortunusAuthServicer.Check`; body / header audit
+  runs over `FULL_DUPLEX_STREAMED` via `PortunusProcessServicer.Process`.
+- `GRPC_ENABLED` / `GRPC_PORT` env vars to opt into the new server (off
+  by default).
+- `KINESIS_WS_SUMMARY_STREAM` env var + `WSSummaryRecord` model: one
+  record per WebSocket connection with per-direction frame counts and
+  close code, joinable on `request_id`.
+- `x-portunus-proxy-key` gRPC `initial_metadata` identity check on
+  both Check and Process; `x-portunus-target-host` is sourced from the
+  same channel (not the HTTP request) to close a host-validation
+  forgery vector.
+
+### Changed
+- HTTP body chunks now publish with a monotonically-increasing
+  `chunk_id` per direction, terminal chunks carry the total
+  `num_chunks`. Streamed-response token-count records previously lost
+  to the chunk_id=0 ETL filter now reach Kinesis.
+- Denied auth responses are JSON (`{"error": {"message": ..., "request_id": ...}}`)
+  with `content-type: application/json`, `x-{prefix}-error: true`, and
+  `x-portunus-debug-id`. Header prefix is `PORTUNUS_HEADER_PREFIX`.
+
+### Removed
+- Legacy REST `/authorise` and `/log/*` routes and their Lua-side
+  proxy-utils library. Same audit + signing surface now flows through
+  the gRPC services.
 
 ### Added
 - `POST /cache/flush` endpoint that invalidates all cached auth responses
