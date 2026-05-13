@@ -149,6 +149,10 @@ services:
       KINESIS_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
       KINESIS_RESPONSE_BODY_STREAM: portunus-stream-response-body
       KINESIS_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
+      # Header prefix the proxy uses; pass it to portunus too so denied
+      # responses carry ``x-{prefix}-error: true`` matching the legacy
+      # Lua-filter contract.
+      PORTUNUS_HEADER_PREFIX: aisi-proxy
       # gRPC ext_authz + ext_proc server: required for the new Envoy filter
       # chain to function. Without this, ext_authz connects-refused → 403.
       GRPC_ENABLED: "true"

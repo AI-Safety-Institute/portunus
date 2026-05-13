@@ -251,6 +251,16 @@ class PortunusConfig(BaseModel):
         default="Bearer ",
         description="Prefix to use for the API key",
     )
+    proxy_header_prefix: str = Field(
+        default="portunus",
+        description=(
+            "Prefix for response headers the proxy emits — for example "
+            "``x-{prefix}-error: true`` on auth-failure responses. Must "
+            "match the value the proxy container reads from "
+            "PORTUNUS_HEADER_PREFIX (envoy.yaml uses this for rate-limit "
+            "and ping response headers)."
+        ),
+    )
 
     @field_validator("log_level")
     def validate_log_level(cls, v):
@@ -335,6 +345,7 @@ def get_config() -> PortunusConfig:
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
+        proxy_header_prefix=os.environ.get("PORTUNUS_HEADER_PREFIX", "portunus"),
         redis=redis,
         aws=aws,
         kinesis=kinesis,

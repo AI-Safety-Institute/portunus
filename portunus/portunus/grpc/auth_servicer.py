@@ -339,11 +339,18 @@ def _denied(
 ) -> external_auth_pb2.CheckResponse:
     """Build a CheckResponse that denies the request with a specific HTTP code.
 
-    Envoy returns ``code`` to the downstream client with ``body`` as the
-    response body. ``status`` is the gRPC-level status; ``PERMISSION_DENIED``
-    is the conventional choice for ext_authz denials regardless of which
-    HTTP code Envoy ultimately returns to the customer.
+    Envoy returns ``code`` to the downstream client with a JSON-shaped
+    error body and the ``x-portunus-error: true`` debug header. The
+    JSON shape is ``{"error": {"message": ..., "request_id": ...}}`` —
+    matches the legacy Lua-filter contract that downstream clients have
+    been parsing since v0.1.
     """
+    import json as _json
+
+    json_body = _json.dumps(
+        {"error": {"message": body, "request_id": request_id}},
+        separators=(",", ":"),
+    )
     return external_auth_pb2.CheckResponse(
         status=status_pb2.Status(
             code=grpc.StatusCode.PERMISSION_DENIED.value[0],
@@ -351,15 +358,29 @@ def _denied(
         ),
         denied_response=external_auth_pb2.DeniedHttpResponse(
             status=_http_status(code),
-            body=body,
+            body=json_body,
             headers=[
+                base_pb2.HeaderValueOption(
+                    header=base_pb2.HeaderValue(
+                        key="content-type",
+                        value="application/json",
+                    ),
+                    append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
+                ),
+                base_pb2.HeaderValueOption(
+                    header=base_pb2.HeaderValue(
+                        key=f"x-{config.proxy_header_prefix}-error",
+                        value="true",
+                    ),
+                    append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,  # noqa: E501
+                ),
                 base_pb2.HeaderValueOption(
                     header=base_pb2.HeaderValue(
                         key="x-portunus-debug-id",
                         value=request_id,
                     ),
                     append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
-                )
+                ),
             ],
         ),
     )
