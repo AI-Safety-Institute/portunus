@@ -546,11 +546,11 @@ def _headers_to_dict(http_headers: base_pb2.HeaderMap) -> dict[str, str]:
 
     Values are base64-encoded for wire compatibility with the previous
     Lua-filter path. ``RequestHeadersRecord`` / ``ResponseHeadersRecord``
-    in ``portunus.models`` (and the joined-log ETL downstream) call
+    in ``portunus.models`` (and any joined-log ETL downstream) call
     ``_decode_b64_header`` on these values to populate the convenience
-    fields (``path``, ``authority``, ``status``, etc.) that aisitok's
-    provider detection consumes. Sending raw strings here would break
-    every header record once it lands in Kinesis.
+    fields (``path``, ``authority``, ``status``, etc.) that downstream
+    provider-detection logic consumes. Sending raw strings here would
+    break every header record once it lands in Kinesis.
     """
     import base64
 

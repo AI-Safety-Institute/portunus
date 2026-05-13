@@ -90,7 +90,9 @@ def parse_identity_from_arn(arn: str):
         role_name = path_parts[0]
         principal = f"assumed-role/{role_name}"
         session_name = path_parts[1]
-        # Extract project from role name (AISI-specific pattern)
+        # Extract project from a deployment convention where assumed-role
+        # names follow ``UserProfile_<name>_<project>``. Deployments without
+        # this convention fall through with ``project = None``.
         if role_name.startswith("UserProfile_"):
             role_parts = role_name.split("_")
             if len(role_parts) >= 3:
