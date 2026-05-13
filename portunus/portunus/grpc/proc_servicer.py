@@ -576,21 +576,22 @@ def _empty_headers_response(*, request_side: bool) -> proc_pb2.ProcessingRespons
 def _empty_body_response(
     *, request_side: bool, end_of_stream: bool = False
 ) -> proc_pb2.ProcessingResponse:
-    """The body response shape Envoy 1.36 requires in FDS mode.
+    """No-op body response — observe-only.
 
-    A bare ``CommonResponse()`` triggers "Spurious response message 3"
-    and tears the connection. The fix is the doubly-nested empty
-    streamed_response marker; mirror the incoming chunk's
-    ``end_of_stream`` so Envoy can unblock the HCM on the terminal
-    chunk and release the response to the client.
+    We don't want to mutate the body, so we send ``CommonResponse(status=CONTINUE)``
+    without any ``body_mutation``. Setting ``body_mutation.streamed_response``
+    with an empty ``body`` field tells Envoy to REPLACE the original chunk
+    with empty bytes, which drops the response body and is what bit us on
+    the first FDS roll-out.
+
+    The unused ``end_of_stream`` argument is retained on the helper so the
+    dispatch site can wire it through if a future protocol revision needs
+    explicit signalling.
     """
+    del end_of_stream  # not currently part of the response shape
     body_response = proc_pb2.BodyResponse(
         response=proc_pb2.CommonResponse(
-            body_mutation=proc_pb2.BodyMutation(
-                streamed_response=proc_pb2.StreamedBodyResponse(
-                    end_of_stream=end_of_stream,
-                )
-            )
+            status=proc_pb2.CommonResponse.CONTINUE,
         )
     )
     if request_side:

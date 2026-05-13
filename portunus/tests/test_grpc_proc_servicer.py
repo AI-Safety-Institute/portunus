@@ -466,13 +466,16 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 
 @pytest.mark.asyncio
-async def test_body_response_mirrors_end_of_stream_so_envoy_can_finalise():
-    """FDS mode keeps the response stream open until the processor sets.
+async def test_body_response_is_a_no_op_continue_to_preserve_upstream_bytes():
+    """In FDS mode the processor's response shape decides whether Envoy.
 
-    ``streamed_response.end_of_stream=true`` on the terminal chunk.
-    Without that, Envoy holds the HCM and the client sees a 30-second
-    timeout. Confirm we forward the flag from the incoming body
-    message to the response.
+    forwards the upstream body or replaces it. Setting
+    ``body_mutation.streamed_response(body=b"")`` (the obvious "I have
+    no modifications" shape) tells Envoy to REPLACE the chunk with
+    empty bytes; the client then sees status 200 with an empty body.
+    The processor must instead send ``CommonResponse(status=CONTINUE)``
+    with no ``body_mutation`` so Envoy passes the upstream chunk
+    through untouched.
     """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
@@ -490,16 +493,9 @@ async def test_body_response_mirrors_end_of_stream_so_envoy_can_finalise():
         # headers → 1 response. bodies → 2 responses. Total 3.
         assert len(responses) == 3
 
-        # Each body response wraps a streamed_response envelope (the
-        # Envoy 1.36 FDS requirement) and the terminal chunk carries
-        # end_of_stream=true.
-        first_body = responses[1].request_body
-        last_body = responses[2].request_body
-        assert first_body.response.body_mutation.HasField("streamed_response")
-        assert (
-            first_body.response.body_mutation.streamed_response.end_of_stream is False
-        )
-        assert last_body.response.body_mutation.streamed_response.end_of_stream is True
+        for body_resp in (responses[1].request_body, responses[2].request_body):
+            assert body_resp.response.status == 0  # CommonResponse.CONTINUE
+            assert not body_resp.response.HasField("body_mutation")
     finally:
         await queue.stop()
 
