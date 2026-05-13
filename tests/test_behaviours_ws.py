@@ -24,7 +24,11 @@ import os
 import sys
 
 import pytest
-import websockets
+
+# websockets v13's top-level ``websockets.connect`` is the legacy client,
+# which takes ``extra_headers``. The new asyncio client takes
+# ``additional_headers``. We use the new client throughout.
+from websockets.asyncio.client import connect as _ws_connect  # noqa: E402
 from websockets.exceptions import ConnectionClosed
 
 # Add portunus to the path so conftest helpers import cleanly.
@@ -64,7 +68,7 @@ async def test_text_message_round_trips_through_portunus_to_echo_upstream(
     docker_setup,
 ):
     headers = {"Authorization": _auth_header()}
-    async with websockets.connect(
+    async with _ws_connect(
         f"{PROXY_WS_BASE}/echo", additional_headers=headers
     ) as ws:
         await ws.send("hello")
@@ -79,7 +83,7 @@ async def test_binary_message_round_trips_through_portunus_to_echo_upstream(
 ):
     headers = {"Authorization": _auth_header()}
     payload = bytes(range(256))  # full byte-value sweep
-    async with websockets.connect(
+    async with _ws_connect(
         f"{PROXY_WS_BASE}/echo", additional_headers=headers
     ) as ws:
         await ws.send(payload)
@@ -104,7 +108,7 @@ async def test_upstream_close_after_n_messages_propagates_to_client_with_code_10
     transport-level error.
     """
     headers = {"Authorization": _auth_header()}
-    async with websockets.connect(
+    async with _ws_connect(
         f"{PROXY_WS_BASE}/close-after/2", additional_headers=headers
     ) as ws:
         await ws.send("one")
@@ -137,7 +141,7 @@ async def test_abrupt_upstream_tcp_reset_surfaces_to_client_as_connection_error(
     upstream rather than holding the client open.
     """
     headers = {"Authorization": _auth_header()}
-    async with websockets.connect(
+    async with _ws_connect(
         f"{PROXY_WS_BASE}/echo-then-die", additional_headers=headers
     ) as ws:
         await ws.send("only one")
@@ -165,7 +169,7 @@ async def test_upstream_malformed_frame_terminates_session_within_timeout(
     rather than the corrupt bytes being relayed through verbatim.
     """
     headers = {"Authorization": _auth_header()}
-    async with websockets.connect(
+    async with _ws_connect(
         f"{PROXY_WS_BASE}/malformed", additional_headers=headers
     ) as ws:
         with pytest.raises((ConnectionClosed, asyncio.IncompleteReadError)):
@@ -192,5 +196,5 @@ async def test_ws_upgrade_without_authorization_header_is_rejected_before_upgrad
     from websockets.exceptions import InvalidStatusCode
 
     with pytest.raises((InvalidStatusCode, ConnectionClosed)):
-        async with websockets.connect(f"{PROXY_WS_BASE}/echo"):
+        async with _ws_connect(f"{PROXY_WS_BASE}/echo"):
             pass
