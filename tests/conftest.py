@@ -34,6 +34,31 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"rep_{rep.when}", rep)
 
 
+@pytest.fixture(autouse=True)
+def _dump_container_logs_on_failure(request):
+    """Dump the most-relevant container tails to stderr when a test fails.
+
+    Auth/relay debugging relies on the portunus + proxy logs that disappear
+    once docker-compose tears down. We capture them here on failure so CI
+    output is actionable without having to re-run with a custom command.
+    """
+    yield
+    if not os.environ.get("DUMP_DOCKER_LOGS_ON_FAILURE"):
+        return
+    rep = getattr(request.node, "rep_call", None)
+    if rep is None or not rep.failed:
+        return
+    for name in ("portunus", "portunus-proxy-1", "localstack-main"):
+        result = subprocess.run(
+            ["docker", "logs", "--tail=120", name],
+            capture_output=True,
+            text=True,
+        )
+        sys.stderr.write(
+            f"\n=== {name} logs (tail 120) ===\n{result.stdout}\n{result.stderr}\n"
+        )
+
+
 # Load the compose file once for all tests
 with open("docker-compose.yaml", "r") as f:
     COMPOSE_FILE = yaml.safe_load(f)
