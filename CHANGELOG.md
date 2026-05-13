@@ -21,10 +21,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   forgery vector.
 
 ### Changed
-- HTTP body chunks now publish with a monotonically-increasing
-  `chunk_id` per direction, terminal chunks carry the total
-  `num_chunks`. Streamed-response token-count records previously lost
-  to the chunk_id=0 ETL filter now reach Kinesis.
+- HTTP bodies are accumulated server-side across all ext_proc body
+  messages for a stream and published as one Kinesis record per
+  direction with the existing `chunk_id=0, num_chunks=1` wire shape.
+  Streaming responses (Anthropic Messages, OpenAI SSE) no longer lose
+  every chunk past the first to the joined-log ETL's `chunk_id=0`
+  filter — the full body, including the terminal token-count event,
+  lands in one record. Memory is bounded per direction by
+  `KINESIS_MAX_RECORD_SIZE` (default 1 MB); excess is truncated
+  rather than dropped wholesale. The joined-log consumer schema is
+  unchanged.
 - Denied auth responses are JSON (`{"error": {"message": ..., "request_id": ...}}`)
   with `content-type: application/json`, `x-{prefix}-error: true`, and
   `x-portunus-debug-id`. Header prefix is `PORTUNUS_HEADER_PREFIX`.

@@ -338,30 +338,32 @@ async def test_websocket_stream_publishes_decoded_message_text_not_raw_frame_byt
 
 
 @pytest.mark.asyncio
-async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_counter():
-    """Tiny queue + no workers running → put_nowait will fail past.
+async def test_body_record_is_dropped_when_publish_queue_is_full():
+    """With body-aggregation, the drop policy fires only once per.
 
-    capacity, the servicer should swallow those bodies and bump the drop
-    counter. The customer-facing contract is that every ProcessingRequest
-    still gets a matching ProcessingResponse (header or body), regardless
-    of whether the publish queue swallowed the body record.
+    direction (at flush time on EOS). Tiny queue + no workers + a few
+    streams (each writing one aggregated body record on flush) is
+    enough to overflow capacity. The customer-facing contract still
+    holds: every ProcessingRequest gets a matching ProcessingResponse
+    regardless of whether the publish queue swallowed the body record.
     """
-    servicer, _publish, queue = _make_servicer(queue_maxsize=2)
-    # NB: workers deliberately not started so the queue stays full.
+    servicer, _publish, queue = _make_servicer(queue_maxsize=1)
+    # Workers deliberately not started so the queue stays full.
 
     stream = _stream_from(
         [
             _http_headers_message(headers={}, is_request=True, request_id="drop-test"),
             _http_body_message(body=b"a" * 100, is_request=False),
-            _http_body_message(body=b"b" * 100, is_request=False),
-            _http_body_message(body=b"c" * 100, is_request=False),
-            _http_body_message(body=b"d" * 100, is_request=False),
+            _http_body_message(body=b"b" * 100, is_request=False, end_of_stream=True),
         ]
     )
 
     responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-    assert len(responses) == 5
+    assert len(responses) == 3
+    # request_headers fills the single slot via submit_blocking; the
+    # response_body flush then tries submit_droppable, which fails
+    # put_nowait and increments the drop counter.
     assert queue.dropped_total >= 1
 
 
@@ -705,18 +707,19 @@ async def test_ws_summary_close_code_is_none_when_no_close_frame_observed():
 
 
 # ---------------------------------------------------------------------------
-# Body chunking — each HTTP body chunk gets a monotonic id per direction so
-# streamed responses (Anthropic/OpenAI SSE) can be reassembled downstream.
+# Body buffering — server-side aggregation preserves the joined-log wire
+# format (chunk_id=0, num_chunks=1) regardless of how Envoy chunks the body
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_streamed_response_body_chunks_have_monotonic_chunk_ids():
-    """Each response body chunk gets a unique, monotonically-increasing.
+async def test_streamed_response_chunks_are_aggregated_into_one_record():
+    """An SSE-style response that arrives as many ext_proc body messages.
 
-    chunk_id. Without this, an SSE stream's later chunks (where Anthropic
-    puts the message_delta carrying output_tokens) all claim chunk_id=0
-    and overwrite earlier records or each other.
+    must land in Kinesis as ONE body record carrying the concatenated
+    bytes, with ``chunk_id=0, num_chunks=1`` — same wire shape as a
+    non-streamed body. The aisitok joined-log ETL doesn't need any
+    schema awareness of streaming.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -737,33 +740,31 @@ async def test_streamed_response_body_chunks_have_monotonic_chunk_ids():
         await _drain_queue(queue)
 
         bodies = publish.of_kind("response_body")
-        ids_in_order = [b.payload["chunk_id"] for b in bodies]
-        bytes_in_order = [b.payload["body_bytes"] for b in bodies]
-        assert ids_in_order == [0, 1, 2]
-        assert bytes_in_order == [b"chunk-a", b"chunk-b", b"chunk-c"]
+        assert len(bodies) == 1
+        assert bodies[0].payload["chunk_id"] == 0
+        assert bodies[0].payload["num_chunks"] == 1
+        assert bodies[0].payload["body_bytes"] == b"chunk-achunk-bchunk-c"
     finally:
         await queue.stop()
 
 
 @pytest.mark.asyncio
-async def test_terminal_body_chunk_carries_total_count_in_num_chunks():
-    """The chunk with ``end_of_stream=True`` publishes ``num_chunks`` equal.
+async def test_body_is_flushed_in_finally_when_stream_ends_without_eos():
+    """If the stream finishes without ``end_of_stream=true`` (client.
 
-    to the total chunk count for that direction. Intermediate chunks
-    publish ``num_chunks=0`` as the sentinel "more to come" so the ETL
-    can recognise complete vs partial response bodies.
+    disconnect, upstream reset), the accumulated bytes must still be
+    published — otherwise mid-stream failures leave a gap in the audit
+    trail. The ``finally`` block in ``Process()`` triggers the flush.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
     try:
         stream = _stream_from(
             [
-                _http_headers_message(
-                    headers={}, is_request=True, request_id="sse-final"
-                ),
-                _http_body_message(body=b"first", is_request=False),
-                _http_body_message(body=b"second", is_request=False),
-                _http_body_message(body=b"third", is_request=False, end_of_stream=True),
+                _http_headers_message(headers={}, is_request=True, request_id="abrupt"),
+                _http_body_message(body=b"partial-", is_request=False),
+                _http_body_message(body=b"body", is_request=False),
+                # No end_of_stream=True; stream just ends.
             ]
         )
 
@@ -772,18 +773,17 @@ async def test_terminal_body_chunk_carries_total_count_in_num_chunks():
         await _drain_queue(queue)
 
         bodies = publish.of_kind("response_body")
-        num_chunks = [b.payload["num_chunks"] for b in bodies]
-        assert num_chunks == [0, 0, 3]
+        assert len(bodies) == 1
+        assert bodies[0].payload["body_bytes"] == b"partial-body"
     finally:
         await queue.stop()
 
 
 @pytest.mark.asyncio
-async def test_request_and_response_chunk_ids_are_independent():
-    """Request-side and response-side chunk counters are separate so a.
+async def test_request_and_response_bodies_are_published_separately():
+    """A request with both a request body and a response body produces.
 
-    request-body chunk and a response-body chunk can both legitimately
-    be ``chunk_id=0`` — they're disambiguated by direction.
+    one record per direction, each with chunk_id=0, num_chunks=1.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -806,10 +806,15 @@ async def test_request_and_response_chunk_ids_are_independent():
             pass
         await _drain_queue(queue)
 
-        req_ids = [b.payload["chunk_id"] for b in publish.of_kind("request_body")]
-        resp_ids = [b.payload["chunk_id"] for b in publish.of_kind("response_body")]
-        assert req_ids == [0, 1]
-        assert resp_ids == [0, 1]
+        req = publish.of_kind("request_body")
+        resp = publish.of_kind("response_body")
+        assert len(req) == 1
+        assert len(resp) == 1
+        assert req[0].payload["body_bytes"] == b"req-0req-1"
+        assert resp[0].payload["body_bytes"] == b"resp-0resp-1"
+        for r in (*req, *resp):
+            assert r.payload["chunk_id"] == 0
+            assert r.payload["num_chunks"] == 1
     finally:
         await queue.stop()
 

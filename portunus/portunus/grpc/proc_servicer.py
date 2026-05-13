@@ -94,12 +94,23 @@ class _StreamState:
     # First close frame observed wins — populated by _submit_frame.
     close_code: Optional[int] = None
     close_initiator: Optional[str] = None
-    # Monotonic body-chunk counters per direction. Used to assign
-    # ``chunk_id`` so the joined-log ETL can reassemble streamed
-    # responses (Anthropic/OpenAI SSE) where the token-count event
-    # lands several chunks in.
-    request_chunk_id: int = 0
-    response_chunk_id: int = 0
+    # Per-direction HTTP body buffers. ext_proc delivers HTTP bodies as
+    # a stream of body messages; the joined-log schema downstream
+    # expects ONE body record per direction (``chunk_id=0, num_chunks=1``).
+    # We buffer here and emit once on ``end_of_stream`` (or on stream
+    # finalisation, see the ``Process`` finally block), so streaming
+    # responses — where the last chunk carries the token-count event
+    # for Anthropic / OpenAI SSE — make it into the audit trail with
+    # the same wire shape as a non-streamed body. WS streams go through
+    # ``_submit_frame`` instead; each frame is its own logical record.
+    request_body_buffer: bytearray = field(default_factory=bytearray)
+    response_body_buffer: bytearray = field(default_factory=bytearray)
+    request_body_truncated: bool = False
+    response_body_truncated: bool = False
+    request_body_published: bool = False
+    response_body_published: bool = False
+    request_body_first_timestamp: str = ""
+    response_body_first_timestamp: str = ""
 
 
 # ext_proc routes Envoy attaches filter_metadata to indicate WS upgrade.
@@ -187,6 +198,15 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 self._active.pop(state.stream_id, None)
                 if state.mode == StreamMode.WS_UPGRADE:
                     await self._emit_ws_summary(state)
+                else:
+                    # Flush any buffered HTTP body bytes that never
+                    # received an ``end_of_stream=true`` signal —
+                    # typical when the client disconnects mid-stream
+                    # or the upstream resets. Without this, the
+                    # streaming-response audit trail would silently
+                    # lose every connection that didn't end cleanly.
+                    self._flush_http_body(state, direction=Direction.REQUEST)
+                    self._flush_http_body(state, direction=Direction.RESPONSE)
 
     # ------------------------------------------------------------------
     # Stream setup
@@ -387,36 +407,92 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         timestamp: str,
         end_of_stream: bool,
     ) -> None:
-        """Publish one HTTP body chunk with a monotonic per-direction id.
+        """Buffer a body chunk; emit one record per direction at EOS.
 
-        Streamed responses (Anthropic / OpenAI SSE) span many ext_proc
-        body messages. Each chunk gets its own ``chunk_id`` so the
-        joined-log ETL can reconstruct the full body, instead of every
-        chunk claiming to be chunk 0 and overwriting the previous one.
+        ext_proc delivers an HTTP body as a stream of chunks. The
+        joined-log schema downstream expects ONE body record per
+        direction (``chunk_id=0, num_chunks=1``) carrying the full
+        body bytes — same shape regardless of whether the upstream
+        streamed the response or sent it in one go. We accumulate
+        chunks here and emit a single publish call on the terminal
+        chunk so streaming-response observability (Anthropic /
+        OpenAI SSE, where the token-count event lands many chunks
+        in) survives the joined-log ETL without changing the
+        consumer's wire contract.
 
-        ``num_chunks`` carries the total only on the terminal chunk
-        (where Envoy sets ``end_of_stream=true``); intermediate chunks
-        publish ``num_chunks=0`` as the sentinel "more to come". The ETL
-        side filters or aggregates accordingly.
+        Memory is bounded by ``config.kinesis.max_record_size`` per
+        direction; chunks beyond that are dropped with the
+        ``truncated`` flag set, and the record is published with the
+        truncated prefix so downstream knows the bytes were capped.
         """
         if direction == Direction.REQUEST:
-            chunk_id = state.request_chunk_id
-            state.request_chunk_id += 1
+            buffer = state.request_body_buffer
+            cap_hit = state.request_body_truncated
+            first_ts = state.request_body_first_timestamp
+        else:
+            buffer = state.response_body_buffer
+            cap_hit = state.response_body_truncated
+            first_ts = state.response_body_first_timestamp
+
+        if not first_ts:
+            # First chunk anchors the record's ``timestamp`` field —
+            # the timestamp of the FIRST observed byte on this
+            # direction, matching the Lua-filter behaviour.
+            if direction == Direction.REQUEST:
+                state.request_body_first_timestamp = timestamp
+                first_ts = timestamp
+            else:
+                state.response_body_first_timestamp = timestamp
+                first_ts = timestamp
+
+        if not cap_hit:
+            cap = config.kinesis.max_record_size
+            room = cap - len(buffer)
+            if room <= 0:
+                if direction == Direction.REQUEST:
+                    state.request_body_truncated = True
+                else:
+                    state.response_body_truncated = True
+            elif len(body) > room:
+                buffer.extend(body[:room])
+                if direction == Direction.REQUEST:
+                    state.request_body_truncated = True
+                else:
+                    state.response_body_truncated = True
+            else:
+                buffer.extend(body)
+
+        if end_of_stream:
+            self._flush_http_body(state, direction=direction)
+
+    def _flush_http_body(self, state: _StreamState, *, direction: Direction) -> None:
+        """Publish the accumulated body for one direction. Idempotent."""
+        if direction == Direction.REQUEST:
+            if state.request_body_published:
+                return
+            state.request_body_published = True
+            body_bytes = bytes(state.request_body_buffer)
+            timestamp = state.request_body_first_timestamp or generate_iso_timestamp()
             publish_method = self._publish.publish_request_body
         else:
-            chunk_id = state.response_chunk_id
-            state.response_chunk_id += 1
+            if state.response_body_published:
+                return
+            state.response_body_published = True
+            body_bytes = bytes(state.response_body_buffer)
+            timestamp = state.response_body_first_timestamp or generate_iso_timestamp()
             publish_method = self._publish.publish_response_body
 
-        num_chunks = chunk_id + 1 if end_of_stream else 0
+        if not body_bytes:
+            return
+
         self._queue.submit_droppable(
             PublishTask(
                 coro_fn=lambda: publish_method(
                     request_id=state.request_id,
-                    body_bytes=body,
+                    body_bytes=body_bytes,
                     timestamp=timestamp,
-                    chunk_id=chunk_id,
-                    num_chunks=num_chunks,
+                    chunk_id=0,
+                    num_chunks=1,
                 ),
                 label=f"{direction.value}_body",
             )
