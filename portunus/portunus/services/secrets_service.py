@@ -54,7 +54,12 @@ class SecretsService:
                 response = await client.get_secret_value(SecretId=payload.secret_arn)
                 return response["SecretString"]
         except Exception as e:
+            # Log the full boto3 error server-side for diagnostics — it
+            # carries the AWS request id, the offending Resource ARN, and
+            # the principal ARN from cross-account denials. Don't echo
+            # any of that back to the client: a client that supplied a
+            # guessed ``secret_arn`` could distinguish "not found" from
+            # "exists but denied", enumerating the account's secret
+            # topology one probe at a time.
             logger.error(f"Failed to get secret from Secrets Manager: {e}")
-            raise FetchSecretError(
-                403, f"Failed to get secret from Secrets Manager: {e}"
-            ) from e
+            raise FetchSecretError(403, "Failed to retrieve API key secret") from e

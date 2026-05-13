@@ -74,6 +74,11 @@ class StreamMode(Enum):
 class _StreamState:
     """Per-stream state held for the lifetime of one ext_proc stream."""
 
+    # Internal stream id, mints with uuid4(); used as the self._active
+    # dict key so x-request-id collisions don't drop streams from the
+    # drain registry. Distinct from ``request_id`` which is the
+    # operator-visible correlation field.
+    stream_id: str
     request_id: str
     mode: StreamMode
     observer: Optional[FrameObserver] = None
@@ -120,8 +125,12 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
     ) -> None:
         self._publish = publish_service
         self._queue = publish_queue
-        # Active streams indexed by request_id so the drain handler can
-        # iterate and inject close frames.
+        # Active streams indexed by an internal stream id (uuid4) so the
+        # drain handler can iterate and inject close frames. Keying by
+        # x-request-id would collide whenever the client supplies a
+        # repeated value (Envoy preserves the header in some trust
+        # configs), letting two concurrent streams share a dict slot —
+        # drain_all() would then only signal one of them.
         self._active: dict[str, _StreamState] = {}
 
     @property
@@ -158,7 +167,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             async for request in request_iterator:
                 if state is None:
                     state = self._initialise_stream(request)
-                    self._active[state.request_id] = state
+                    self._active[state.stream_id] = state
 
                 # If a drain has been requested mid-stream, inject the
                 # close frame on the next response turn for WS streams
@@ -175,7 +184,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     yield response
         finally:
             if state is not None:
-                self._active.pop(state.request_id, None)
+                self._active.pop(state.stream_id, None)
                 if state.mode == StreamMode.WS_UPGRADE:
                     await self._emit_ws_summary(state)
 
@@ -193,6 +202,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             else None
         )
         return _StreamState(
+            stream_id=str(uuid.uuid4()),
             request_id=request_id,
             mode=mode,
             observer=observer,

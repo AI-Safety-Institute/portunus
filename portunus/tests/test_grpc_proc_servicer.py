@@ -812,3 +812,72 @@ async def test_request_and_response_chunk_ids_are_independent():
         assert resp_ids == [0, 1]
     finally:
         await queue.stop()
+
+
+# ---------------------------------------------------------------------------
+# Active-stream registry — keyed by internal stream id, not x-request-id
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_streams_with_same_request_id_both_register_for_drain():
+    """Drain must signal every active stream, even when two share an.
+
+    x-request-id. Envoy preserves a client-supplied ``x-request-id`` in
+    some trust configurations; keying the active-stream registry by
+    request_id would let stream B's registration overwrite stream A's
+    state, hiding A from drain_all(). Keying by an internal stream_id
+    fixes this.
+    """
+    servicer, _publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        ready_a = asyncio.Event()
+        ready_b = asyncio.Event()
+        hold_a = asyncio.Event()
+        hold_b = asyncio.Event()
+        shared_request_id = "collision-id"
+
+        async def iterator(ready, hold):
+            yield _http_headers_message(
+                headers={},
+                is_request=True,
+                websocket_metadata=True,
+                request_id=shared_request_id,
+            )
+            ready.set()
+            await hold.wait()
+            # Yield another frame so the Process loop iterates again and
+            # observes the drain signal (the drain check happens at the
+            # top of each loop iteration, not asynchronously).
+            yield _http_body_message(body=b"trigger drain check", is_request=False)
+
+        async def driver(it):
+            return [r async for r in servicer.Process(it, _ctx_with_key())]
+
+        task_a = asyncio.create_task(driver(iterator(ready_a, hold_a)))
+        task_b = asyncio.create_task(driver(iterator(ready_b, hold_b)))
+        await ready_a.wait()
+        await ready_b.wait()
+
+        # Both streams should be in the active registry.
+        assert servicer.active_stream_count == 2
+
+        await servicer.drain_all()
+        hold_a.set()
+        hold_b.set()
+
+        results_a, results_b = await asyncio.wait_for(
+            asyncio.gather(task_a, task_b), timeout=2.0
+        )
+
+        # Both streams produced a close-frame response (drain signal hit both).
+        for results in (results_a, results_b):
+            assert any(
+                r.HasField("response_body")
+                and r.response_body.response.body_mutation.streamed_response.body[:1]
+                == b"\x88"
+                for r in results
+            ), results
+    finally:
+        await queue.stop()
