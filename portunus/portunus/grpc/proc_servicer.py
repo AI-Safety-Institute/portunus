@@ -227,8 +227,9 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.REQUEST,
                 timestamp=timestamp,
             )
-            yield _empty_body_response(
+            yield _passthrough_body_response(
                 request_side=True,
+                body=request.request_body.body,
                 end_of_stream=request.request_body.end_of_stream,
             )
         elif request.HasField("request_trailers"):
@@ -244,8 +245,9 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.RESPONSE,
                 timestamp=timestamp,
             )
-            yield _empty_body_response(
+            yield _passthrough_body_response(
                 request_side=False,
+                body=request.response_body.body,
                 end_of_stream=request.response_body.end_of_stream,
             )
         elif request.HasField("response_trailers"):
@@ -573,25 +575,28 @@ def _empty_headers_response(*, request_side: bool) -> proc_pb2.ProcessingRespons
     return proc_pb2.ProcessingResponse(response_headers=hdr)
 
 
-def _empty_body_response(
-    *, request_side: bool, end_of_stream: bool = False
+def _passthrough_body_response(
+    *, request_side: bool, body: bytes, end_of_stream: bool
 ) -> proc_pb2.ProcessingResponse:
-    """No-op body response — observe-only.
+    """Body response that forwards the incoming chunk untouched.
 
-    We don't want to mutate the body, so we send ``CommonResponse(status=CONTINUE)``
-    without any ``body_mutation``. Setting ``body_mutation.streamed_response``
-    with an empty ``body`` field tells Envoy to REPLACE the original chunk
-    with empty bytes, which drops the response body and is what bit us on
-    the first FDS roll-out.
-
-    The unused ``end_of_stream`` argument is retained on the helper so the
-    dispatch site can wire it through if a future protocol revision needs
-    explicit signalling.
+    Envoy 1.36 in FULL_DUPLEX_STREAMED mode reads ``streamed_response.body``
+    as "this is the body to send in place of the original chunk." We're
+    observing only — but we still need to populate ``body`` with the
+    original bytes (empty ``body`` replaces the chunk with empty bytes;
+    a ``CommonResponse(status=CONTINUE)`` without ``body_mutation`` is
+    rejected as malformed in FDS mode). The cost is one extra copy of
+    each chunk on the gRPC stream, which we accept in exchange for
+    Envoy producing a correct response to the client.
     """
-    del end_of_stream  # not currently part of the response shape
     body_response = proc_pb2.BodyResponse(
         response=proc_pb2.CommonResponse(
-            status=proc_pb2.CommonResponse.CONTINUE,
+            body_mutation=proc_pb2.BodyMutation(
+                streamed_response=proc_pb2.StreamedBodyResponse(
+                    body=body,
+                    end_of_stream=end_of_stream,
+                )
+            )
         )
     )
     if request_side:

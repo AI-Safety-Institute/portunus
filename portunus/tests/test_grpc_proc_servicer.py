@@ -466,16 +466,14 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 
 @pytest.mark.asyncio
-async def test_body_response_is_a_no_op_continue_to_preserve_upstream_bytes():
-    """In FDS mode the processor's response shape decides whether Envoy.
+async def test_body_response_echoes_chunk_bytes_so_envoy_forwards_them():
+    """FDS mode reads ``streamed_response.body`` as "the body to send.
 
-    forwards the upstream body or replaces it. Setting
-    ``body_mutation.streamed_response(body=b"")`` (the obvious "I have
-    no modifications" shape) tells Envoy to REPLACE the chunk with
-    empty bytes; the client then sees status 200 with an empty body.
-    The processor must instead send ``CommonResponse(status=CONTINUE)``
-    with no ``body_mutation`` so Envoy passes the upstream chunk
-    through untouched.
+    in place of the original chunk." A response without
+    ``body_mutation`` is rejected as malformed; an empty ``body`` field
+    erases the chunk. The processor must echo the incoming chunk bytes
+    back so Envoy forwards them unchanged. Also pin end_of_stream
+    propagation so the terminal chunk releases the HCM.
     """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
@@ -493,9 +491,12 @@ async def test_body_response_is_a_no_op_continue_to_preserve_upstream_bytes():
         # headers → 1 response. bodies → 2 responses. Total 3.
         assert len(responses) == 3
 
-        for body_resp in (responses[1].request_body, responses[2].request_body):
-            assert body_resp.response.status == 0  # CommonResponse.CONTINUE
-            assert not body_resp.response.HasField("body_mutation")
+        first = responses[1].request_body.response.body_mutation.streamed_response
+        last = responses[2].request_body.response.body_mutation.streamed_response
+        assert first.body == b"first"
+        assert first.end_of_stream is False
+        assert last.body == b"last"
+        assert last.end_of_stream is True
     finally:
         await queue.stop()
 
