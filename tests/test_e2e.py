@@ -54,16 +54,6 @@ def test_custom_header_prefix_on_ping(docker_setup):
     ],
     indirect=True,
 )
-@pytest.mark.xfail(
-    reason=(
-        "Request signing needs Content-Digest computed over the request body, "
-        "which requires either ext_authz with_request_body=true (buffering) or "
-        "a body-side hook in ext_proc that can mutate request headers before "
-        "they reach upstream. The Lua filter computed this inline; the gRPC "
-        "model needs a redesign. Tracked as a follow-up."
-    ),
-    strict=False,
-)
 def test_request_signs_correctly(
     api_key_prefix: str, api_key_header: str, docker_setup: str
 ):

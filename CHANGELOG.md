@@ -21,6 +21,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   forgery vector.
 
 ### Changed
+- Request signing (Content-Digest + RFC 9421 Signature/Signature-Input)
+  reimplemented in the ext_authz path. Envoy's ext_authz filter buffers
+  the request body via `with_request_body` (capped at 1 MiB) and ships
+  it to the Check service alongside the headers; tenants with a
+  `signing_key` get Content-Digest computed over the body and the
+  signature headers added before the request reaches upstream.
+  Signing-disabled tenants see no change in latency beyond the buffer
+  cost. Replaces the legacy Lua filter that performed the same work
+  inline.
 - HTTP bodies are accumulated server-side across all ext_proc body
   messages for a stream and published as one Kinesis record per
   direction with the existing `chunk_id=0, num_chunks=1` wire shape.

@@ -199,11 +199,20 @@ static_resources:
                 - key: x-portunus-target-host
                   value: "${TARGET_HOST}"
               failure_mode_allow: false
-              # No `with_request_body` block: by default Envoy does not
-              # buffer or forward the customer body to ext_authz, which
-              # is exactly what we want — auth decisions are made on
-              # headers alone. Setting max_request_bytes: 0 explicitly is
-              # rejected by Envoy's proto validator (value must be > 0).
+              # Buffer the request body so the Check service can compute
+              # ``Content-Digest`` for tenants that require RFC 9421
+              # request signing (Anthropic-style signed requests). The
+              # body is sent alongside headers as
+              # ``attributes.request.http.body`` and released after Check
+              # returns; signing-disabled tenants ignore it. Capped at
+              # 1 MiB — bodies larger than the cap are forwarded with
+              # ``allow_partial_message`` so unsigned routes aren't
+              # rejected outright, but signed routes with bodies over
+              # the cap will fail the upstream's signature check.
+              with_request_body:
+                max_request_bytes: 1048576
+                allow_partial_message: true
+                pack_as_bytes: true
           # Observability via Portunus gRPC ext_proc. Replaces the Lua filter's
           # /log/{id}/* sub-calls. Streams request/response headers, body
           # chunks, and trailers into Portunus's Process service, which

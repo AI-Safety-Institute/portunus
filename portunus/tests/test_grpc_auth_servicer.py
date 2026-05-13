@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import grpc
 import pytest
+from envoy.config.core.v3 import base_pb2
 from envoy.service.auth.v3 import attribute_context_pb2, external_auth_pb2
 
 from portunus.exceptions import (
@@ -190,6 +191,8 @@ def _check_request(
     payload_header: Optional[str] = _VALID_PAYLOAD,
     target_host: Optional[str] = "api.openai.com",
     request_id: str = "req-001",
+    body: bytes = b"",
+    signable_request: Optional[dict] = None,
 ) -> external_auth_pb2.CheckRequest:
     headers: dict[str, str] = {}
     if payload_header is not None:
@@ -203,11 +206,31 @@ def _check_request(
         path="/v1/chat/completions",
         host="api.openai.com",
         headers=headers,
+        body=body.decode("latin-1") if body else "",
     )
-    return external_auth_pb2.CheckRequest(
-        attributes=attribute_context_pb2.AttributeContext(
-            request=attribute_context_pb2.AttributeContext.Request(http=http_request)
+    attrs_kwargs: dict = dict(
+        request=attribute_context_pb2.AttributeContext.Request(http=http_request)
+    )
+    if signable_request is not None:
+        from google.protobuf import struct_pb2
+
+        fields = {}
+        for k, v in signable_request.items():
+            if isinstance(v, str):
+                fields[k] = struct_pb2.Value(string_value=v)
+        attrs_kwargs["metadata_context"] = base_pb2.Metadata(
+            filter_metadata={
+                "envoy.filters.http.ext_authz": struct_pb2.Struct(
+                    fields={
+                        "signable_request": struct_pb2.Value(
+                            struct_value=struct_pb2.Struct(fields=fields)
+                        )
+                    }
+                )
+            }
         )
+    return external_auth_pb2.CheckRequest(
+        attributes=attribute_context_pb2.AttributeContext(**attrs_kwargs)
     )
 
 
@@ -568,3 +591,98 @@ async def test_denied_response_carries_request_id_in_x_portunus_debug_id_header(
         if h.header.key == "x-portunus-debug-id"
     ]
     assert debug_id_headers == ["req-debug-abc"]
+
+
+# ---------------------------------------------------------------------------
+# Request signing — Content-Digest + Signature / Signature-Input headers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_signing_tenant_gets_content_digest_and_signature_headers():
+    """When the auth result carries a ``signing_key``, the Check service must:.
+
+    (a) compute Content-Digest = sha-256(body) over the buffered request
+        body and add it as a response-header mutation;
+    (b) build a SignableRequest from the CheckRequest shape, invoke the
+        signing service, and add the returned Signature /
+        Signature-Input headers to the OkHttpResponse.
+    """
+    import base64
+    import hashlib
+
+    from portunus.models import SigningKey
+
+    body = b'{"key3": "value3", "key1": "value1", "key2": "value2"}'
+    expected_digest = (
+        f"sha-256=:{base64.b64encode(hashlib.sha256(body).digest()).decode('ascii')}:"
+    )
+
+    signing_key = SigningKey(
+        kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
+        provider_id="signingkey_1234abcd",
+    )
+    auth = FakeAuthService(
+        result=AuthResult(
+            api_key="sk-upstream-test-key",
+            signing_key=signing_key,
+            principal_info=_principal_info(),
+        )
+    )
+    sig_input = (
+        'sig1=("@method" "@target-uri" "content-digest");' 'keyid="signingkey_1234abcd"'
+    )
+    sign = FakeSignRequest(
+        returns={
+            "Signature": "sig1=:fakeBase64SignatureBytes==:",
+            "Signature-Input": sig_input,
+        }
+    )
+    servicer, _auth, _publish, _sign = _make_servicer(auth=auth, sign=sign)
+
+    ctx = _FakeContext(
+        metadata=[
+            ("x-portunus-proxy-key", _PROXY_KEY),
+            ("x-portunus-target-host", "api.anthropic.com"),
+        ]
+    )
+    response = await servicer.Check(_check_request(body=body), ctx)
+
+    assert response.HasField("ok_response"), response
+
+    response_headers = {
+        h.header.key: h.header.value for h in response.ok_response.headers
+    }
+    assert response_headers.get("Content-Digest") == expected_digest
+    assert response_headers["Signature"].startswith("sig1=:")
+    assert "Signature-Input" in response_headers
+
+    # And the signing service was called once with the digest threaded through.
+    assert len(sign.calls) == 1
+    signable_arg = sign.calls[0].args[0]
+    assert signable_arg.content_digest == expected_digest
+
+
+@pytest.mark.asyncio
+async def test_non_signing_tenant_request_body_is_ignored():
+    """Tenants without a signing_key should not have Content-Digest added.
+
+    even when ext_authz buffers a body (which it now does for every
+    route). The body bytes reach Check but are unused for non-signed
+    tenants — the OkHttpResponse should be the same shape as before
+    body buffering was introduced.
+    """
+    servicer, _auth, _publish, sign = _make_servicer()
+
+    response = await servicer.Check(
+        _check_request(body=b'{"foo":"bar"}'),
+        _ctx_with_key(),
+    )
+
+    assert response.HasField("ok_response")
+    response_headers = {
+        h.header.key: h.header.value for h in response.ok_response.headers
+    }
+    assert "Content-Digest" not in response_headers
+    assert "Signature" not in response_headers
+    assert sign.calls == []

@@ -6,9 +6,13 @@ Portunus via the gRPC ``ext_authz`` filter rather than a REST endpoint.
 Contract notes:
 
 1. The auth payload arrives in a request **header**, not the body.
-   ``ext_authz`` filters should be configured with
-   ``with_request_body=false`` — the customer's actual request body
-   never reaches this service.
+   ``ext_authz`` filters are configured with ``with_request_body``
+   set (envoy.yaml) so tenants that require request signing
+   (``signing_key`` on the secret) can have ``Content-Digest``
+   computed over the buffered body and the RFC 9421 ``Signature`` /
+   ``Signature-Input`` headers added before the request is forwarded.
+   Tenants without a signing key ignore the body bytes; the buffer
+   is short-lived (released after Check returns).
 
 2. The upstream API key is returned via :class:`OkHttpResponse` header
    mutations (``headers``, ``headers_to_remove``). Envoy applies these
@@ -165,29 +169,41 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                 )
 
             signature_headers: Optional[SignatureHeaders] = None
+            content_digest: Optional[str] = None
             if auth_result.signing_key is not None:
-                signable_raw = _signable_request_from_metadata(request)
-                if signable_raw is not None:
-                    try:
-                        signable = SignableRequest.model_validate(signable_raw)
-                        signature_headers = self._sign(
-                            signable,
-                            auth_result.signing_key,
-                            auth_result.api_key,
-                            payload.credentials,
-                        )
-                    except ValidationError as e:
-                        logger.error(
-                            "Invalid signable_request metadata from Envoy "
-                            "(request_id=%s): %s",
-                            request_id,
-                            e,
-                        )
-                        return _denied(
-                            code=500,
-                            body="Invalid request signing parameters from proxy",
-                            request_id=request_id,
-                        )
+                # Tenants with a KMS signing key (Anthropic-style signed
+                # requests) need Content-Digest computed over the request
+                # body and a Signature / Signature-Input pair derived from
+                # it. ext_authz is configured with ``with_request_body``
+                # in envoy.yaml so the body reaches this servicer in
+                # ``request.attributes.request.http.body``; the
+                # SignableRequest is built from the CheckRequest itself
+                # rather than via Envoy filter metadata (the legacy Lua
+                # path built it client-side; here we just have the same
+                # information directly).
+                body_bytes = _request_body_bytes(request)
+                content_digest = _content_digest(body_bytes)
+                try:
+                    signable = _signable_request_from_check(
+                        request, headers, content_digest, target_host
+                    )
+                    signature_headers = self._sign(
+                        signable,
+                        auth_result.signing_key,
+                        auth_result.api_key,
+                        payload.credentials,
+                    )
+                except ValidationError as e:
+                    logger.error(
+                        "Failed to build signable request (request_id=%s): %s",
+                        request_id,
+                        e,
+                    )
+                    return _denied(
+                        code=500,
+                        body="Invalid request signing parameters",
+                        request_id=request_id,
+                    )
 
             # Synchronous Kinesis publish — fail-closed if it errors or
             # times out, so every request reaching upstream has its
@@ -239,6 +255,7 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             return _ok(
                 api_key=auth_result.api_key,
                 signature_headers=signature_headers,
+                content_digest=content_digest,
                 request_id=request_id,
             )
 
@@ -285,6 +302,7 @@ def _ok(
     *,
     api_key: str,
     signature_headers: Optional[SignatureHeaders],
+    content_digest: Optional[str],
     request_id: str,
 ) -> external_auth_pb2.CheckResponse:
     """Build a CheckResponse that allows the request with header mutations.
@@ -295,8 +313,8 @@ def _ok(
       default ``authorization``).
     - Remove any client-supplied ``authorization`` so the proxy-shaped
       ``portunus-<payload>`` form doesn't leak to the upstream provider.
-    - Add ``Signature`` and ``Signature-Input`` if request signing was
-      required for this provider.
+    - Add ``Content-Digest``, ``Signature`` and ``Signature-Input`` if
+      request signing was required for this provider.
     """
     headers_to_add: list[base_pb2.HeaderValueOption] = []
     headers_to_remove: list[str] = []
@@ -312,6 +330,17 @@ def _ok(
     )
     if config.api_key_header.lower() != "authorization":
         headers_to_remove.append("authorization")
+
+    if content_digest is not None:
+        headers_to_add.append(
+            base_pb2.HeaderValueOption(
+                header=base_pb2.HeaderValue(
+                    key="Content-Digest",
+                    value=content_digest,
+                ),
+                append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
+            )
+        )
 
     if signature_headers is not None:
         for key, value in signature_headers.items():
@@ -403,25 +432,70 @@ def _http_headers(
         return {}
 
 
-def _signable_request_from_metadata(
-    request: external_auth_pb2.CheckRequest,
-) -> Optional[dict]:
-    """Extract signable_request payload from Envoy's per-route filter metadata.
+def _request_body_bytes(request: external_auth_pb2.CheckRequest) -> bytes:
+    """Read the buffered request body Envoy attaches when with_request_body is on.
 
-    Envoy can attach the signable request shape (method, path, etc.) to
-    a route via ``typed_per_filter_config`` so Portunus signs without
-    re-parsing the HTTP wire format. If the metadata is missing, skip
-    signing.
+    The body is delivered as a string field on the protobuf — Envoy
+    encodes it byte-for-byte and we treat it as bytes. Empty when the
+    request has no body or buffering is disabled.
     """
     try:
-        metadata = request.attributes.metadata_context.filter_metadata.get(
-            "envoy.filters.http.ext_authz"
-        )
-        if metadata is None:
-            return None
-        return dict(metadata.get("signable_request", {}))
+        body = request.attributes.request.http.body
+        if isinstance(body, str):
+            return body.encode("latin-1")
+        return body or b""
     except Exception:
-        return None
+        return b""
+
+
+def _content_digest(body: bytes) -> str:
+    """Compute the RFC 9530 Content-Digest header value over ``body``.
+
+    Format is ``sha-256=:<base64-of-digest>:`` per RFC 9530 §3.1.
+    Matches the legacy Lua-filter output bit-for-bit so existing test
+    vectors and downstream verifiers continue to pass.
+    """
+    import base64
+    import hashlib
+
+    digest = hashlib.sha256(body).digest()
+    return f"sha-256=:{base64.b64encode(digest).decode('ascii')}:"
+
+
+def _signable_request_from_check(
+    request: external_auth_pb2.CheckRequest,
+    headers: dict[str, str],
+    content_digest: str,
+    target_host: Optional[str],
+) -> SignableRequest:
+    """Construct the SignableRequest from the ext_authz CheckRequest.
+
+    The legacy Lua filter built the same shape from the proxy-side
+    request state. In the gRPC model the ext_authz CheckRequest already
+    carries the method, path, and headers; we synthesise the upstream
+    URL from ``target_host`` (the trusted server-side value from gRPC
+    initial_metadata) plus the request path so a client-forged host
+    header cannot redirect the signature to a different origin.
+
+    ``type`` is hard-coded to ``"anthropic"`` because that's the only
+    signature provider we currently support; the field exists so a
+    second provider with a different signing scheme can be added
+    without changing the wire shape.
+    """
+    http = request.attributes.request.http
+    path = getattr(http, "path", "") or "/"
+    method = (getattr(http, "method", "") or "POST").upper()
+    content_type = headers.get("content-type", "")
+    host = target_host or headers.get(":authority") or headers.get("host") or ""
+    scheme = "https" if host else "http"
+    url = f"{scheme}://{host}{path}" if host else f"http://localhost{path}"
+    return SignableRequest(
+        type="anthropic",
+        url=url,  # type: ignore[arg-type]  # HttpUrl coerces from str
+        method=method,
+        content_type=content_type,
+        content_digest=content_digest,
+    )
 
 
 def _http_status(code: int) -> "http_status_pb2.HttpStatus":

@@ -43,16 +43,6 @@ def load_anthropic_test_cases():
     ],
     indirect=True,
 )
-@pytest.mark.xfail(
-    reason=(
-        "Request signing needs Content-Digest computed over the request body, "
-        "which requires either ext_authz with_request_body=true (buffering) or "
-        "a body-side hook in ext_proc that can mutate request headers before "
-        "they reach upstream. The Lua filter computed this inline; the gRPC "
-        "model needs a redesign. Tracked as a follow-up."
-    ),
-    strict=False,
-)
 def test_e2e_request_signing_with_anthropic_test_vector(
     api_key_prefix: str,
     api_key_header: str,
