@@ -203,11 +203,17 @@ async def test_ws_upgrade_without_authorization_header_is_rejected_before_upgrad
 ):
     """Missing Authorization fails at the HTTP upgrade layer.
 
-    websockets surfaces this as ``InvalidStatusCode`` (or its v13 successor)
-    rather than a successful connection that immediately closes.
+    websockets v13 renamed ``InvalidStatusCode`` → ``InvalidStatus``; tolerate
+    both so this test survives a library bump in either direction.
     """
-    from websockets.exceptions import InvalidStatusCode
+    import websockets.exceptions as wse
 
-    with pytest.raises((InvalidStatusCode, ConnectionClosed)):
+    rejected = tuple(
+        cls
+        for cls in (getattr(wse, "InvalidStatus", None), wse.InvalidStatusCode)
+        if cls is not None
+    ) + (ConnectionClosed,)
+
+    with pytest.raises(rejected):
         async with _ws_connect(f"{PROXY_WS_BASE}/echo"):
             pass
