@@ -305,8 +305,9 @@ async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_cou
     """Tiny queue + no workers running → put_nowait will fail past.
 
     capacity, the servicer should swallow those bodies and bump the drop
-    counter. The customer's request must still receive its per-message
-    Envoy response.
+    counter. In FULL_DUPLEX_STREAMED mode body chunks don't generate
+    ProcessingResponse messages, so we observe only the headers response
+    and the drop counter to confirm the customer-facing contract holds.
     """
     servicer, _publish, queue = _make_servicer(queue_maxsize=2)
     # NB: workers deliberately not started so the queue stays full.
@@ -323,10 +324,11 @@ async def test_body_chunks_are_dropped_when_queue_is_full_and_increment_drop_cou
 
     responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-    # The customer-facing contract: every ProcessingRequest gets a
-    # ProcessingResponse, regardless of whether the body was dropped.
-    assert len(responses) == 5
-    # And at least one drop must have been counted.
+    # One response for the request_headers message; body messages get no
+    # ProcessingResponse in FDS mode (returning one is "spurious" to Envoy).
+    assert len(responses) == 1
+    assert responses[0].HasField("request_headers")
+    # At least one drop must have been counted.
     assert queue.dropped_total >= 1
 
 
@@ -425,17 +427,18 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 
 # ---------------------------------------------------------------------------
-# Envoy 1.36 FDS contract — body responses must wrap in streamed_response
+# Envoy 1.36 FDS contract — no ProcessingResponse per body chunk
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_body_response_uses_streamed_response_envelope_required_by_envoy():
-    """Envoy 1.36 in FULL_DUPLEX_STREAMED mode rejects a plain.
+async def test_body_messages_get_no_processing_response_in_fds_mode():
+    """Envoy 1.36 in FULL_DUPLEX_STREAMED logs.
 
-    CommonResponse on body messages — the body_mutation must wrap a
-    streamed_response (even when empty). Regression test against
-    reverting the envelope.
+    "Spurious response message 3 received on gRPC stream" and fails the
+    filter with a 500 if the processor sends a ProcessingResponse for
+    every body chunk. The servicer must observe body bytes silently and
+    only respond to headers/trailers.
     """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
@@ -444,13 +447,16 @@ async def test_body_response_uses_streamed_response_envelope_required_by_envoy()
             [
                 _http_headers_message(headers={}, is_request=True, request_id="shape"),
                 _http_body_message(body=b"body", is_request=True),
+                _http_body_message(body=b"more", is_request=True, end_of_stream=True),
             ]
         )
 
         responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-        body_response = responses[1].request_body
-        assert body_response.response.body_mutation.HasField("streamed_response")
+        # Exactly one response — for the request_headers message. No
+        # response for request_body messages.
+        assert len(responses) == 1
+        assert responses[0].HasField("request_headers")
     finally:
         await queue.stop()
 

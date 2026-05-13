@@ -219,7 +219,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
 
         if request.HasField("request_headers"):
             await self._on_request_headers(state, request.request_headers, timestamp)
-            yield _empty_body_response(request_side=True)
+            yield _empty_headers_response(request_side=True)
         elif request.HasField("request_body"):
             self._on_body_chunk(
                 state,
@@ -227,13 +227,17 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.REQUEST,
                 timestamp=timestamp,
             )
-            yield _empty_body_response(request_side=True)
+            # FULL_DUPLEX_STREAMED body mode: Envoy does not expect a
+            # ProcessingResponse per body chunk. Returning one triggers
+            # "Spurious response message 3" warnings and fails the
+            # filter with a 500. Body bytes are observed silently and
+            # published asynchronously via the queue.
         elif request.HasField("request_trailers"):
             await self._on_request_trailers(state, request.request_trailers, timestamp)
             yield _empty_trailers_response(request_side=True)
         elif request.HasField("response_headers"):
             await self._on_response_headers(state, request.response_headers, timestamp)
-            yield _empty_body_response(request_side=False)
+            yield _empty_headers_response(request_side=False)
         elif request.HasField("response_body"):
             self._on_body_chunk(
                 state,
@@ -241,7 +245,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.RESPONSE,
                 timestamp=timestamp,
             )
-            yield _empty_body_response(request_side=False)
+            # See request_body comment.
         elif request.HasField("response_trailers"):
             await self._on_response_trailers(
                 state, request.response_trailers, timestamp
@@ -534,23 +538,17 @@ def _headers_to_dict(http_headers: base_pb2.HeaderMap) -> dict[str, str]:
     }
 
 
-def _empty_body_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
-    """The body response shape Envoy 1.36 requires in FDS mode.
+def _empty_headers_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
+    """No-op headers response — wrapper around an empty CommonResponse.
 
-    A bare ``CommonResponse()`` triggers "Spurious response message 3"
-    and tears the connection. The fix is the doubly-nested empty
-    streamed_response marker.
+    Envoy expects exactly one ``HeadersResponse`` per direction in
+    response to a ``request_headers`` / ``response_headers`` message,
+    even when the processor doesn't mutate anything.
     """
-    body_response = proc_pb2.BodyResponse(
-        response=proc_pb2.CommonResponse(
-            body_mutation=proc_pb2.BodyMutation(
-                streamed_response=proc_pb2.StreamedBodyResponse()
-            )
-        )
-    )
+    hdr = proc_pb2.HeadersResponse(response=proc_pb2.CommonResponse())
     if request_side:
-        return proc_pb2.ProcessingResponse(request_body=body_response)
-    return proc_pb2.ProcessingResponse(response_body=body_response)
+        return proc_pb2.ProcessingResponse(request_headers=hdr)
+    return proc_pb2.ProcessingResponse(response_headers=hdr)
 
 
 def _empty_trailers_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
