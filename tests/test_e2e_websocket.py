@@ -1,9 +1,15 @@
 # ruff: noqa: E501, E402
 """End-to-end tests for WebSocket relay through Envoy -> Portunus.
 
-These tests require Docker Compose to be running with the ws-echo container.
-They test the full WS flow: client -> Envoy -> Portunus WS -> ws-echo upstream,
-including bidirectional relay and per-message Kinesis logging.
+These tests target the legacy WS-relay model where Portunus terminated
+the WS connection on a ``/ws/`` path prefix and relayed frames upstream.
+After the migration to Envoy ext_proc, Envoy handles the WS upgrade
+directly (no /ws/ prefix, no Portunus-side relay) and ext_proc observes
+frames. The WS behaviour suite has been rewritten in
+``tests/test_behaviours_ws.py`` against the new model.
+
+This module is xfailed wholesale — kept for one cycle so the diff is
+auditable. Delete once test_behaviours_ws.py is the verified WS gate.
 """
 
 import asyncio
@@ -17,6 +23,11 @@ import time
 import pytest
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatusCode
+
+pytestmark = pytest.mark.xfail(
+    reason="Legacy WS-relay model retired — see tests/test_behaviours_ws.py",
+    strict=False,
+)
 
 # Add portunus to the Python path
 portunus_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "portunus")
