@@ -3,6 +3,18 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.1]
+
+### Changed
+- Proxy Envoy cluster for the Portunus upstream now uses `STRICT_DNS`
+  with `dns_refresh_rate: 5s`. Required for Service Connect on the
+  proxy → Portunus path: Cloud Map returns a multivalue A-record per
+  service, and `LOGICAL_DNS` would pin to whichever IP resolved first
+  for the cluster's lifetime, funnelling all traffic from one proxy
+  task into a single Portunus task. `STRICT_DNS` load-balances across
+  every healthy task; the 5 s refresh brings new tasks into rotation
+  within seconds of an autoscale or rolling deploy.
+
 ## [0.5.0]
 
 ### Added
@@ -64,6 +76,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
+[0.5.1]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.2.0...v0.3.0
