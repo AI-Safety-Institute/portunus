@@ -199,20 +199,13 @@ static_resources:
     transport_socket: ${TARGET_HOST_TRANSPORT_SOCKET}
   - name: ${PORTUNUS_HOST}
     connect_timeout: 5s
-    # STRICT_DNS (not LOGICAL_DNS): the Portunus host resolves to multiple
-    # task IPs when reached via Service Connect (Cloud Map returns a
-    # multivalue A-record of all healthy Portunus tasks). LOGICAL_DNS would
-    # pin the cluster to whichever IP DNS returned first and reuse it for
-    # the cluster's lifetime — combined with the 60s idle_timeout and TCP
-    # keepalive below, that would funnel ALL requests from a given proxy
-    # task into one Portunus task. STRICT_DNS resolves every address from
-    # the response and load-balances across them via lb_policy.
+    # STRICT_DNS so Envoy resolves every Cloud Map A-record and load-
+    # balances across all healthy Portunus tasks. LOGICAL_DNS would pin
+    # to the first resolved IP for the cluster's lifetime.
     type: STRICT_DNS
-    # Re-resolve every 5s so new Portunus tasks come into rotation
-    # within the refresh interval after autoscaling or a rolling deploy.
-    # We do NOT set respect_dns_ttl=true — when it's set, Envoy honours
-    # the record TTL instead of dns_refresh_rate, and Cloud Map's default
-    # 60s TTL would then dominate, making rotation 60s rather than 5s.
+    # Resolve on a fixed interval rather than ``respect_dns_ttl`` so new
+    # tasks come into rotation within 5s of an autoscale/rolling deploy
+    # (Cloud Map's default 60s TTL would otherwise dominate).
     dns_refresh_rate: 5s
     dns_lookup_family: V4_ONLY
     lb_policy: ROUND_ROBIN
@@ -223,16 +216,10 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    # DO NOT add http2_protocol_options to this cluster. WebSocket relay
-    # uses the traditional Upgrade mechanism, which is forbidden in HTTP/2
-    # (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441) would work but
-    # uvicorn doesn't support it. The lack of an http2_protocol_options
-    # block is the ONLY thing forcing HTTP/1.1 on this cluster now that
-    # the Service Connect path doesn't carry an ALPN pin (the old ALB+TLS
-    # path used `alpn_protocols: [http/1.1]` as a second layer of defence;
-    # raw_buffer over Service Connect has no ALPN). Future maintainers:
-    # if you copy-paste from the TARGET_HOST cluster and bring h2 with
-    # it, WebSocket Upgrade will silently fail at runtime.
+    # HTTP/1.1 only — leaving http2_protocol_options out is what forces
+    # it. The WebSocket relay uses the traditional Upgrade mechanism,
+    # which HTTP/2 forbids (RFC 7540 §8.1.2.2). If h2 ever gets enabled
+    # on this cluster the WS path silently breaks.
     load_assignment:
       cluster_name: ${PORTUNUS_HOST}
       endpoints:
