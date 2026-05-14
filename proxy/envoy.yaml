@@ -216,10 +216,9 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    # HTTP/1.1 only — leaving http2_protocol_options out is what forces
-    # it. The WebSocket relay uses the traditional Upgrade mechanism,
-    # which HTTP/2 forbids (RFC 7540 §8.1.2.2). If h2 ever gets enabled
-    # on this cluster the WS path silently breaks.
+    # Must stay HTTP/1.1 — WebSocket relay uses the traditional Upgrade mechanism
+    # which is forbidden in HTTP/2 (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441)
+    # would work but uvicorn doesn't support it. Do not add http2_protocol_options here.
     load_assignment:
       cluster_name: ${PORTUNUS_HOST}
       endpoints:
