@@ -194,9 +194,7 @@ def test_eventstream_whitespace_padded_inner_payload_is_compacted():
         ("\u00e9", "ValueError"),
     ],
 )
-def test_eventstream_skips_malformed_bytes_members(
-    bad_bytes, exception_name, caplog
-):
+def test_eventstream_skips_malformed_bytes_members(bad_bytes, exception_name, caplog):
     """Bad inner bytes members do not prevent later valid messages decoding."""
     caplog.set_level(logging.WARNING, logger="api.access")
     good = _bedrock_event({"type": "message_start"})
@@ -207,9 +205,9 @@ def test_eventstream_skips_malformed_bytes_members(
 
     assert not failed
     assert decoded == 'data: {"type":"message_start"}\n'
-    assert [
-        record.message for record in caplog.records
-    ] == [f"Skipping malformed eventstream message: {exception_name}"]
+    assert [record.message for record in caplog.records] == [
+        f"Skipping malformed eventstream message: {exception_name}"
+    ]
 
 
 @pytest.mark.parametrize(
