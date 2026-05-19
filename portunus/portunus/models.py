@@ -158,13 +158,23 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         try:
             envelope = json.loads(payload)
             if isinstance(envelope, dict) and (inner_b64 := envelope.get("bytes")):
-                inner_bytes = base64.b64decode(inner_b64)
-                inner_str = inner_bytes.decode("utf-8")
-                # Re-parse + dict check is the SSE-injection guard:
-                # rejects non-object inners, and inners whose strings
-                # contain literal control chars (RFC 8259 forbids those).
-                if isinstance(json.loads(inner_str), dict):
-                    sse_lines.append(f"data: {inner_str}\n")
+                try:
+                    inner_bytes = base64.b64decode(inner_b64)
+                    inner_str = inner_bytes.decode("utf-8")
+                except (TypeError, ValueError, binascii.Error) as exc:
+                    logger.warning(
+                        "Skipping malformed eventstream message: %s",
+                        exc.__class__.__name__,
+                    )
+                else:
+                    # Re-parse + dict check is the SSE-injection guard:
+                    # rejects non-object inners, and inners whose strings
+                    # contain literal control chars (RFC 8259 forbids those).
+                    # Re-serializing keeps each SSE event on one data line.
+                    inner = json.loads(inner_str)
+                    if isinstance(inner, dict):
+                        compact_inner = json.dumps(inner, separators=(",", ":"))
+                        sse_lines.append(f"data: {compact_inner}\n")
         except (json.JSONDecodeError, binascii.Error, UnicodeDecodeError):
             pass
         pos += total_len

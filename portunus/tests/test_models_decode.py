@@ -3,6 +3,7 @@
 import base64
 import gzip
 import json
+import logging
 import struct
 import zlib
 
@@ -29,6 +30,15 @@ def _bedrock_event(inner_obj: dict, headers: bytes = b"") -> bytes:
     inner_json = json.dumps(inner_obj, separators=(",", ":"))
     payload = json.dumps({"bytes": _b64(inner_json.encode("utf-8"))}).encode("utf-8")
     return _build_eventstream_message(payload, headers)
+
+
+def _eventstream_envelope(envelope: dict) -> bytes:
+    payload = json.dumps(envelope).encode("utf-8")
+    return _build_eventstream_message(payload)
+
+
+def _bedrock_raw_inner(inner_json: str) -> bytes:
+    return _eventstream_envelope({"bytes": _b64(inner_json.encode("utf-8"))})
 
 
 def test_plain_utf8_passes_through():
@@ -152,6 +162,54 @@ def test_eventstream_inner_payload_must_be_json_object():
     )
     assert not failed
     assert decoded == 'data: {"type":"message_start"}\n'
+
+
+def test_eventstream_pretty_printed_inner_payload_is_compacted():
+    inner = {"type": "content_block_delta", "delta": {"text": "hi"}}
+    es_bytes = _bedrock_raw_inner(json.dumps(inner, indent=2))
+    decoded, failed = _decompress_b64_body(
+        _b64(es_bytes), None, "application/vnd.amazon.eventstream"
+    )
+
+    assert not failed
+    assert decoded == f"data: {json.dumps(inner, separators=(',', ':'))}\n"
+
+
+def test_eventstream_whitespace_padded_inner_payload_is_compacted():
+    inner = {"type": "message_delta", "usage": {"output_tokens": 7}}
+    inner_json = f"\n  {json.dumps(inner, separators=(',', ':'))}  \r\n"
+    es_bytes = _bedrock_raw_inner(inner_json)
+    decoded, failed = _decompress_b64_body(
+        _b64(es_bytes), None, "application/vnd.amazon.eventstream"
+    )
+
+    assert not failed
+    assert decoded == f"data: {json.dumps(inner, separators=(',', ':'))}\n"
+
+
+@pytest.mark.parametrize(
+    ("bad_bytes", "exception_name"),
+    [
+        (123, "TypeError"),
+        ("\u00e9", "ValueError"),
+    ],
+)
+def test_eventstream_skips_malformed_bytes_members(
+    bad_bytes, exception_name, caplog
+):
+    """Bad inner bytes members do not prevent later valid messages decoding."""
+    caplog.set_level(logging.WARNING, logger="api.access")
+    good = _bedrock_event({"type": "message_start"})
+    es_bytes = _eventstream_envelope({"bytes": bad_bytes}) + good
+    decoded, failed = _decompress_b64_body(
+        _b64(es_bytes), None, "application/vnd.amazon.eventstream"
+    )
+
+    assert not failed
+    assert decoded == 'data: {"type":"message_start"}\n'
+    assert [
+        record.message for record in caplog.records
+    ] == [f"Skipping malformed eventstream message: {exception_name}"]
 
 
 @pytest.mark.parametrize(

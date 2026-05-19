@@ -67,7 +67,8 @@ exclude = [
 
 [tool.pytest.ini_options]
 testpaths = [
-    "tests"
+    "tests",
+    "portunus/tests",
 ]
 # Exclude directories from test discovery
 norecursedirs = [
