@@ -3,11 +3,12 @@
 
 These tests require Docker Compose to be running with the ws-echo container.
 They test the full WS flow: client -> Envoy -> Portunus WS -> ws-echo upstream,
-including bidirectional relay and per-message Kinesis logging.
+including bidirectional relay and per-message Firehose logging.
 """
 
 import asyncio
 import base64
+import gzip
 import json
 import os
 import subprocess
@@ -69,60 +70,79 @@ def get_close_code(exc: ConnectionClosed) -> int:
     return exc.code  # type: ignore[attr-defined]
 
 
-def read_kinesis_records(stream_name: str) -> list[dict]:
-    """Read all records from a Kinesis stream in localstack."""
-    shard_result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "localstack-main",
-            "awslocal",
-            "kinesis",
-            "get-shard-iterator",
-            "--stream-name",
-            stream_name,
-            "--shard-id",
-            "shardId-000000000000",
-            "--shard-iterator-type",
-            "TRIM_HORIZON",
-            "--region",
-            "eu-west-2",
-            "--query",
-            "ShardIterator",
-            "--output",
-            "text",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if shard_result.returncode != 0:
-        return []
+def read_firehose_records(stream_name: str) -> list[dict]:
+    """Read all records that Firehose has flushed to S3 in localstack.
 
-    shard_iterator = shard_result.stdout.strip()
-    records_result = subprocess.run(
+    Firehose buffers records and writes them to S3 as GZIP'd JSON, one
+    record per line. We list every object under ``logs/<prefix>/`` and
+    parse the contents.
+
+    The ``stream_name`` is the Firehose delivery-stream name, which by
+    convention matches the S3 prefix segment (e.g. the delivery stream
+    ``portunus-stream-request-body`` writes to ``logs/request-body/``).
+    """
+    prefix_segment = stream_name.removeprefix("portunus-stream-")
+    s3_prefix = f"logs/{prefix_segment}/"
+    bucket = "portunus-logs-local"
+
+    list_result = subprocess.run(
         [
             "docker",
             "exec",
             "localstack-main",
             "awslocal",
-            "kinesis",
-            "get-records",
-            "--shard-iterator",
-            shard_iterator,
+            "s3api",
+            "list-objects-v2",
+            "--bucket",
+            bucket,
+            "--prefix",
+            s3_prefix,
             "--region",
             "eu-west-2",
         ],
         capture_output=True,
         text=True,
     )
-    if records_result.returncode != 0:
+    if list_result.returncode != 0 or not list_result.stdout.strip():
         return []
 
-    response = json.loads(records_result.stdout)
-    records = []
-    for r in response.get("Records", []):
-        data = base64.b64decode(r["Data"])
-        records.append(json.loads(data))
+    try:
+        listing = json.loads(list_result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+    records: list[dict] = []
+    for obj in listing.get("Contents", []) or []:
+        key = obj["Key"]
+        get_result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "localstack-main",
+                "bash",
+                "-lc",
+                f"awslocal s3 cp s3://{bucket}/{key} - --region eu-west-2 | base64",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if get_result.returncode != 0:
+            continue
+        raw = base64.b64decode(get_result.stdout)
+        try:
+            payload = gzip.decompress(raw)
+        except (OSError, EOFError):
+            # LocalStack may flush uncompressed for small buffers
+            payload = raw
+        # Firehose concatenates records as newline-delimited JSON
+        for line in payload.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     return records
 
 
@@ -188,7 +208,7 @@ class TestWebSocketRelay:
             await ws.close()
 
     @pytest.mark.asyncio
-    async def test_messages_logged_to_kinesis(self, ws_docker_setup):
+    async def test_messages_logged_to_firehose(self, ws_docker_setup):
         """WS messages appear in the existing request-body/response-body streams."""
         auth_header = make_auth_header()
         ws = await websockets.connect(
@@ -197,19 +217,21 @@ class TestWebSocketRelay:
             open_timeout=5,
         )
         try:
-            # Send a unique message so we can find it in Kinesis
-            test_msg = f"kinesis-test-{time.time()}"
+            # Send a unique message so we can find it in Firehose's S3 output
+            test_msg = f"firehose-test-{time.time()}"
             await ws.send(test_msg)
             await asyncio.wait_for(ws.recv(), timeout=5)
         finally:
             await ws.close()
 
-        # Wait for fire-and-forget logging tasks to complete
-        # LocalStack Kinesis has a 1s throttle per publish in local mode
-        await asyncio.sleep(8)
+        # Firehose buffers records before flushing to S3. The LocalStack
+        # init script configures a 10s buffer interval, plus we run a 1s
+        # per-PutRecord throttle in publish_service when an endpoint URL
+        # is set. Wait long enough for the buffer to flush.
+        await asyncio.sleep(15)
 
         # Client messages go to request-body stream
-        req_records = read_kinesis_records("portunus-stream-request-body")
+        req_records = read_firehose_records("portunus-stream-request-body")
         assert len(req_records) > 0, "No records found in request-body stream"
 
         # Find our test message in request-body
@@ -232,7 +254,7 @@ class TestWebSocketRelay:
         assert "timestamp" in record
 
         # Echo response should appear in response-body stream
-        resp_records = read_kinesis_records("portunus-stream-response-body")
+        resp_records = read_firehose_records("portunus-stream-response-body")
         echo_msgs = [
             r
             for r in resp_records
@@ -245,7 +267,7 @@ class TestWebSocketRelay:
 
     @pytest.mark.asyncio
     async def test_metadata_published_on_ws_connect(self, ws_docker_setup):
-        """Metadata record is published to Kinesis when WS connection is established."""
+        """Metadata record is published to Firehose when WS connection is established."""
         auth_header = make_auth_header()
         ws = await websockets.connect(
             PROXY_WS_URL,
@@ -254,10 +276,10 @@ class TestWebSocketRelay:
         )
         await ws.close()
 
-        # Wait for publish
-        await asyncio.sleep(4)
+        # Wait for Firehose buffer flush (10s interval + slack)
+        await asyncio.sleep(15)
 
-        records = read_kinesis_records("portunus-stream-metadata")
+        records = read_firehose_records("portunus-stream-metadata")
         metadata_records = [r for r in records if r["record_type"] == "metadata"]
         assert len(metadata_records) > 0, "No metadata records found"
 

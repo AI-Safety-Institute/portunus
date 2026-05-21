@@ -100,10 +100,10 @@ async def wait_until(
 
 
 def generate_iso_timestamp() -> str:
-    """Generate an ISO-8601 timestamp string for Kinesis partitioning.
+    """Generate an ISO-8601 timestamp string for Firehose partitioning.
 
     Returns a string in format YYYY-MM-DDThh:mm:ss.sssZ which works with the
-    Kinesis metadata extraction query for partitioning by year, month, day, hour.
+    Firehose metadata extraction query for partitioning by year, month, day, hour.
 
     Returns:
         str: ISO-8601 formatted timestamp with millisecond precision
@@ -117,7 +117,7 @@ def generate_iso_timestamp() -> str:
 
 
 def unix_timestamp_to_iso(unix_timestamp: int) -> str:
-    """Convert a Unix timestamp to ISO-8601 format for Kinesis partitioning.
+    """Convert a Unix timestamp to ISO-8601 format for Firehose partitioning.
 
     Args:
         unix_timestamp: Unix timestamp (seconds since epoch)
@@ -132,11 +132,11 @@ def unix_timestamp_to_iso(unix_timestamp: int) -> str:
 def chunk_body_data(
     body_bytes: bytes, max_record_size: int | None = None
 ) -> list[bytes]:
-    """Chunk body data into pieces that fit within Kinesis limits.
+    """Chunk body data into pieces that fit within Firehose limits.
 
     Args:
         body_bytes: The body data to chunk
-        max_record_size: Maximum size for a single Kinesis record.
+        max_record_size: Maximum size for a single Firehose record.
         If None, uses config value.
 
     Returns a list of raw byte chunks.
@@ -145,7 +145,7 @@ def chunk_body_data(
     if max_record_size is None:
         from portunus.config import config
 
-        max_record_size = config.kinesis.max_record_size
+        max_record_size = config.firehose.max_record_size
 
     max_b64_per_chunk = max_record_size - 100
     safe_raw_chunk_size = (max_b64_per_chunk // 4) * 3

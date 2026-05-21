@@ -38,7 +38,7 @@ def mock_publish_service():
     """Create a mock PublishService."""
     service = AsyncMock()
     service.publish_metadata = AsyncMock(return_value=True)
-    service.publish_to_kinesis_data_stream = AsyncMock(return_value=True)
+    service.publish_to_firehose = AsyncMock(return_value=True)
     return service
 
 

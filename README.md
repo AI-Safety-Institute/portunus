@@ -2,7 +2,7 @@
 
 ![Portunus](portunus.png)
 
-**Portunus** is a secure API key proxy. It allows clients to authenticate with temporary AWS credentials and transparently swaps them for real API keys stored in AWS Secrets Manager, before forwarding requests to upstream targets. All traffic is logged to Kinesis for auditing.
+**Portunus** is a secure API key proxy. It allows clients to authenticate with temporary AWS credentials and transparently swaps them for real API keys stored in AWS Secrets Manager, before forwarding requests to upstream targets. All traffic is logged to Firehose for auditing.
 
 It consists of two main components:
 
@@ -22,7 +22,7 @@ It consists of two main components:
 
 Supporting AWS services:
 
-- **Kinesis Data Streams / Firehose**: All traffic is streamed to Kinesis for archival in S3
+- **Kinesis Firehose**: All traffic is published via direct-PUT for archival in S3
 - **AWS Secrets Manager**: Stores the real API keys
 - **AWS X-Ray**: Distributed tracing for debugging
 
@@ -37,7 +37,7 @@ sequenceDiagram
     participant Redis
     participant AWS as AWS Services
     participant Target as Upstream Target
-    participant Kinesis as AWS Kinesis
+    participant Firehose as AWS Firehose
 
     Client->>Envoy: Initial request
 
@@ -55,10 +55,10 @@ sequenceDiagram
     Note over Envoy: Substitute API key in request header
 
     Envoy->>Portunus: Log request headers
-    Portunus->>Kinesis: Publish record to Kinesis
+    Portunus->>Firehose: Publish record to Firehose
 
     Envoy->>Portunus: Log request body
-    Portunus->>Kinesis: Publish record to Kinesis
+    Portunus->>Firehose: Publish record to Firehose
 
     Envoy->>Target: Forward request to upstream
 
@@ -66,10 +66,10 @@ sequenceDiagram
     Envoy-->>Client: Stream response to client
 
     Envoy->>Portunus: Log response body
-    Portunus->>Kinesis: Publish record to Kinesis
+    Portunus->>Firehose: Publish record to Firehose
 
     Envoy->>Portunus: Log response headers
-    Portunus->>Kinesis: Publish record to Kinesis
+    Portunus->>Firehose: Publish record to Firehose
 ```
 
 ## Architecture
@@ -96,7 +96,7 @@ flowchart TB
     subgraph "AWS Services"
         SecretManager["AWS Secret Manager"]
         IAM["AWS IAM/Identity"]
-        Kinesis["AWS Kinesis Firehose / S3"]
+        Firehose["AWS Kinesis Firehose / S3"]
     end
 
 
@@ -119,7 +119,7 @@ flowchart TB
 
 
     %% Log publishing
-    LogEndpoint -->|Archive log| Kinesis
+    LogEndpoint -->|Archive log| Firehose
 
     %% Styling
     classDef client fill:#e6f7ff,stroke:#1890ff
@@ -133,7 +133,7 @@ flowchart TB
     class Envoy envoyProxy
     class Auth,LogEndpoint portunusService
     class Redis storageLayer
-    class SecretManager,IAM,Kinesis awsLayer
+    class SecretManager,IAM,Firehose awsLayer
     class Target externalLayer
 ```
 
@@ -157,12 +157,13 @@ flowchart TB
 | `REDIS_PORT` | Redis port | `6379` |
 | `REDIS_PASSWORD` | Redis password | - |
 | `REDIS_MAX_CONNECTIONS` | Max Redis connections | `200` |
-| `KINESIS_METADATA_STREAM` | Kinesis stream for metadata | - |
-| `KINESIS_REQUEST_HEADERS_STREAM` | Kinesis stream for request headers | - |
-| `KINESIS_REQUEST_BODY_STREAM` | Kinesis stream for request bodies | - |
-| `KINESIS_RESPONSE_HEADERS_STREAM` | Kinesis stream for response headers | - |
-| `KINESIS_RESPONSE_BODY_STREAM` | Kinesis stream for response bodies | - |
-| `KINESIS_RESPONSE_TRAILERS_STREAM` | Kinesis stream for response trailers | - |
+| `FIREHOSE_METADATA_STREAM` | Firehose delivery stream for metadata | - |
+| `FIREHOSE_REQUEST_HEADERS_STREAM` | Firehose delivery stream for request headers | - |
+| `FIREHOSE_REQUEST_BODY_STREAM` | Firehose delivery stream for request bodies | - |
+| `FIREHOSE_REQUEST_TRAILERS_STREAM` | Firehose delivery stream for request trailers | - |
+| `FIREHOSE_RESPONSE_HEADERS_STREAM` | Firehose delivery stream for response headers | - |
+| `FIREHOSE_RESPONSE_BODY_STREAM` | Firehose delivery stream for response bodies | - |
+| `FIREHOSE_RESPONSE_TRAILERS_STREAM` | Firehose delivery stream for response trailers | - |
 
 ## Local Development
 
@@ -221,7 +222,7 @@ For [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/
 
 ## Known Issues
 
-- **Kinesis record size**: Kinesis has a max record size of 1MiB. Large payloads are chunked automatically, but Envoy and Portunus both hold payloads in memory, which may cause memory pressure under heavy load with large payloads.
+- **Firehose record size**: Firehose has a max record size of 1MiB (direct-PUT). Large payloads are chunked automatically, but Envoy and Portunus both hold payloads in memory, which may cause memory pressure under heavy load with large payloads.
 
 - **Scaling lag**: The backend autoscales, and some 504/503 responses are expected during rapid load increases. These resolve as the service scales to accommodate the load.
 

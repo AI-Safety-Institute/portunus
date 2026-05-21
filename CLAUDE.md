@@ -36,7 +36,7 @@ This repo implements a secure API key proxy system with two main components:
    - Extracts AWS credentials and secret ARN
    - Creates AWS session with provided credentials
    - Retrieves API key from AWS Secrets Manager via `services.aws_service.AwsService`
-   - Publishes metadata (principal info) to Kinesis Data Streams for audit trail
+   - Publishes metadata (principal info) to Firehose delivery streams for audit trail
    - Returns formatted API key with principal info
 4. Proxy replaces original authorization header with actual API key
    - `request_handle:headers():replace(API_KEY_HEADER, api_key)`
@@ -50,16 +50,16 @@ This repo implements a secure API key proxy system with two main components:
    - Makes async call to `/log` with metadata and type "request_headers", "request_body", or "request_trailers"
    - Payload is validated against appropriate Pydantic models (defined in `models.py`)
    - Binary data is base64-encoded by Lua before being sent to Portunus
-   - Portunus publishes events directly to Kinesis Data Streams for long-term storage
+   - Portunus publishes events directly to Firehose delivery streams (direct-PUT) for long-term storage
 2. Response logging:
    - After receiving upstream response, Lua captures response data
    - Makes async call to `/log` with metadata and type "response_headers", "response_chunk", or "response_trailers"
    - Each log event is typed based on its content (e.g., `ResponseChunkEvent` includes `chunk` and `index`)
    - Binary data is base64-encoded by Lua before being sent to Portunus
-   - Portunus publishes events directly to Kinesis Data Streams for long-term storage
+   - Portunus publishes events directly to Firehose delivery streams (direct-PUT) for long-term storage
 3. Metadata publishing:
-   - Principal identity information is published to Kinesis during the authorization phase
-   - All log events are published directly to separate Kinesis Data Streams (metadata, request headers/body/trailers, response headers/body/trailers)
+   - Principal identity information is published to Firehose during the authorization phase
+   - All log events are published directly to separate Firehose delivery streams (metadata, request headers/body/trailers, response headers/body/trailers)
    - No intermediate Redis storage is used for log data
 
 A unique request ID is generated for each request and used to tie all logs together for traceability.
@@ -99,9 +99,9 @@ The proxy is designed to handle streaming responses efficiently:
 - `/portunus/portunus/app.py` - Main FastAPI application with endpoints
 - `/portunus/portunus/services/auth_service.py` - Authentication and authorization logic
 - `/portunus/portunus/services/aws_service.py` - AWS services integration (Secrets Manager, etc.)
-- `/portunus/portunus/services/publish_service.py` - Publishing log events and metadata to Kinesis Data Streams
+- `/portunus/portunus/services/publish_service.py` - Publishing log events and metadata to Firehose delivery streams via direct-PUT
 - `/portunus/portunus/util.py` - Utility functions and helpers
-- `/portunus/portunus/models.py` - Data models and schemas, including Pydantic models for logging events and dataclasses for Kinesis records and auth/AWS types
+- `/portunus/portunus/models.py` - Data models and schemas, including Pydantic models for logging events and dataclasses for Firehose records and auth/AWS types
 - `/portunus/portunus/types.py` - Remaining TypedDict classes and utility types (most types migrated to models.py for better validation)
 - `/portunus/portunus/config.py` - Configuration management
 - `/proxy/lua.lua` - Lua script for request/response interception and modification

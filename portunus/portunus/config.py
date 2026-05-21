@@ -63,54 +63,55 @@ class RedisConfig(BaseModel):
     )
 
 
-class KinesisConfig(BaseModel):
-    """Kinesis configuration for data streaming and storage.
+class FirehoseConfig(BaseModel):
+    """Firehose direct-PUT configuration for log record publishing.
 
-    This configuration includes both Kinesis Data Streams for high-throughput ingestion
-    and Kinesis Firehose for S3 delivery.
+    Configures the per-component Firehose delivery stream names that Portunus
+    publishes request/response log records to. S3 destinations and Glue ETL are
+    provisioned separately (in the api-key-proxy CDK infra) and not configured here.
 
     Attributes:
-        metadata_stream_name: Firehose stream name for metadata records
-        request_headers_stream_name: Firehose stream name for request headers
-        request_body_stream_name: Firehose stream name for request bodies
-        request_trailers_stream_name: Firehose stream name for request trailers
-        response_headers_stream_name: Firehose stream name for response headers
-        response_body_stream_name: Firehose stream name for response bodies
-        response_trailers_stream_name: Firehose stream name for response trailers
-        max_record_size: Maximum size in bytes for a single Kinesis record
+        metadata_stream_name: Firehose delivery stream for metadata records
+        request_headers_stream_name: Firehose delivery stream for request headers
+        request_body_stream_name: Firehose delivery stream for request bodies
+        request_trailers_stream_name: Firehose delivery stream for request trailers
+        response_headers_stream_name: Firehose delivery stream for response headers
+        response_body_stream_name: Firehose delivery stream for response bodies
+        response_trailers_stream_name: Firehose delivery stream for response trailers
+        max_record_size: Maximum size in bytes for a single Firehose record
     """
 
     metadata_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for metadata records",
+        description="Firehose delivery stream for metadata records",
     )
     request_headers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request headers",
+        description="Firehose delivery stream for request headers",
     )
     request_body_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request bodies",
+        description="Firehose delivery stream for request bodies",
     )
     request_trailers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request trailers",
+        description="Firehose delivery stream for request trailers",
     )
     response_headers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response headers",
+        description="Firehose delivery stream for response headers",
     )
     response_body_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response bodies",
+        description="Firehose delivery stream for response bodies",
     )
     response_trailers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response trailers",
+        description="Firehose delivery stream for response trailers",
     )
     max_record_size: int = Field(
         default=900000,
-        description="Maximum size in bytes for single Kinesis record (900KB)",
+        description="Maximum size in bytes for single Firehose record (900KB)",
         ge=1000,
     )
 
@@ -204,9 +205,9 @@ class PortunusConfig(BaseModel):
         default_factory=AwsConfig,
         description="AWS configuration",
     )
-    kinesis: KinesisConfig = Field(
-        default_factory=KinesisConfig,
-        description="Kinesis Firehose configuration",
+    firehose: FirehoseConfig = Field(
+        default_factory=FirehoseConfig,
+        description="Firehose direct-PUT configuration",
     )
     relay: RelayConfig = Field(
         default_factory=RelayConfig,
@@ -272,23 +273,23 @@ def get_config() -> PortunusConfig:
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL", None),
     )
 
-    kinesis = KinesisConfig(
-        metadata_stream_name=os.environ.get("KINESIS_METADATA_STREAM", None),
+    firehose = FirehoseConfig(
+        metadata_stream_name=os.environ.get("FIREHOSE_METADATA_STREAM", None),
         request_headers_stream_name=os.environ.get(
-            "KINESIS_REQUEST_HEADERS_STREAM", None
+            "FIREHOSE_REQUEST_HEADERS_STREAM", None
         ),
-        request_body_stream_name=os.environ.get("KINESIS_REQUEST_BODY_STREAM", None),
+        request_body_stream_name=os.environ.get("FIREHOSE_REQUEST_BODY_STREAM", None),
         request_trailers_stream_name=os.environ.get(
-            "KINESIS_REQUEST_TRAILERS_STREAM", None
+            "FIREHOSE_REQUEST_TRAILERS_STREAM", None
         ),
         response_headers_stream_name=os.environ.get(
-            "KINESIS_RESPONSE_HEADERS_STREAM", None
+            "FIREHOSE_RESPONSE_HEADERS_STREAM", None
         ),
-        response_body_stream_name=os.environ.get("KINESIS_RESPONSE_BODY_STREAM", None),
+        response_body_stream_name=os.environ.get("FIREHOSE_RESPONSE_BODY_STREAM", None),
         response_trailers_stream_name=os.environ.get(
-            "KINESIS_RESPONSE_TRAILERS_STREAM", None
+            "FIREHOSE_RESPONSE_TRAILERS_STREAM", None
         ),
-        max_record_size=int(os.environ.get("KINESIS_MAX_RECORD_SIZE", "1000000")),
+        max_record_size=int(os.environ.get("FIREHOSE_MAX_RECORD_SIZE", "1000000")),
     )
 
     relay = RelayConfig(
@@ -306,7 +307,7 @@ def get_config() -> PortunusConfig:
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
         redis=redis,
         aws=aws,
-        kinesis=kinesis,
+        firehose=firehose,
         relay=relay,
     )
 

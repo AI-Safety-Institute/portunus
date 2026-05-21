@@ -31,7 +31,7 @@ class WsAuthResult:
     Attributes:
         auth_result: The underlying AuthResult from AuthService.
         api_key: The API key to use for upstream connection.
-        secret_arn: The secret ARN from the auth payload, for Kinesis metadata.
+        secret_arn: The secret ARN from the auth payload, for Firehose metadata.
     """
 
     auth_result: AuthResult

@@ -1,4 +1,4 @@
-"""Tests for Kinesis chunking functionality."""
+"""Tests for Firehose chunking functionality."""
 
 import base64
 
@@ -6,7 +6,7 @@ from portunus.config import config
 from portunus.util import chunk_body_data
 
 
-class TestKinesisChunking:
+class TestFirehoseChunking:
     """Test cases for body data chunking."""
 
     def test_small_body_single_chunk(self):
@@ -43,11 +43,11 @@ class TestKinesisChunking:
         ), "Reassembled body should match original"
 
     def test_chunk_size_within_limits(self):
-        """Test that each chunk stays within Kinesis size limits when base64 encoded."""
+        """Each chunk stays within Firehose size limits when base64 encoded."""
         large_body = b"x" * (2 * 1024 * 1024)  # 2MB
         chunks = chunk_body_data(large_body)
 
-        max_size = config.kinesis.max_record_size
+        max_size = config.firehose.max_record_size
         for i, chunk in enumerate(chunks):
             # The chunk will be base64 encoded when published, so check that size
             encoded_size = len(base64.b64encode(chunk))

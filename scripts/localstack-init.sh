@@ -3,7 +3,7 @@
 # This runs automatically when LocalStack container starts
 #
 # Note: LocalStack automatically runs all scripts in ready.d/ in alphabetical order.
-# The individual stack init scripts (01-init-kinesis.sh, 02-init-async-analysis.sh)
+# The individual stack init scripts (01-init-firehose.sh, 02-init-async-analysis.sh)
 # will run after this header script.
 
 set -e

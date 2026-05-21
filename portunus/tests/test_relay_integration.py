@@ -36,7 +36,7 @@ def auth_result():
 
 @pytest.fixture()
 def publish_service():
-    """Mock PublishService — we're testing the relay, not Kinesis."""
+    """Mock PublishService — we're testing the relay, not Firehose."""
     service = AsyncMock()
     service.publish_metadata = AsyncMock(return_value=True)
     service.publish_request_headers = AsyncMock(return_value=True)
@@ -198,7 +198,7 @@ class TestRelayIntegration:
     async def test_multiple_messages_logged(
         self, echo_server, auth_result, publish_service
     ):
-        """Each relayed message triggers a Kinesis publish call."""
+        """Each relayed message triggers a Firehose publish call."""
         port = echo_server
         client_ws = _make_client_ws(port)
         num_messages = 5

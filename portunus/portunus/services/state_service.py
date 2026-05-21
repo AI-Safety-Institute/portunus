@@ -172,20 +172,15 @@ class StateService:
             logger.error(f"Redis health check failed: {e}")
             return False
 
-    async def get_kinesis_firehose_client(self):
+    async def get_firehose_client(self):
         """
-        Get a Kinesis Firehose client using aioboto3.
+        Get a Kinesis Firehose client using aiobotocore.
+
+        The returned object is an unentered async context manager; callers
+        should use ``async with await state_service.get_firehose_client()
+        as client`` so the underlying aiohttp session is closed promptly.
 
         Returns:
-            A Kinesis Firehose client instance
+            A Kinesis Firehose client context manager
         """
         return self.boto_session.create_client("firehose")
-
-    async def get_kinesis_client(self):
-        """
-        Get a Kinesis Data Streams client using aioboto3.
-
-        Returns:
-            A Kinesis Data Streams client instance
-        """
-        return self.boto_session.create_client("kinesis")

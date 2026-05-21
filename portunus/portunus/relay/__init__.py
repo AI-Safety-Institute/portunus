@@ -1,7 +1,7 @@
 """WebSocket relay module for Portunus.
 
 Provides bidirectional WebSocket proxying with authentication,
-per-message logging to Kinesis, and token usage extraction.
+per-message logging to Firehose, and token usage extraction.
 """
 
 import enum

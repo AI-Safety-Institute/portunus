@@ -2,7 +2,7 @@
 Main FastAPI application for the Portunus.
 
 This module defines the FastAPI application and API endpoints for the Portunus.
-It implements the authentication logic and log event publishing to Kinesis.
+It implements the authentication logic and log event publishing to Firehose.
 """
 
 import asyncio
@@ -167,11 +167,11 @@ async def authorise(
                     debug_id=trace_id,
                 )
 
-            # Store principal info metadata and publish to Kinesis
+            # Store principal info metadata and publish to Firehose
             timestamp = generate_iso_timestamp()
             principal_info = auth_result.principal_info.to_dict()
 
-            # Publish to Kinesis for long-term storage
+            # Publish to Firehose for long-term storage
             try:
                 async with asyncio.timeout(3):
                     await publish_service.publish_metadata(
@@ -187,7 +187,7 @@ async def authorise(
                 # but don't fail the whole request
                 segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
                 logger.critical(
-                    f"Publishing metadata to kinesis timeout out for {trace_id}: {e}, ",
+                    f"Publishing metadata to firehose timed out for {trace_id}: {e}, ",
                     "although may have succeeded",
                 )
             except Exception as e:
@@ -195,7 +195,7 @@ async def authorise(
                 # but don't fail the whole request
                 segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
                 logger.critical(
-                    f"Failed to publish metadata to Kinesis for {trace_id}: {e}"
+                    f"Failed to publish metadata to Firehose for {trace_id}: {e}"
                 )
 
             # Return successful response
@@ -246,7 +246,7 @@ async def log_request_headers(
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
-        # Publish to Kinesis for long-term storage
+        # Publish to Firehose for long-term storage
         await publish_service.publish_request_headers(
             request_id=request_id,
             headers=content.headers,
@@ -254,7 +254,7 @@ async def log_request_headers(
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
-        logger.critical(f"Kinesis publishing failed for request headers: {e}")
+        logger.critical(f"Firehose publishing failed for request headers: {e}")
         response.status_code = 500
         return ErrorResponse(message="Request headers storage error", debug_id=trace_id)
 
@@ -302,7 +302,7 @@ async def log_request_body(
             )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
-        logger.critical(f"Kinesis publishing failed for request body: {e}")
+        logger.critical(f"Firehose publishing failed for request body: {e}")
         response.status_code = 500
         return ErrorResponse(message="Request body storage error", debug_id=trace_id)
 
@@ -321,7 +321,7 @@ async def log_request_trailers(
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
-        # Publish to Kinesis
+        # Publish to Firehose
         await publish_service.publish_request_trailers(
             request_id=request_id,
             trailers=content.trailers,
@@ -329,7 +329,7 @@ async def log_request_trailers(
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
-        logger.critical(f"Kinesis publishing failed for request trailers: {e}")
+        logger.critical(f"Firehose publishing failed for request trailers: {e}")
         response.status_code = 500
         return ErrorResponse(
             message="Request trailers storage error", debug_id=trace_id
@@ -350,7 +350,7 @@ async def log_response_headers(
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
-        # Publish to Kinesis
+        # Publish to Firehose
         await publish_service.publish_response_headers(
             request_id=request_id,
             headers=content.headers,
@@ -358,7 +358,7 @@ async def log_response_headers(
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
-        logger.critical(f"Kinesis publishing failed for response headers: {e}")
+        logger.critical(f"Firehose publishing failed for response headers: {e}")
         response.status_code = 500
         return ErrorResponse(
             message="Response headers storage error", debug_id=trace_id
@@ -408,7 +408,7 @@ async def log_response_body(
             )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
-        logger.critical(f"Kinesis publishing failed for response body: {e}")
+        logger.critical(f"Firehose publishing failed for response body: {e}")
         response.status_code = 500
         return ErrorResponse(message="Response body storage error", debug_id=trace_id)
 
@@ -427,7 +427,7 @@ async def log_response_trailers(
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
-        # Publish to Kinesis
+        # Publish to Firehose
         await publish_service.publish_response_trailers(
             request_id=request_id,
             trailers=content.trailers,
@@ -435,7 +435,7 @@ async def log_response_trailers(
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
-        logger.critical(f"Kinesis publishing failed for response trailers: {e}")
+        logger.critical(f"Firehose publishing failed for response trailers: {e}")
         response.status_code = 500
         return ErrorResponse(
             message="Response trailers storage error", debug_id=trace_id
@@ -458,7 +458,7 @@ async def ws_relay(websocket: WebSocket, path: str):
     (e.g., /v1/responses -> upstream /v1/responses).
 
     Authenticates the upgrade request, connects to the upstream WebSocket,
-    and relays messages bidirectionally with per-message Kinesis logging.
+    and relays messages bidirectionally with per-message Firehose logging.
     Rejects with 1013 (Try Again Later) if connection limit is reached.
     """
     max_conns = config.relay.max_connections

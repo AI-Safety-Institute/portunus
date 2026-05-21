@@ -2,7 +2,7 @@
 
 Manages the full lifecycle of a WebSocket relay connection:
 authentication, upstream connection, bidirectional message relay,
-and per-message logging to the existing Kinesis body streams.
+and per-message logging to the existing Firehose body streams.
 """
 
 import asyncio

@@ -96,7 +96,7 @@ class TestLogWsMessage:
     async def test_handles_publish_error(self, mock_publish_service):
         """Publish errors are logged but don't raise."""
         mock_publish_service.publish_request_body.side_effect = Exception(
-            "Kinesis error"
+            "Firehose error"
         )
 
         # Should not raise

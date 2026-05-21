@@ -1,12 +1,12 @@
-"""WebSocket message logging to Kinesis.
+"""WebSocket message logging to Firehose.
 
 Logs each relayed WebSocket message to the existing request-body and
-response-body Kinesis streams, reusing the same PublishService methods
-as HTTP logging. Client-to-upstream messages go to request-body,
+response-body Firehose delivery streams, reusing the same PublishService
+methods as HTTP logging. Client-to-upstream messages go to request-body,
 upstream-to-client messages go to response-body.
 
 Uses a bounded asyncio queue with a fixed worker pool to decouple the
-relay loop from Kinesis publish latency. The relay enqueues log items
+relay loop from Firehose publish latency. The relay enqueues log items
 without blocking; workers drain the queue in the background.
 """
 
@@ -35,9 +35,9 @@ class _LogItem:
 
 
 class LogQueue:
-    """Bounded async queue with a fixed worker pool for Kinesis publishing.
+    """Bounded async queue with a fixed worker pool for Firehose publishing.
 
-    Decouples the relay loop from Kinesis latency — enqueue is non-blocking,
+    Decouples the relay loop from Firehose latency — enqueue is non-blocking,
     workers publish concurrently up to ``num_workers``.
     """
 
@@ -112,7 +112,7 @@ async def stop_log_queue() -> None:
 
 
 async def _publish_message(item: _LogItem) -> None:
-    """Publish a single message to Kinesis."""
+    """Publish a single message to Firehose."""
     timestamp = generate_iso_timestamp()
     chunks = chunk_body_data(item.message_data)
     num_chunks = max(len(chunks), 1)
@@ -149,7 +149,7 @@ async def log_ws_message(
     message_data: bytes,
     message_index: int,
 ) -> None:
-    """Log a WebSocket message to the appropriate Kinesis body stream.
+    """Log a WebSocket message to the appropriate Firehose body stream.
 
     Kept for direct-await usage (e.g. tests). For the relay hot path,
     use enqueue_log() which enqueues to the worker pool instead.
@@ -170,7 +170,7 @@ async def log_ws_headers(
     request_id: str,
     headers: dict[str, str],
 ) -> None:
-    """Log WebSocket upgrade request headers to the request-headers Kinesis stream.
+    """Log WebSocket upgrade request headers to the request-headers Firehose stream.
 
     Called once at connection open to capture the initial handshake headers,
     maintaining parity with the HTTP flow which logs request headers.
@@ -193,7 +193,7 @@ async def log_ws_summary(
     upstream_messages: int,
     duration_seconds: float,
 ) -> None:
-    """Log WebSocket connection summary to the response-headers Kinesis stream.
+    """Log WebSocket connection summary to the response-headers Firehose stream.
 
     Called at connection close to record session stats, maintaining parity
     with the HTTP flow which logs response headers.

@@ -5,8 +5,8 @@ Generate test data by making HTTP requests through the proxy.
 This script sends requests through the Portunus proxy, which will:
 1. Authenticate via the /authorise endpoint
 2. Forward requests to the target (http-bin)
-3. Log request/response data to Kinesis
-4. Flow through Firehose to S3 for Glue processing
+3. Log request/response data to Firehose via direct-PUT
+4. Firehose delivers to S3 for Glue processing
 
 This tests the entire pipeline end-to-end with varied HTTP scenarios.
 """
@@ -183,7 +183,7 @@ def main():
 
     print()
     print(f"Making {len(TEST_SCENARIOS)} varied test requests through the proxy...")
-    print("This will populate Kinesis → Firehose → S3 with diverse data")
+    print("This will populate Firehose → S3 with diverse data")
     print()
 
     successful_requests = 0

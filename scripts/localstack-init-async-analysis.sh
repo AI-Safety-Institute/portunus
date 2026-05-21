@@ -10,7 +10,7 @@ echo "Initializing Async Analysis Stack resources..."
 echo "  Creating S3 bucket for joined data..."
 awslocal s3 mb s3://portunus-joined-data-local 2>/dev/null || echo "  Bucket portunus-joined-data-local already exists"
 
-# Note: Glue database portunus_logs is shared with Kinesis Stack
+# Note: Glue database portunus_logs is shared with Firehose Stack
 # No separate database needed
 
 echo "✓ Async Analysis Stack resources initialized"

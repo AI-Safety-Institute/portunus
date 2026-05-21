@@ -31,7 +31,7 @@ services:
     environment:
       # LocalStack configuration: https://docs.localstack.cloud/references/configuration/
       - DEBUG=${DEBUG:-0}
-      - SERVICES=glue,kms,kinesis,firehose,s3,dynamodb,sts,secretsmanager
+      - SERVICES=glue,kms,firehose,s3,dynamodb,sts,secretsmanager
       # test credentials to force the same account to be used by default
       - AWS_ACCESS_KEY_ID=000000000000
       - AWS_SECRET_ACCESS_KEY=test
@@ -40,7 +40,7 @@ services:
       - "${LOCALSTACK_VOLUME_DIR:-./localstack}:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "./scripts/localstack-init.sh:/etc/localstack/init/ready.d/00-init-main.sh"
-      - "./scripts/localstack-init-kinesis.sh:/etc/localstack/init/ready.d/01-init-kinesis.sh"
+      - "./scripts/localstack-init-firehose.sh:/etc/localstack/init/ready.d/01-init-firehose.sh"
       - "./scripts/localstack-init-async-analysis.sh:/etc/localstack/init/ready.d/02-init-async-analysis.sh"
 
   xray-daemon:
@@ -141,14 +141,14 @@ services:
       # Localstack endpoint. Unset to make real AWS requests
       AWS_ENDPOINT_URL: http://localstack:4566
       REDIS_USE_TLS: "false"
-      # Kinesis stream configuration for local testing
-      KINESIS_METADATA_STREAM: portunus-stream-metadata
-      KINESIS_REQUEST_HEADERS_STREAM: portunus-stream-request-headers
-      KINESIS_REQUEST_BODY_STREAM: portunus-stream-request-body
-      KINESIS_REQUEST_TRAILERS_STREAM: portunus-stream-request-trailers
-      KINESIS_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
-      KINESIS_RESPONSE_BODY_STREAM: portunus-stream-response-body
-      KINESIS_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
+      # Firehose delivery stream configuration for local testing
+      FIREHOSE_METADATA_STREAM: portunus-stream-metadata
+      FIREHOSE_REQUEST_HEADERS_STREAM: portunus-stream-request-headers
+      FIREHOSE_REQUEST_BODY_STREAM: portunus-stream-request-body
+      FIREHOSE_REQUEST_TRAILERS_STREAM: portunus-stream-request-trailers
+      FIREHOSE_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
+      FIREHOSE_RESPONSE_BODY_STREAM: portunus-stream-response-body
+      FIREHOSE_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
 
   ws-echo:
     build: ws-echo
