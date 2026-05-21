@@ -109,6 +109,18 @@ static_resources:
                 route:
                   cluster: ${PORTUNUS_HOST}
                   timeout: 0s
+                  # Bounded WS connection lifetime so scale-out actually
+                  # rebalances. With ``timeout: 0s`` there is no upstream
+                  # response timeout (correct — WS is long-lived), but
+                  # without a cap a connection opened pre-scale-out stays
+                  # pinned to its original task forever. 55min lets a 60min
+                  # OpenAI Realtime session complete naturally while still
+                  # cycling pathologically long sessions. Per-route so HTTP
+                  # / SSE traffic is unaffected. SDK reconnect handles the
+                  # close (TCP FIN → 1006; cleaner 1001 needs a WASM
+                  # filter, tracked as follow-up).
+                  max_stream_duration:
+                    max_stream_duration: 3300s
                   # Rewrite Host so the shared ALB routes to the Portunus service,
                   # not back to this proxy (which would loop until XFF hits 30 IPs → 463).
                   host_rewrite_literal: "${PORTUNUS_HOST}"
@@ -174,7 +186,11 @@ static_resources:
     connect_timeout: 5s
     type: LOGICAL_DNS
     dns_lookup_family: V4_ONLY
-    lb_policy: ROUND_ROBIN
+    # LOGICAL_DNS resolves to a single IP per connection, so lb_policy is
+    # mostly decorative here — but if the cluster ever moves to STRICT_DNS
+    # (multivalue A records, multiple endpoints), LEAST_REQUEST is what
+    # we want. Cheap to keep aligned with intent.
+    lb_policy: LEAST_REQUEST
     common_http_protocol_options:
       idle_timeout: 60s  # Set the idle timeout to 60 seconds
     upstream_connection_options:

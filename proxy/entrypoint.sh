@@ -83,5 +83,22 @@ fi
 envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
 envsubst < /envoy/lua.lua > /envoy/lua_subst.lua
 
-# Start Envoy with the substituted config
-exec envoy -c /envoy/envoy_subst.yaml --log-level ${ENVOY_LOG_LEVEL:-info}
+# Start Envoy with the substituted config.
+#
+# --drain-time-s 60: on SIGTERM, Envoy stops accepting new connections and
+#   gives in-flight requests (and TCP keepalive on idle HTTP) 60s to settle
+#   before exit. Default is 600s which is longer than ECS stopTimeout (max
+#   120s), so without this Envoy gets SIGKILL'd mid-drain.
+# --drain-strategy gradual: ramp connection-close probability over the
+#   drain window instead of immediate close on first response, smoothing
+#   reconnect pressure on the upstream.
+#
+# Pair with ECS task stopTimeout=120 (set in the api-key-proxy CDK proxy
+# stack) to give the 60s drain budget room to actually complete.
+# WS connections are closed by TCP FIN — clients see 1006 Abnormal Closure
+# and reconnect via SDK. Cleaner 1001 Going Away would need a WASM filter
+# to inject the close frame; tracked as follow-up.
+exec envoy -c /envoy/envoy_subst.yaml \
+  --log-level ${ENVOY_LOG_LEVEL:-info} \
+  --drain-time-s 60 \
+  --drain-strategy gradual

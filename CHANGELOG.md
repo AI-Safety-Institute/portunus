@@ -3,6 +3,29 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0]
+
+### Changed
+- Envoy WebSocket route now sets `max_stream_duration: 3300s` (55min) so
+  scale-out can actually rebalance long-lived WS connections. Without
+  this cap, a WS connection opened pre-scale-out stays pinned to its
+  original task forever (LEAST_REQUEST only fires at connect time). 55min
+  lets a 60min OpenAI Realtime session complete naturally while still
+  cycling pathologically long sessions. HTTP / SSE traffic is unaffected
+  (per-route). Close is TCP FIN → 1006 on the wire; SDK reconnect
+  handles it.
+- Envoy launched with `--drain-time-s 60 --drain-strategy gradual` for
+  graceful shutdown. Default drain window (600s) exceeds ECS
+  `stopTimeout` (max 120s), so without this Envoy gets SIGKILL'd
+  mid-drain. Companion akp follow-up sets `stopTimeout=120s` on the
+  envoy container and switches the ALB target group to
+  `least_outstanding_requests`.
+- Upstream provider cluster (`${TARGET_HOST}`): `lb_policy` changed
+  `ROUND_ROBIN` → `LEAST_REQUEST`. Decorative under the current
+  `LOGICAL_DNS` cluster type (one IP per connection), but aligned with
+  intent for any future `STRICT_DNS` migration. Portunus cluster
+  unchanged.
+
 ## [0.5.0]
 
 ### Added
