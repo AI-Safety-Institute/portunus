@@ -10,7 +10,7 @@ import datetime
 import logging
 import time
 
-import boto3
+import aiobotocore.session
 from aws_xray_sdk.core import xray_recorder
 
 # Import function for implementation
@@ -39,15 +39,16 @@ __all__ = [
 ]
 
 
-def get_current_session_arn() -> str:
+async def get_current_session_arn() -> str:
     """Get the ARN of the current session.
 
     Returns:
         str: The ARN of the current session.
     """
-    sts_client = boto3.client("sts")
-    response = sts_client.get_caller_identity()
-    return response["Arn"]
+    session = aiobotocore.session.AioSession()
+    async with session.create_client("sts") as sts_client:
+        response = await sts_client.get_caller_identity()
+        return response["Arn"]
 
 
 @xray_recorder.capture_async()  # type: ignore

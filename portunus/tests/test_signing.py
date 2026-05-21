@@ -7,9 +7,9 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import boto3
+import aiobotocore.session
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
@@ -57,28 +57,52 @@ def signing_key(anthropic_key_id: str, kms_key_arn: str) -> SigningKey:
     )
 
 
-@mock_aws
-def test_sign_request(signable_request: SignableRequest, signing_key: SigningKey):
-    # Create a KMS key using moto
-    kms = boto3.client("kms", region_name="eu-west-2")
-    key = kms.create_key(KeyUsage="SIGN_VERIFY", KeySpec="ECC_NIST_P256")
-    kms.create_alias(
-        AliasName="alias/test-key", TargetKeyId=key["KeyMetadata"]["KeyId"]
-    )
+@pytest.mark.asyncio
+async def test_sign_request(
+    moto_aiobotocore_patch,
+    signable_request: SignableRequest,
+    signing_key: SigningKey,
+):
+    """Smoke test the KMS signing flow against moto-backed aiobotocore.
 
-    # Create mock user credentials
-    user_credentials = AwsCredentials(
-        access_key_id="AKIAIOSFODNN7EXAMPLE",
-        secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        session_token="FakeSessionToken123",
-    )
+    ``mock_aws`` is used as a context manager rather than a decorator — the
+    decorator wraps the function as sync, which pytest-asyncio can't drive.
+    The ``moto_aiobotocore_patch`` fixture bridges moto's sync ``AWSResponse``
+    so aiobotocore's response handling is happy.
+    """
+    with mock_aws():
+        # Create a KMS key using moto via aiobotocore. We use a freshly
+        # constructed session here because moto only intercepts clients
+        # built inside ``mock_aws()`` — the module-level
+        # ``_AIOBOTO_SESSION`` in ``signing_service`` will fall through to
+        # the moto-patched HTTP layer once we're inside this block.
+        session = aiobotocore.session.AioSession()
+        async with session.create_client("kms", region_name="eu-west-2") as kms:
+            key = await kms.create_key(KeyUsage="SIGN_VERIFY", KeySpec="ECC_NIST_P256")
+            await kms.create_alias(
+                AliasName="alias/test-key", TargetKeyId=key["KeyMetadata"]["KeyId"]
+            )
 
-    headers = sign_request(
-        signable_request,
-        signing_key,
-        api_key="token123",
-        user_credentials=user_credentials,
-    )
+        user_credentials = AwsCredentials(
+            access_key_id="AKIAIOSFODNN7EXAMPLE",
+            secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            session_token="FakeSessionToken123",
+        )
+
+        # Force ``sign_request`` to use the same session that mock_aws
+        # patched. The module-level session was created at import time,
+        # before moto's HTTP hooks, so its connector points at the real
+        # KMS endpoint and sign requests 4xx under moto.
+        with patch(
+            "portunus.services.signing_service._AIOBOTO_SESSION",
+            session,
+        ):
+            headers = await sign_request(
+                signable_request,
+                signing_key,
+                api_key="token123",
+                user_credentials=user_credentials,
+            )
 
     # Check that headers are properly formatted
     assert "Signature" in headers
@@ -189,9 +213,16 @@ def _verify_signature(
         return False
 
 
-@patch("portunus.services.signing_service.boto3.client")
-def test_sign_request_with_anthropic_test_cases(
-    mock_boto3_client: MagicMock,
+# Patch ``AioSession.create_client`` at the import site: ``sign_request``
+# constructs its KMS client per call from the supplied user credentials,
+# so the public surface has no seam to inject a fake KMS client without
+# changing every call site. The patched ``create_client`` returns an
+# async-context-manager whose ``__aenter__`` yields a fake KMS client
+# with an awaitable ``sign()``.
+@patch("portunus.services.signing_service._AIOBOTO_SESSION.create_client")
+@pytest.mark.asyncio
+async def test_sign_request_with_anthropic_test_cases(
+    mock_create_client: MagicMock,
     anthropic_test_cases: list[dict[str, Any]],
 ) -> None:
     """Test sign_request using official Anthropic test cases with mocked KMS."""
@@ -249,10 +280,16 @@ def test_sign_request_with_anthropic_test_cases(
             test_keys["private_key_pem"], message_digest
         )
 
-        # Mock KMS client to return our local signature
+        # Mock KMS client to return our local signature. aiobotocore's
+        # ``create_client`` is an async-context-manager; ``__aenter__`` yields
+        # a client whose AWS methods are awaitable, so we use ``AsyncMock``
+        # for ``sign``.
         mock_kms = MagicMock()
-        mock_kms.sign.return_value = {"Signature": local_signature}
-        mock_boto3_client.return_value = mock_kms
+        mock_kms.sign = AsyncMock(return_value={"Signature": local_signature})
+        mock_client_ctx = MagicMock()
+        mock_client_ctx.__aenter__ = AsyncMock(return_value=mock_kms)
+        mock_client_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_create_client.return_value = mock_client_ctx
 
         # Create mock user credentials
         user_credentials = AwsCredentials(
@@ -261,7 +298,9 @@ def test_sign_request_with_anthropic_test_cases(
             session_token="FakeSessionToken123",
         )
 
-        headers = sign_request(signable_request, signing_key, api_key, user_credentials)
+        headers = await sign_request(
+            signable_request, signing_key, api_key, user_credentials
+        )
 
     # Verify deterministic signing: sign again with the same key and verify it
     # produces the same signature

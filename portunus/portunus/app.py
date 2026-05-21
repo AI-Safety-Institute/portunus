@@ -148,7 +148,7 @@ async def authorise(
                 signable_request_raw = body.get("signable_request", None)
                 signable_request = SignableRequest.model_validate(signable_request_raw)
                 if auth_result.signing_key is not None:
-                    signature_headers = sign_request(
+                    signature_headers = await sign_request(
                         signable_request,
                         auth_result.signing_key,
                         auth_result.api_key,

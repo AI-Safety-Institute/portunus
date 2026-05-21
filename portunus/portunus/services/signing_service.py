@@ -3,18 +3,15 @@ import hashlib
 import logging
 from collections import OrderedDict
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import Literal, TypedDict
 
-import boto3
+import aiobotocore.session
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, HttpUrl
 
 from portunus.config import config
 from portunus.exceptions import CredentialsError
 from portunus.models import AwsCredentials, SigningKey
-
-if TYPE_CHECKING:
-    from mypy_boto3_kms import KMSClient
 
 
 class SignableRequest(BaseModel):
@@ -45,6 +42,15 @@ SignatureHeaders = TypedDict(
 )
 
 
+# Module-level aiobotocore session.
+#
+# ``AioSession()`` lazily loads the botocore service model on first use
+# (~30-50ms) and caches it for the process lifetime. Reusing a single
+# session across signing calls amortises that cost across all callers.
+# The session itself does no I/O at construction.
+_AIOBOTO_SESSION = aiobotocore.session.AioSession()
+
+
 def _get_region_from_arn(arn: str) -> str:
     """Extract the region from an AWS ARN.
 
@@ -60,7 +66,7 @@ def _get_region_from_arn(arn: str) -> str:
     return parts[3]
 
 
-def sign_request(
+async def sign_request(
     req: SignableRequest,
     signing_key: SigningKey,
     api_key: str,
@@ -68,6 +74,10 @@ def sign_request(
 ) -> SignatureHeaders:
     """
     Sign an API request using AWS KMS according to RFC 9421 (HTTP Message Signatures).
+
+    KMS client is per-call because credentials are user-supplied STS, not the task role.
+    The module-level :data:`_AIOBOTO_SESSION` is reused so botocore's service-model
+    load is amortised across calls.
 
     Args:
         req: request details used to create the signature
@@ -91,16 +101,6 @@ def sign_request(
         req, signing_key, api_key, created, algorithm
     )
 
-    kms: KMSClient = boto3.client(
-        "kms",
-        region_name=_get_region_from_arn(signing_key.kms_key_arn),
-        aws_access_key_id=user_credentials.access_key_id,
-        aws_secret_access_key=user_credentials.secret_access_key,
-        aws_session_token=user_credentials.session_token,
-        # Add endpoint_url if configured (for LocalStack)
-        endpoint_url=config.aws.endpoint_url,
-    )
-
     # Error codes that indicate credential issues
     # https://docs.aws.amazon.com/kms/latest/APIReference/CommonErrors.html
     credential_error_codes = {
@@ -112,12 +112,21 @@ def sign_request(
     }
 
     try:
-        response = kms.sign(
-            KeyId=signing_key.kms_key_arn,
-            Message=hashlib.sha256(signature_base).digest(),
-            MessageType="DIGEST",
-            SigningAlgorithm="ECDSA_SHA_256",
-        )
+        async with _AIOBOTO_SESSION.create_client(
+            "kms",
+            region_name=_get_region_from_arn(signing_key.kms_key_arn),
+            aws_access_key_id=user_credentials.access_key_id,
+            aws_secret_access_key=user_credentials.secret_access_key,
+            aws_session_token=user_credentials.session_token,
+            # Add endpoint_url if configured (for LocalStack)
+            endpoint_url=config.aws.endpoint_url,
+        ) as kms:
+            response = await kms.sign(
+                KeyId=signing_key.kms_key_arn,
+                Message=hashlib.sha256(signature_base).digest(),
+                MessageType="DIGEST",
+                SigningAlgorithm="ECDSA_SHA_256",
+            )
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         logging.error(
