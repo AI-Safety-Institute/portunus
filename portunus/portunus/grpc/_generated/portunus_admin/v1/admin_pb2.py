@@ -24,18 +24,17 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dportunus_admin/v1/admin.proto\x12\x11portunus_admin.v1\"\x13\n\x11\x46lushCacheRequest\"H\n\x12\x46lushCacheResponse\x12\x18\n\x07success\x18\x01 \x01(\x08R\x07success\x12\x18\n\x07message\x18\x02 \x01(\tR\x07message2i\n\x0c\x41\x64minService\x12Y\n\nFlushCache\x12$.portunus_admin.v1.FlushCacheRequest\x1a%.portunus_admin.v1.FlushCacheResponseB\x84\x01\n\x15\x63om.portunus_admin.v1B\nAdminProtoP\x01\xa2\x02\x03PXX\xaa\x02\x10PortunusAdmin.V1\xca\x02\x10PortunusAdmin\\V1\xe2\x02\x1cPortunusAdmin\\V1\\GPBMetadata\xea\x02\x11PortunusAdmin::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dportunus_admin/v1/admin.proto\x12\x11portunus_admin.v1\"\x13\n\x11\x46lushCacheRequest\"6\n\x12\x46lushCacheResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2i\n\x0c\x41\x64minService\x12Y\n\nFlushCache\x12$.portunus_admin.v1.FlushCacheRequest\x1a%.portunus_admin.v1.FlushCacheResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'portunus_admin.v1.admin_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
-  _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'\n\025com.portunus_admin.v1B\nAdminProtoP\001\242\002\003PXX\252\002\020PortunusAdmin.V1\312\002\020PortunusAdmin\\V1\342\002\034PortunusAdmin\\V1\\GPBMetadata\352\002\021PortunusAdmin::V1'
+  DESCRIPTOR._loaded_options = None
   _globals['_FLUSHCACHEREQUEST']._serialized_start=52
   _globals['_FLUSHCACHEREQUEST']._serialized_end=71
   _globals['_FLUSHCACHERESPONSE']._serialized_start=73
-  _globals['_FLUSHCACHERESPONSE']._serialized_end=145
-  _globals['_ADMINSERVICE']._serialized_start=147
-  _globals['_ADMINSERVICE']._serialized_end=252
+  _globals['_FLUSHCACHERESPONSE']._serialized_end=127
+  _globals['_ADMINSERVICE']._serialized_start=129
+  _globals['_ADMINSERVICE']._serialized_end=234
 # @@protoc_insertion_point(module_scope)

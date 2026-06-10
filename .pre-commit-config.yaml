@@ -1,0 +1,89 @@
+# Pre-commit hooks for portunus (run via prek).
+# Install:     uv run prek install
+# Run all:     uv run prek run --all-files
+# CI runs the same hooks (see .github/workflows/lint.yml) so local and CI
+# enforcement never drift.
+
+default_language_version:
+  python: python3.12
+
+repos:
+  # ==========================================================================
+  # General hooks
+  # ==========================================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Generated protobuf gencode is machine-managed.
+        exclude: ^portunus/portunus/grpc/_generated/
+      - id: end-of-file-fixer
+        exclude: ^portunus/portunus/grpc/_generated/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: detect-private-key
+        # RFC 9421 signing test vectors ship a sample EC private key — it's a
+        # public test fixture from the spec, not a real secret.
+        exclude: ^data/anthropic_signing_test_cases\.json$
+      - id: check-case-conflict
+
+  # ==========================================================================
+  # uv lock file check
+  # ==========================================================================
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.9.26
+    hooks:
+      - id: uv-lock
+        name: uv-lock (check lockfile is up to date)
+        args: [--project, portunus]
+        files: ^portunus/(pyproject\.toml|uv\.lock)$
+
+  # ==========================================================================
+  # Ruff — Linting & Formatting (replaces the standalone lint/format CI jobs)
+  # ==========================================================================
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        name: ruff (lint)
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        name: ruff (format)
+
+  # ==========================================================================
+  # mypy — Type Checking (runs in the project venv so deps resolve)
+  # ==========================================================================
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (type check)
+        # Explicit --config-file: prek runs hooks from the repo root, where
+        # mypy wouldn't otherwise find portunus/pyproject.toml's [tool.mypy].
+        entry: uv run --project portunus mypy --config-file portunus/pyproject.toml portunus/portunus portunus/tests
+        language: system
+        types: [python]
+        pass_filenames: false
+
+  # ==========================================================================
+  # Proto — buf lint (style) + generated-stub freshness
+  # ==========================================================================
+  - repo: local
+    hooks:
+      - id: buf-lint
+        name: buf lint (proto style)
+        entry: buf lint
+        language: system
+        files: ^proto/.*\.proto$
+        pass_filenames: false
+      - id: proto-generate-check
+        name: proto stubs up to date
+        # Regenerate (via grpcio-tools — no Buf Schema Registry / network)
+        # and fail if the committed stubs under grpc/_generated drift.
+        entry: bash -c './scripts/gen_proto.sh && git diff --exit-code -- portunus/portunus/grpc/_generated'
+        language: system
+        files: ^(proto/.*\.proto|scripts/gen_proto\.sh)$
+        pass_filenames: false

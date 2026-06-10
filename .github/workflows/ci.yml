@@ -9,14 +9,10 @@ on:
       - main
 
 jobs:
-  lint:
+  # Lint, format, type-check and proto checks all run via the single prek
+  # hook set (.pre-commit-config.yaml) — the same one developers run locally.
+  checks:
     uses: ./.github/workflows/lint.yml
-    secrets: inherit
-  format:
-    uses: ./.github/workflows/format.yml
-    secrets: inherit
-  type-check:
-    uses: ./.github/workflows/type-check.yml
     secrets: inherit
   test:
     uses: ./.github/workflows/test.yml

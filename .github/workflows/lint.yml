@@ -1,14 +1,28 @@
-name: Lint using Ruff
+name: Checks (prek)
+
+# Single source of truth for lint / format / type-check / proto checks.
+# Runs the exact same prek hook set developers run locally
+# (.pre-commit-config.yaml), so local and CI enforcement never drift.
 
 on:
   workflow_call:
 
 jobs:
-  ruff:
+  prek:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Lint with Ruff
-        uses: chartboost/ruff-action@v1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install buf
+        uses: bufbuild/buf-action@v1
         with:
-          version: 0.6.0
+          setup_only: true
+
+      - name: Install project (dev deps incl. prek, ruff, mypy)
+        run: uv sync --project portunus
+
+      - name: Run prek hooks
+        run: uv run --project portunus prek run --all-files --show-diff-on-failure
