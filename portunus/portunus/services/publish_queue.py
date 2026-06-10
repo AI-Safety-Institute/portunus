@@ -1,9 +1,17 @@
-"""Bounded async publish queue with tiered drop policy.
+"""Bounded async publish queue with tiered drop policy + opportunistic batching.
 
 Header/trailer submits use ``submit_blocking`` (normal asyncio
 backpressure); high-volume body submits use ``submit_droppable`` and
 are bounded by ``body_capacity`` so a body flood cannot starve a
 blocking metadata submit.
+
+Workers drain the queue in stream-grouped chunks and ship each group via one
+Firehose ``PutRecordBatch`` (see ``batch_sender``). Batching is *opportunistic*:
+a worker takes one item (blocking), then drains only what's ALREADY queued
+(``get_nowait``) up to a cap — so the batch is a subset of the already-bounded
+queue and adds no new unbounded buffer. Under low load a worker ships a
+batch-of-one immediately; under burst it ships up to ``max_batch`` per call,
+cutting Firehose records/s without growing memory.
 """
 
 from __future__ import annotations
@@ -11,16 +19,27 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, List, Optional
 
 logger = logging.getLogger("api.access")
+
+# Ships one stream's worth of built records; returns the count Firehose did
+# NOT accept. Matches PublishService.put_record_batch.
+BatchSender = Callable[[str, List[bytes]], Awaitable[int]]
 
 
 @dataclass
 class PublishTask:
-    """A queued work item describing one publish call."""
+    """A queued audit record: a sync builder + a label for logging.
 
-    coro_fn: Callable[[], Awaitable[Any]]
+    ``build`` returns ``(stream_name, data_bytes)`` or ``None`` (stream not
+    configured). It runs on the worker, not the ext_proc stream path, so
+    serialization cost stays off the hot path. Carrying the builder (rather
+    than a ready coroutine) lets the worker group records by stream for
+    batching.
+    """
+
+    build: Callable[[], Optional[tuple[str, bytes]]]
     label: str  # for logging — e.g. "request_body", "ws_frame"
 
 
@@ -32,14 +51,23 @@ class BoundedPublishQueue:
         *,
         maxsize: int,
         num_workers: int,
+        batch_sender: BatchSender,
         body_capacity: Optional[int] = None,
+        max_batch: int = 500,
     ) -> None:
         if maxsize < 1:
             raise ValueError(f"maxsize must be >=1, got {maxsize}")
+        if max_batch < 1:
+            raise ValueError(f"max_batch must be >=1, got {max_batch}")
         self._queue: asyncio.Queue[Optional[PublishTask]] = asyncio.Queue(
             maxsize=maxsize
         )
         self._num_workers = num_workers
+        self._batch_sender = batch_sender
+        # Per-worker cap on how many already-queued items to drain into one
+        # batch. Bounded by Firehose's 500/call; the batch is a subset of the
+        # queue so this adds no memory beyond the existing maxsize cap.
+        self._max_batch = max_batch
         self._workers: list[asyncio.Task] = []
         self._dropped_total = 0
         self._published_total = 0
@@ -145,19 +173,74 @@ class BoundedPublishQueue:
             return False
 
     async def _worker_loop(self) -> None:
-        """Drain the queue until a sentinel arrives."""
+        """Drain the queue in stream-grouped batches until a sentinel arrives.
+
+        Blocks for one item, then opportunistically drains up to
+        ``max_batch`` more that are ALREADY queued (never awaits for more),
+        groups them by target stream, and ships one ``batch_sender`` call per
+        stream. A sentinel (None) seen mid-drain flushes the batch first, then
+        stops.
+        """
         while True:
-            task = await self._queue.get()
-            if task is None:
+            first = await self._queue.get()
+            if first is None:
                 self._queue.task_done()
                 return
+
+            tasks: list[PublishTask] = [first]
+            stop = False
+            # Greedily pull what's already buffered — no awaiting, so the
+            # batch can't grow beyond what the bounded queue already holds.
+            while len(tasks) < self._max_batch:
+                try:
+                    nxt = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if nxt is None:
+                    # Shutdown sentinel: stop after flushing this batch.
+                    self._queue.task_done()
+                    stop = True
+                    break
+                tasks.append(nxt)
+
             try:
-                await task.coro_fn()
-                self._published_total += 1
-            except Exception as e:
-                # Log type(e).__name__ only — boto/Firehose exceptions can
-                # echo the payload (relayed user content on the WS path).
-                logger.error("Publish failed for %s: %s", task.label, type(e).__name__)
-                self._failed_total += 1
+                await self._flush_batch(tasks)
             finally:
-                self._queue.task_done()
+                # One task_done per real task pulled (the sentinel above is
+                # already accounted for).
+                for _ in tasks:
+                    self._queue.task_done()
+
+            if stop:
+                return
+
+    async def _flush_batch(self, tasks: list[PublishTask]) -> None:
+        """Build, group-by-stream, and ship a batch of tasks."""
+        # Build records (sync serialization) and group by stream. A build
+        # returning None means the stream isn't configured — skip it.
+        by_stream: dict[str, list[bytes]] = {}
+        built = 0
+        for task in tasks:
+            try:
+                result = task.build()
+            except Exception as e:
+                logger.error("Build failed for %s: %s", task.label, type(e).__name__)
+                self._failed_total += 1
+                continue
+            if result is None:
+                continue
+            stream_name, data = result
+            by_stream.setdefault(stream_name, []).append(data)
+            built += 1
+
+        for stream_name, records in by_stream.items():
+            try:
+                failed = await self._batch_sender(stream_name, records)
+            except Exception as e:
+                # batch_sender is contracted not to raise, but guard anyway.
+                logger.error(
+                    "Batch send to %s raised: %s", stream_name, type(e).__name__
+                )
+                failed = len(records)
+            self._published_total += len(records) - failed
+            self._failed_total += failed

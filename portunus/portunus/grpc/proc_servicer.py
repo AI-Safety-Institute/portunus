@@ -236,7 +236,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             if principal_info is not None:
                 await self._queue.submit_blocking(
                     PublishTask(
-                        coro_fn=lambda: self._publish.publish_metadata(
+                        build=lambda: self._publish.build_metadata(
                             request_id=state.request_id,
                             timestamp=timestamp,
                             principal_info=principal_info,
@@ -250,7 +250,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         headers = _headers_to_dict(request.request_headers.headers)
         await self._queue.submit_blocking(
             PublishTask(
-                coro_fn=lambda: self._publish.publish_request_headers(
+                build=lambda: self._publish.build_request_headers(
                     request_id=state.request_id,
                     headers=headers,
                     timestamp=timestamp,
@@ -268,7 +268,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         trailers = _headers_to_dict(msg.trailers)
         await self._queue.submit_blocking(
             PublishTask(
-                coro_fn=lambda: self._publish.publish_request_trailers(
+                build=lambda: self._publish.build_request_trailers(
                     request_id=state.request_id,
                     trailers=trailers,
                     timestamp=timestamp,
@@ -302,7 +302,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
 
         await self._queue.submit_blocking(
             PublishTask(
-                coro_fn=lambda: self._publish.publish_response_headers(
+                build=lambda: self._publish.build_response_headers(
                     request_id=state.request_id,
                     headers=headers,
                     timestamp=timestamp,
@@ -320,7 +320,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         trailers = _headers_to_dict(msg.trailers)
         await self._queue.submit_blocking(
             PublishTask(
-                coro_fn=lambda: self._publish.publish_response_trailers(
+                build=lambda: self._publish.build_response_trailers(
                     request_id=state.request_id,
                     trailers=trailers,
                     timestamp=timestamp,
@@ -483,14 +483,14 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         truncated: bool = False,
     ) -> bool:
         """Submit one Firehose-sized body record and its drop sentinel."""
-        publish_method = (
-            self._publish.publish_request_body
+        build_method = (
+            self._publish.build_request_body
             if direction == Direction.REQUEST
-            else self._publish.publish_response_body
+            else self._publish.build_response_body
         )
         accepted = self._queue.submit_droppable(
             PublishTask(
-                coro_fn=lambda body_bytes=body_bytes, chunk_id=chunk_id: publish_method(  # type: ignore[misc]
+                build=lambda body_bytes=body_bytes, chunk_id=chunk_id: build_method(  # type: ignore[misc]
                     request_id=state.request_id,
                     body_bytes=body_bytes,
                     timestamp=timestamp,
@@ -519,7 +519,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             # + this log line remain as the fallback signal.
             self._queue.submit_droppable(
                 PublishTask(
-                    coro_fn=lambda chunk_id=chunk_id: publish_method(  # type: ignore[misc]
+                    build=lambda chunk_id=chunk_id: build_method(  # type: ignore[misc]
                         request_id=state.request_id,
                         body_bytes=b"",
                         timestamp=timestamp,
@@ -562,7 +562,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             truncated_server_frames=state.truncated_server_frames,
         )
         task = PublishTask(
-            coro_fn=lambda: self._publish.publish_ws_summary(record=record),
+            build=lambda: self._publish.build_ws_summary(record=record),
             label="ws_summary",
         )
         if droppable:

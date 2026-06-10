@@ -53,16 +53,24 @@ class _PublishedItem:
 
 
 class FakePublishService:
-    """Captures every publish-* call. ``items`` is the ordered record of.
+    """Captures every build_* call. ``items`` is the ordered record of.
 
     everything the servicer dispatched.
+
+    The real PublishService.build_* methods synchronously return
+    ``(stream_name, data_bytes)`` and the queue worker ships them via
+    ``put_record_batch``. Here build_* records a ``_PublishedItem`` (so the
+    existing ``of_kind`` assertions keep working) and returns a tuple whose
+    stream name *is* the kind — so the queue's stream-grouping is exercised
+    too. ``put_record_batch`` is a no-op (items already captured at build).
     """
 
     def __init__(self) -> None:
         self.items: list[_PublishedItem] = []
+        self.batches: list[tuple[str, int]] = []  # (stream, record_count)
 
-    def _capture(self, kind: str):
-        async def _impl(**kwargs):
+    def _builder(self, kind: str):
+        def _impl(**kwargs):
             self.items.append(
                 _PublishedItem(
                     kind=kind,
@@ -70,13 +78,19 @@ class FakePublishService:
                     payload={k: v for k, v in kwargs.items() if k != "request_id"},
                 )
             )
-            return True
+            # Stream name == kind so the worker groups per kind; the bytes
+            # are opaque to these tests (they assert on captured payloads).
+            return kind, b"{}\n"
 
         return _impl
 
+    async def put_record_batch(self, stream_name: str, records: list[bytes]) -> int:
+        self.batches.append((stream_name, len(records)))
+        return 0  # nothing failed
+
     def __getattr__(self, name: str):
-        if name.startswith("publish_"):
-            return self._capture(name[len("publish_") :])
+        if name.startswith("build_"):
+            return self._builder(name[len("build_") :])
         raise AttributeError(name)
 
     # Helpers ----------------------------------------------------------------
@@ -173,7 +187,11 @@ def _make_servicer(
     *, queue_maxsize: int = 10_000, publish: Optional[FakePublishService] = None
 ) -> tuple[PortunusProcessServicer, FakePublishService, BoundedPublishQueue]:
     publish = publish or FakePublishService()
-    queue = BoundedPublishQueue(maxsize=queue_maxsize, num_workers=2)
+    queue = BoundedPublishQueue(
+        maxsize=queue_maxsize,
+        num_workers=2,
+        batch_sender=publish.put_record_batch,
+    )
     servicer = PortunusProcessServicer(
         publish_service=publish,  # type: ignore[arg-type]
         publish_queue=queue,

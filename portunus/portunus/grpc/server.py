@@ -107,6 +107,10 @@ async def start_grpc_server(
         maxsize=10_000,
         body_capacity=9_000,
         num_workers=max(4, config.max_concurrent_streams // 64),
+        # Workers drain themselves in stream-grouped batches via Firehose
+        # PutRecordBatch — opportunistic batching keeps records/s well under
+        # the per-stream quota without an unbounded buffer.
+        batch_sender=publish_service.put_record_batch,
     )
     await publish_queue.start()
 

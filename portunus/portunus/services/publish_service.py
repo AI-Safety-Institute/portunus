@@ -1,13 +1,20 @@
-"""Publish service: ships audit records to Kinesis Firehose direct-PUT."""
+"""Publish service: ships audit records to Kinesis Firehose direct-PUT.
+
+Records are *built* (synchronously serialized to bytes) by the ``build_*``
+methods and shipped in batches by :meth:`put_record_batch` via Firehose
+``PutRecordBatch``. The bounded publish queue (see :mod:`publish_queue`) drains
+itself in stream-grouped chunks and calls ``put_record_batch`` — so batching is
+opportunistic (only what's already queued), keeping memory bounded by the queue
+cap while cutting records/s ~Nx vs one ``put_record`` per event.
+"""
 
 import base64
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
 
 from portunus.config import config
-from portunus.exceptions import ServiceError
 from portunus.models import (
     MetadataRecord,
     RequestBodyRecord,
@@ -23,57 +30,100 @@ from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
 
+# A built record ready for Firehose: the target delivery stream and the
+# newline-terminated JSON bytes.
+BuiltRecord = Tuple[str, bytes]
+
+# Firehose PutRecordBatch hard limits: 500 records and 4 MiB per call.
+_MAX_BATCH_RECORDS = 500
+_MAX_BATCH_BYTES = 4 * 1024 * 1024
+
+
+def _serialize(record_data: Dict[str, Any]) -> bytes:
+    """Serialize a record dict to newline-terminated JSON bytes."""
+    return orjson.dumps(record_data, default=str) + b"\n"
+
+
+def _chunk_records(records: List[bytes]) -> List[List[bytes]]:
+    """Split records into Firehose-legal batches (<=500 recs, <=4 MiB).
+
+    A single record over 4 MiB can't fit a batch; it's placed in its own
+    chunk and will be rejected by Firehose (counted as failed) rather than
+    silently dropped here — body records are already capped well under this
+    by ``FIREHOSE_MAX_RECORD_SIZE``.
+    """
+    chunks: List[List[bytes]] = []
+    current: List[bytes] = []
+    current_bytes = 0
+    for data in records:
+        size = len(data)
+        if current and (
+            len(current) >= _MAX_BATCH_RECORDS
+            or current_bytes + size > _MAX_BATCH_BYTES
+        ):
+            chunks.append(current)
+            current = []
+            current_bytes = 0
+        current.append(data)
+        current_bytes += size
+    if current:
+        chunks.append(current)
+    return chunks
+
 
 class PublishService:
-    """Service for publishing audit records to Kinesis Firehose direct-PUT."""
+    """Builds audit records and ships them to Firehose via PutRecordBatch."""
 
     def __init__(self, state_service: Optional[StateService] = None):
         """Initialize the PublishService."""
         self.state_service = state_service or StateService()
 
-    async def publish_to_firehose(
-        self,
-        stream_name: str,
-        record_data: Dict[str, Any],
-        partition_key: str,
-    ) -> bool:
-        """Fire-and-forget single ``PutRecord`` on a Firehose delivery stream.
+    async def put_record_batch(self, stream_name: str, records: List[bytes]) -> int:
+        """Ship ``records`` to ``stream_name`` via Firehose ``PutRecordBatch``.
 
-        ``partition_key`` is unused by Firehose (no shards) but kept for
-        log correlation with the caller's request_id.
+        Splits into Firehose-legal chunks (<=500 records / <=4 MiB) and
+        retries nothing — audit is fire-and-forget under
+        ``observability_mode``. Returns the number of records Firehose did
+        NOT accept (transport error or per-record ``PutRecordBatch`` failure),
+        so the caller can surface delivery loss. Never raises.
         """
-        if not stream_name:
-            return False
+        if not stream_name or not records:
+            return 0
 
         client = await self.state_service.get_firehose_client()
-        try:
-            data_bytes = orjson.dumps(record_data, default=str) + b"\n"
-            await client.put_record(
-                DeliveryStreamName=stream_name,
-                Record={"Data": data_bytes},
-            )
-            return True
-        except Exception as e:
-            # Log type(e).__name__ only — botocore exceptions can carry
-            # payload fragments (customer body content) in their messages.
-            logger.error(
-                "put_record on %s failed: %s",
-                stream_name,
-                type(e).__name__,
-            )
-            raise ServiceError(f"Failed to publish to Firehose: {type(e).__name__}")
+        failed = 0
+        for chunk in _chunk_records(records):
+            try:
+                resp = await client.put_record_batch(
+                    DeliveryStreamName=stream_name,
+                    Records=[{"Data": data} for data in chunk],
+                )
+                # PutRecordBatch is partial-success: FailedPutCount records
+                # were rejected (throttling etc.) while others landed.
+                failed += int(resp.get("FailedPutCount", 0) or 0)
+            except Exception as e:
+                # Log type(e).__name__ only — botocore exceptions can carry
+                # payload fragments (customer body content) in their messages.
+                logger.error(
+                    "put_record_batch on %s failed: %s (%d records)",
+                    stream_name,
+                    type(e).__name__,
+                    len(chunk),
+                )
+                failed += len(chunk)
+        return failed
 
-    async def publish_metadata(
+    def build_metadata(
         self,
         request_id: str,
         timestamp: str,
         principal_info: Dict[str, Any],
         secret_arn: Optional[str] = None,
-    ) -> bool:
-        """Publish the per-request principal/secret metadata record."""
+    ) -> Optional[BuiltRecord]:
+        """Build the per-request principal/secret metadata record."""
         if not config.firehose.metadata_stream_name:
             logger.warning("Metadata stream not configured, skipping publish")
-            return False
+            return None
 
         record = MetadataRecord(
             request_id=request_id,
@@ -86,21 +136,18 @@ class PublishService:
             session_name=principal_info.get("session_name"),
             secret_arn=secret_arn,
         )
+        return config.firehose.metadata_stream_name, _serialize(record.to_dict())
 
-        return await self.publish_to_firehose(
-            config.firehose.metadata_stream_name, record.to_dict(), request_id
-        )
-
-    async def publish_request_headers(
+    def build_request_headers(
         self,
         request_id: str,
         headers: Dict[str, str],
         timestamp: str,
-    ) -> bool:
-        """Publish a request-headers record."""
+    ) -> Optional[BuiltRecord]:
+        """Build a request-headers record."""
         if not config.firehose.request_headers_stream_name:
             logger.warning("Request headers stream not configured, skipping publish")
-            return False
+            return None
 
         record = RequestHeadersRecord(
             request_id=request_id,
@@ -108,12 +155,9 @@ class PublishService:
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
         )
+        return config.firehose.request_headers_stream_name, _serialize(record.to_dict())
 
-        return await self.publish_to_firehose(
-            config.firehose.request_headers_stream_name, record.to_dict(), request_id
-        )
-
-    async def publish_request_body(
+    def build_request_body(
         self,
         request_id: str,
         body_bytes: bytes,
@@ -123,8 +167,8 @@ class PublishService:
         *,
         dropped: bool = False,
         truncated: bool = False,
-    ) -> bool:
-        """Publish one request-body chunk record.
+    ) -> Optional[BuiltRecord]:
+        """Build one request-body chunk record.
 
         ``dropped=True`` is a sentinel marker emitted in place of a chunk
         the publish queue could not accept; ``body_bytes`` is empty in
@@ -133,10 +177,9 @@ class PublishService:
         """
         if not config.firehose.request_body_stream_name:
             logger.warning("Request body stream not configured, skipping publish")
-            return False
+            return None
 
         body_b64 = base64.b64encode(body_bytes).decode("ascii")
-
         record = RequestBodyRecord(
             request_id=request_id,
             body=body_b64,
@@ -148,21 +191,18 @@ class PublishService:
             dropped=dropped,
             truncated=truncated,
         )
+        return config.firehose.request_body_stream_name, _serialize(record.to_dict())
 
-        return await self.publish_to_firehose(
-            config.firehose.request_body_stream_name, record.to_dict(), request_id
-        )
-
-    async def publish_request_trailers(
+    def build_request_trailers(
         self,
         request_id: str,
         trailers: Dict[str, str],
         timestamp: str,
-    ) -> bool:
-        """Publish a request-trailers record."""
+    ) -> Optional[BuiltRecord]:
+        """Build a request-trailers record."""
         if not config.firehose.request_trailers_stream_name:
             logger.warning("Request trailers stream not configured, skipping publish")
-            return False
+            return None
 
         record = RequestTrailersRecord(
             request_id=request_id,
@@ -170,21 +210,20 @@ class PublishService:
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
         )
-
-        return await self.publish_to_firehose(
-            config.firehose.request_trailers_stream_name, record.to_dict(), request_id
+        return config.firehose.request_trailers_stream_name, _serialize(
+            record.to_dict()
         )
 
-    async def publish_response_headers(
+    def build_response_headers(
         self,
         request_id: str,
         headers: Dict[str, str],
         timestamp: str,
-    ) -> bool:
-        """Publish a response-headers record."""
+    ) -> Optional[BuiltRecord]:
+        """Build a response-headers record."""
         if not config.firehose.response_headers_stream_name:
             logger.warning("Response headers stream not configured, skipping publish")
-            return False
+            return None
 
         record = ResponseHeadersRecord(
             request_id=request_id,
@@ -192,12 +231,11 @@ class PublishService:
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
         )
-
-        return await self.publish_to_firehose(
-            config.firehose.response_headers_stream_name, record.to_dict(), request_id
+        return config.firehose.response_headers_stream_name, _serialize(
+            record.to_dict()
         )
 
-    async def publish_response_body(
+    def build_response_body(
         self,
         request_id: str,
         body_bytes: bytes,
@@ -207,18 +245,17 @@ class PublishService:
         *,
         dropped: bool = False,
         truncated: bool = False,
-    ) -> bool:
-        """Publish one response-body chunk record.
+    ) -> Optional[BuiltRecord]:
+        """Build one response-body chunk record.
 
         ``dropped`` / ``truncated`` semantics mirror
-        :meth:`publish_request_body`.
+        :meth:`build_request_body`.
         """
         if not config.firehose.response_body_stream_name:
             logger.warning("Response body stream not configured, skipping publish")
-            return False
+            return None
 
         body_b64 = base64.b64encode(body_bytes).decode("ascii")
-
         record = ResponseBodyRecord(
             request_id=request_id,
             body=body_b64,
@@ -230,21 +267,18 @@ class PublishService:
             dropped=dropped,
             truncated=truncated,
         )
+        return config.firehose.response_body_stream_name, _serialize(record.to_dict())
 
-        return await self.publish_to_firehose(
-            config.firehose.response_body_stream_name, record.to_dict(), request_id
-        )
-
-    async def publish_response_trailers(
+    def build_response_trailers(
         self,
         request_id: str,
         trailers: Dict[str, str],
         timestamp: str,
-    ) -> bool:
-        """Publish a response-trailers record."""
+    ) -> Optional[BuiltRecord]:
+        """Build a response-trailers record."""
         if not config.firehose.response_trailers_stream_name:
             logger.warning("Response trailers stream not configured, skipping publish")
-            return False
+            return None
 
         record = ResponseTrailersRecord(
             request_id=request_id,
@@ -252,22 +286,17 @@ class PublishService:
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
         )
-
-        return await self.publish_to_firehose(
-            config.firehose.response_trailers_stream_name, record.to_dict(), request_id
+        return config.firehose.response_trailers_stream_name, _serialize(
+            record.to_dict()
         )
 
-    async def publish_ws_summary(
+    def build_ws_summary(
         self,
         record: WSSummaryRecord,
-    ) -> bool:
-        """Publish a per-connection WebSocket summary record."""
+    ) -> Optional[BuiltRecord]:
+        """Build a per-connection WebSocket summary record."""
         if not config.firehose.ws_summary_stream_name:
             logger.warning("WS summary stream not configured, skipping publish")
-            return False
+            return None
 
-        return await self.publish_to_firehose(
-            config.firehose.ws_summary_stream_name,
-            record.to_dict(),
-            record.request_id,
-        )
+        return config.firehose.ws_summary_stream_name, _serialize(record.to_dict())

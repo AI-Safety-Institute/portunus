@@ -14,7 +14,14 @@ class _FakeAuthService:
 
 
 class _FakePublishService:
-    """Minimal stand-in — ``start_grpc_server`` only stores the reference."""
+    """Minimal stand-in for PublishService.
+
+    ``start_grpc_server`` wires ``put_record_batch`` as the queue's
+    batch_sender, so it must exist.
+    """
+
+    async def put_record_batch(self, stream_name: str, records: list[bytes]) -> int:
+        return 0
 
 
 class _FakeCacheService:
