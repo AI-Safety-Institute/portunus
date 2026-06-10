@@ -604,6 +604,16 @@ async def test_auth_pass_for_signing_tenant_sets_signing_required_metadata():
     assert "x-portunus-signing-required" not in list(
         response.ok_response.headers_to_remove
     )
+    # SECURITY: client-forged signature headers MUST be stripped on the auth
+    # pass so a client cannot smuggle a Signature/Content-Digest to the
+    # upstream. ext_authz #1's remove runs before ext_authz #2's add, so the
+    # legitimate signing-pass values survive while forged ones are dropped.
+    removed = {h.lower() for h in response.ok_response.headers_to_remove}
+    assert {
+        "content-digest",
+        "signature",
+        "signature-input",
+    } <= removed, f"forged signature headers not stripped on auth pass: {removed}"
 
 
 @pytest.mark.asyncio
@@ -774,10 +784,13 @@ async def test_signing_pass_computes_digest_and_returns_signature_headers():
 
 @pytest.mark.asyncio
 async def test_signing_pass_fails_closed_if_auth_no_longer_has_signing_key():
-    """If ext_authz #2 fires but the auth result lacks ``signing_key`` (e.g..
+    """If ext_authz #2 fires but the auth result lacks ``signing_key``, fail closed.
 
-    the secret was edited between passes), fail closed rather than
-    silently forwarding without a signature.
+    Two ways to reach here: the secret was edited between passes, OR a
+    non-signing tenant forged ``x-portunus-signing-required: true`` to trick
+    the composite filter into dispatching the signing pass. Either way the
+    signing pass must fail closed (500) and — critically — must NOT invoke
+    KMS.Sign, so a forged flag can never extract a signature. (Review M-1.)
     """
     auth = FakeAuthService(
         result=AuthResult(
@@ -786,12 +799,15 @@ async def test_signing_pass_fails_closed_if_auth_no_longer_has_signing_key():
             principal_info=_principal_info(),
         )
     )
-    servicer, _auth, _sign = _make_servicer(auth=auth)
+    servicer, _auth, sign = _make_servicer(auth=auth)
 
     response = await servicer.Check(_check_request(body=b"{}"), _signing_ctx())
 
     assert response.HasField("denied_response"), response
     assert response.denied_response.status.code == http_status_pb2.InternalServerError
+    # SECURITY: KMS.Sign must NOT be called for a tenant without a signing_key,
+    # even though the signing pass was dispatched (forged-flag defence).
+    assert sign.calls == [], "signing pass must not invoke KMS without a signing_key"
 
 
 @pytest.mark.asyncio

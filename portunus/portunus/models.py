@@ -572,6 +572,10 @@ class RequestBodyRecord:
     published_at: str
     dropped: bool = False
     truncated: bool = False
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS
+    # frames by (request_id, frame_index) to reassemble per-frame and to
+    # disambiguate otherwise-identical frames.
+    frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Firehose publishing."""
@@ -586,6 +590,7 @@ class RequestBodyRecord:
             "published_at": self.published_at,
             "dropped": self.dropped,
             "truncated": self.truncated,
+            "frame_index": self.frame_index,
         }
 
     @classmethod
@@ -602,6 +607,7 @@ class RequestBodyRecord:
             {"name": "published_at", "type": "string"},
             {"name": "dropped", "type": "boolean"},
             {"name": "truncated", "type": "boolean"},
+            {"name": "frame_index", "type": "bigint"},
         ]
 
 
@@ -706,6 +712,10 @@ class ResponseBodyRecord:
     published_at: str
     dropped: bool = False
     truncated: bool = False
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS
+    # frames by (request_id, frame_index) to reassemble per-frame and to
+    # disambiguate otherwise-identical frames.
+    frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Firehose publishing."""
@@ -720,6 +730,7 @@ class ResponseBodyRecord:
             "published_at": self.published_at,
             "dropped": self.dropped,
             "truncated": self.truncated,
+            "frame_index": self.frame_index,
         }
 
     @classmethod
@@ -736,6 +747,7 @@ class ResponseBodyRecord:
             {"name": "published_at", "type": "string"},
             {"name": "dropped", "type": "boolean"},
             {"name": "truncated", "type": "boolean"},
+            {"name": "frame_index", "type": "bigint"},
         ]
 
 

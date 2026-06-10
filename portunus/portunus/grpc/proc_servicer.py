@@ -83,6 +83,14 @@ class _StreamState:
     # groups by request_id and concatenates body bytes ordered by chunk_id.
     request_chunk_id: int = 0
     response_chunk_id: int = 0
+    # Per-direction WS frame ordinal. chunk_id is monotonic across the whole
+    # direction (a single frame may span several body-record chunks), so it
+    # can't identify a frame; frame_index does. Downstream Glue keys WS frames
+    # by (request_id, frame_index) to reassemble per-frame and to disambiguate
+    # otherwise-identical frames (same body + timestamp) that would collide on
+    # a body-hash row key. HTTP body records leave frame_index None.
+    request_frame_index: int = 0
+    response_frame_index: int = 0
     client_frame_counts: dict[str, int] = field(default_factory=dict)
     server_frame_counts: dict[str, int] = field(default_factory=dict)
     # Audit-integrity counters: incremented when a frame is dropped by the
@@ -442,6 +450,9 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             else:
                 state.truncated_server_frames += 1
 
+        # One frame_index per logical WS frame (this whole call), even if the
+        # frame's payload is split across multiple body-record chunks below.
+        frame_index = self._next_frame_index(state, frame.direction)
         drop_recorded = False
         for body_chunk in chunk_body_data(frame.payload) or [b""]:
             chunk_id = self._next_chunk_id(state, frame.direction)
@@ -453,6 +464,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 chunk_id=chunk_id,
                 label=f"ws_frame_{frame.direction.value}_{frame.opcode}",
                 truncated=frame.truncated,
+                frame_index=frame_index,
             )
             if not accepted and not drop_recorded:
                 if frame.direction == Direction.REQUEST:
@@ -471,6 +483,16 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         state.response_chunk_id += 1
         return chunk_id
 
+    def _next_frame_index(self, state: _StreamState, direction: Direction) -> int:
+        """Allocate the next WS frame_index for one direction."""
+        if direction == Direction.REQUEST:
+            frame_index = state.request_frame_index
+            state.request_frame_index += 1
+            return frame_index
+        frame_index = state.response_frame_index
+        state.response_frame_index += 1
+        return frame_index
+
     def _submit_body_record(
         self,
         *,
@@ -481,8 +503,13 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         chunk_id: int,
         label: str,
         truncated: bool = False,
+        frame_index: Optional[int] = None,
     ) -> bool:
-        """Submit one Firehose-sized body record and its drop sentinel."""
+        """Submit one Firehose-sized body record and its drop sentinel.
+
+        ``frame_index`` is set for WS frames (per-frame ordinal, shared by all
+        chunks of one frame) and None for HTTP bodies.
+        """
         build_method = (
             self._publish.build_request_body
             if direction == Direction.REQUEST
@@ -497,6 +524,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     chunk_id=chunk_id,
                     num_chunks=0,
                     truncated=truncated,
+                    frame_index=frame_index,
                 ),
                 label=label,
             )
@@ -526,6 +554,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                         chunk_id=chunk_id,
                         num_chunks=0,
                         dropped=True,
+                        frame_index=frame_index,
                     ),
                     label=f"{label}_drop_sentinel",
                 )

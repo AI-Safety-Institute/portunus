@@ -109,8 +109,10 @@ class FirehoseConfig(BaseModel):
         description="Firehose stream for one summary record per WebSocket connection",
     )
     max_record_size: int = Field(
-        default=900000,
-        description="Maximum size in bytes for single Firehose record (900KB)",
+        # Must match the env-loader default in get_config() (1_000_000) so the
+        # model default and the runtime path agree.
+        default=1_000_000,
+        description="Maximum size in bytes for a single Firehose record (1MB)",
         ge=1000,
     )
 

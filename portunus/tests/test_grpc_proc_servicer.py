@@ -984,6 +984,71 @@ async def test_ws_tagged_stream_emits_frame_and_summary_records():
 
 
 @pytest.mark.asyncio
+async def test_ws_frames_carry_monotonic_per_direction_frame_index():
+    """Each WS frame gets a distinct per-direction frame_index.
+
+    Downstream Glue keys WS frames by (request_id, frame_index); without a
+    distinct index, identical same-timestamp frames collide on the body-hash
+    row key and get dropped by dedup (the H1 undercount). Assert successive
+    frames in one direction get 0, 1, ... and HTTP bodies leave it None.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-fi-1",
+                ),
+                _http_headers_message(headers={}, is_request=False),
+                # Two server frames with IDENTICAL payloads — the exact case
+                # that would collide without frame_index.
+                _http_body_message(body=_ws_frame(b"dup"), is_request=False),
+                _http_body_message(body=_ws_frame(b"dup"), is_request=False),
+            ]
+        )
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        resp = publish.of_kind("response_body")
+        frame_indices = [item.payload.get("frame_index") for item in resp]
+        # Two identical-payload frames must still get distinct, monotonic
+        # per-direction frame_index values (0, 1).
+        assert frame_indices == [0, 1], frame_indices
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_http_body_records_have_no_frame_index():
+    """HTTP (non-WS) body records leave frame_index None."""
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={}, is_request=False, request_id="http-1"
+                ),
+                _http_body_message(body=b"plain-http-body", is_request=False),
+            ]
+        )
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        resp = publish.of_kind("response_body")
+        assert resp, "expected a response_body record"
+        assert all(item.payload.get("frame_index") is None for item in resp), resp
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
 async def test_ws_summary_uses_blocking_submit_on_normal_close():
     """The summary is the backstop for dropped frame counters."""
     servicer, publish, queue = _make_servicer()

@@ -81,11 +81,15 @@ class PublishService:
     async def put_record_batch(self, stream_name: str, records: List[bytes]) -> int:
         """Ship ``records`` to ``stream_name`` via Firehose ``PutRecordBatch``.
 
-        Splits into Firehose-legal chunks (<=500 records / <=4 MiB) and
-        retries nothing — audit is fire-and-forget under
-        ``observability_mode``. Returns the number of records Firehose did
-        NOT accept (transport error or per-record ``PutRecordBatch`` failure),
-        so the caller can surface delivery loss. Never raises.
+        Splits into Firehose-legal chunks (<=500 records / <=4 MiB). On a
+        partial failure (``FailedPutCount > 0``) the failed *subset* is
+        identified via ``RequestResponses[].ErrorCode`` and retried once
+        (partial failures are usually transient throttling — AWS's
+        recommended pattern), since audit is fire-and-forget with no other
+        retry. Any records still failing after the retry are logged with
+        their Firehose error codes (operational metadata, payload-free) so
+        the loss is observable rather than a silent chunk-id gap. Returns the
+        count of records Firehose ultimately did NOT accept. Never raises.
         """
         if not stream_name or not records:
             return 0
@@ -93,25 +97,75 @@ class PublishService:
         client = await self.state_service.get_firehose_client()
         failed = 0
         for chunk in _chunk_records(records):
+            failed += await self._put_chunk_with_retry(client, stream_name, chunk)
+        return failed
+
+    async def _put_chunk_with_retry(
+        self, client: Any, stream_name: str, chunk: List[bytes]
+    ) -> int:
+        """PutRecordBatch one legal-sized chunk; retry the failed subset once.
+
+        Returns the number of records not accepted after the retry.
+        """
+        records = chunk
+        last_error_codes: Dict[str, int] = {}
+        for attempt in (1, 2):
             try:
                 resp = await client.put_record_batch(
                     DeliveryStreamName=stream_name,
-                    Records=[{"Data": data} for data in chunk],
+                    Records=[{"Data": data} for data in records],
                 )
-                # PutRecordBatch is partial-success: FailedPutCount records
-                # were rejected (throttling etc.) while others landed.
-                failed += int(resp.get("FailedPutCount", 0) or 0)
             except Exception as e:
                 # Log type(e).__name__ only — botocore exceptions can carry
                 # payload fragments (customer body content) in their messages.
                 logger.error(
-                    "put_record_batch on %s failed: %s (%d records)",
+                    "put_record_batch on %s raised: %s (%d records, attempt %d)",
                     stream_name,
                     type(e).__name__,
-                    len(chunk),
+                    len(records),
+                    attempt,
                 )
-                failed += len(chunk)
-        return failed
+                return len(records)
+
+            failed_count = int(resp.get("FailedPutCount", 0) or 0)
+            if failed_count == 0:
+                return 0
+
+            # Identify the failed records by position so we retry only those.
+            responses = resp.get("RequestResponses", [])
+            retry: List[bytes] = []
+            last_error_codes = {}
+            for data, r in zip(records, responses):
+                code = r.get("ErrorCode")
+                if code:
+                    retry.append(data)
+                    last_error_codes[code] = last_error_codes.get(code, 0) + 1
+            # Fallback: if responses are missing/misaligned, treat the tail as
+            # failed (Firehose returns failures without a stable order only on
+            # malformed responses; never silently under-count).
+            if not retry:
+                retry = records[len(records) - failed_count :]
+
+            if attempt == 1:
+                logger.warning(
+                    "put_record_batch on %s: %d/%d failed (%s); retrying subset",
+                    stream_name,
+                    len(retry),
+                    len(records),
+                    last_error_codes,
+                )
+                records = retry
+                continue
+
+            # Second attempt still failed — give up; surface the loss.
+            logger.error(
+                "put_record_batch on %s: %d records unrecoverable after retry (%s)",
+                stream_name,
+                len(retry),
+                last_error_codes,
+            )
+            return len(retry)
+        return 0
 
     def build_metadata(
         self,
@@ -167,13 +221,16 @@ class PublishService:
         *,
         dropped: bool = False,
         truncated: bool = False,
+        frame_index: Optional[int] = None,
     ) -> Optional[BuiltRecord]:
         """Build one request-body chunk record.
 
         ``dropped=True`` is a sentinel marker emitted in place of a chunk
         the publish queue could not accept; ``body_bytes`` is empty in
         that case. ``truncated=True`` marks a chunk whose payload was
-        capped (currently only the WS deflate path).
+        capped (currently only the WS deflate path). ``frame_index`` is the
+        per-direction WS frame ordinal (None for HTTP); Glue keys WS frames
+        by (request_id, frame_index).
         """
         if not config.firehose.request_body_stream_name:
             logger.warning("Request body stream not configured, skipping publish")
@@ -190,6 +247,7 @@ class PublishService:
             published_at=generate_iso_timestamp(),
             dropped=dropped,
             truncated=truncated,
+            frame_index=frame_index,
         )
         return config.firehose.request_body_stream_name, _serialize(record.to_dict())
 
@@ -245,10 +303,11 @@ class PublishService:
         *,
         dropped: bool = False,
         truncated: bool = False,
+        frame_index: Optional[int] = None,
     ) -> Optional[BuiltRecord]:
         """Build one response-body chunk record.
 
-        ``dropped`` / ``truncated`` semantics mirror
+        ``dropped`` / ``truncated`` / ``frame_index`` semantics mirror
         :meth:`build_request_body`.
         """
         if not config.firehose.response_body_stream_name:
@@ -266,6 +325,7 @@ class PublishService:
             published_at=generate_iso_timestamp(),
             dropped=dropped,
             truncated=truncated,
+            frame_index=frame_index,
         )
         return config.firehose.response_body_stream_name, _serialize(record.to_dict())
 

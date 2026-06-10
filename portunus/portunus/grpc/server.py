@@ -216,10 +216,12 @@ async def stop_grpc_server(
         pass
 
     logger.info(
-        "gRPC drain complete: published=%d queue_dropped=%d firehose_failed=%d",
+        "gRPC drain complete: published=%d queue_dropped=%d "
+        "delivery_failed=%d build_failed=%d",
         runtime.publish_queue.published_total,
         runtime.publish_queue.dropped_total,
-        runtime.publish_queue.failed_total,
+        runtime.publish_queue.delivery_failed_total,
+        runtime.publish_queue.build_failed_total,
     )
 
 

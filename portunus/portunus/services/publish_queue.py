@@ -71,7 +71,14 @@ class BoundedPublishQueue:
         self._workers: list[asyncio.Task] = []
         self._dropped_total = 0
         self._published_total = 0
-        self._failed_total = 0
+        # Two distinct failure modes with opposite remediations:
+        #   _build_failed_total   — task.build() raised (a local serialization /
+        #                            programming bug); fix the code.
+        #   _delivery_failed_total — Firehose rejected/errored the record after
+        #                            it was built (throttling, AWS outage); a
+        #                            capacity/retry concern.
+        self._build_failed_total = 0
+        self._delivery_failed_total = 0
 
         # Default 90/10 split: bodies cap at 90% of maxsize, reserving
         # 10% headroom for blocking metadata submits.
@@ -92,14 +99,24 @@ class BoundedPublishQueue:
         return self._published_total
 
     @property
-    def failed_total(self) -> int:
-        """Tasks whose ``coro_fn`` raised — Firehose API errors etc.
+    def build_failed_total(self) -> int:
+        """Records whose ``build()`` raised (local serialization/programming bug)."""
+        return self._build_failed_total
 
-        Distinct from ``dropped_total`` (queue-pressure drops before the
-        task ever ran). Failures here are records portunus accepted into
-        the queue but couldn't deliver to Firehose.
+    @property
+    def delivery_failed_total(self) -> int:
+        """Records built but rejected/errored by Firehose (throttling, outage)."""
+        return self._delivery_failed_total
+
+    @property
+    def failed_total(self) -> int:
+        """All failures (build + delivery), for back-compat with existing logs.
+
+        Distinct from ``dropped_total`` (queue-pressure drops before the record
+        was ever built). Prefer ``build_failed_total`` / ``delivery_failed_total``
+        when you need to tell a code bug from a Firehose capacity problem.
         """
-        return self._failed_total
+        return self._build_failed_total + self._delivery_failed_total
 
     def qsize(self) -> int:
         return self._queue.qsize()
@@ -219,19 +236,17 @@ class BoundedPublishQueue:
         # Build records (sync serialization) and group by stream. A build
         # returning None means the stream isn't configured — skip it.
         by_stream: dict[str, list[bytes]] = {}
-        built = 0
         for task in tasks:
             try:
                 result = task.build()
             except Exception as e:
                 logger.error("Build failed for %s: %s", task.label, type(e).__name__)
-                self._failed_total += 1
+                self._build_failed_total += 1
                 continue
             if result is None:
                 continue
             stream_name, data = result
             by_stream.setdefault(stream_name, []).append(data)
-            built += 1
 
         for stream_name, records in by_stream.items():
             try:
@@ -243,4 +258,4 @@ class BoundedPublishQueue:
                 )
                 failed = len(records)
             self._published_total += len(records) - failed
-            self._failed_total += failed
+            self._delivery_failed_total += failed
