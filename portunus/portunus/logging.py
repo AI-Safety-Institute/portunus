@@ -9,18 +9,9 @@ and contextual information across all log messages.
 import json
 import logging
 import sys
-import time
-
-from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
 
 from portunus.config import config
-from portunus.services.xray_service import (
-    XRayContext,
-    get_trace_id,
-    parse_trace_header,
-)
+from portunus.services.xray_service import get_trace_id
 
 logger = logging.getLogger("api.access")
 
@@ -89,130 +80,6 @@ class StructuredLogFormatter(logging.Formatter):
                 log_data[key] = value
 
         return json.dumps(log_data)
-
-
-class LoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware that adds logging and set up x-ray context.
-
-    This middleware captures request information, sets context variables,
-    and logs request and response details with performance metrics.
-    """
-
-    def __init__(self, app: ASGIApp):
-        """Initialize the middleware.
-
-        Args:
-            app: The ASGI application
-        """
-        super().__init__(app)
-
-    async def dispatch(self, request: Request, call_next):
-        """Process the request and log details.
-
-        Args:
-            request: The incoming request
-            call_next: The next middleware or route handler
-
-        Returns:
-            The response from the next middleware or route handler
-        """
-        start_time = time.time()
-
-        # Extract and set trace ID from the request header
-        aws_trace_header = request.headers.get("x-amzn-trace-id", "")
-        trace_id, parent_id, sampled = parse_trace_header(aws_trace_header)
-        app_title = request.app.title.replace(" ", "_").lower()
-
-        # X-Ray segment name suffix: first path component only, so request
-        # IDs / dynamic path segments don't blow out the cardinality.
-        if len(request.url.path.split("/")) > 1:
-            safe_path = request.url.path.split("/")[1]
-        else:
-            safe_path = ""
-
-        segment_name = f"{app_title}/{safe_path}"
-
-        if not trace_id:
-            trace_id = "No-Trace-Id"
-            sampled = False
-
-        logger.info(
-            f"Entering x-ray context: trace_id={trace_id}, "
-            f"parent_id={parent_id}, sampled={sampled}, segment_name={segment_name}"
-        )
-
-        async with XRayContext(
-            trace_id=trace_id,
-            segment_name=segment_name,
-            parent_id=parent_id,
-            sampled=sampled,
-        ):
-            # Get client IP
-            if "x-forwarded-for" in request.headers:
-                client_ip = request.headers["x-forwarded-for"].split(",")[0]
-            else:
-                client_ip = request.client.host if request.client else "unknown"
-
-            # Add standard request metadata to the context
-            request_metadata = {
-                "client_ip": client_ip,
-                "method": request.method,
-                "path": request.url.path,
-                "user_agent": request.headers.get("user-agent", "-"),
-            }
-
-            # Process the request and get the response
-            try:
-                # Log the incoming request
-                logger.info(
-                    f"Request started: {request.method} {request.url.path}",
-                    extra=request_metadata,
-                )
-
-                # Call the next middleware or route handler
-                response = await call_next(request)
-
-                # Calculate processing time
-                process_time = time.time() - start_time
-
-                # Add response metadata
-                response_metadata = {
-                    **request_metadata,
-                    "status_code": response.status_code,
-                    "process_time": f"{process_time:.4f}s",
-                }
-
-                # Log the completed request
-                logger.info(
-                    f"Request completed: {request.method} {request.url.path} "
-                    f"{response.status_code} {process_time:.4f}s",
-                    extra=response_metadata,
-                )
-
-                return response
-
-            except Exception as e:
-                # Calculate processing time
-                process_time = time.time() - start_time
-
-                # Don't promote raw exception text to a structured field —
-                # downstream handlers (boto, pydantic, wsproto) can carry
-                # payload bytes in their messages. Log the class only.
-                error_metadata = {
-                    **request_metadata,
-                    "error_type": type(e).__name__,
-                    "process_time": f"{process_time:.4f}s",
-                }
-
-                logger.error(
-                    "Request error: %s %s Error: %s %.4fs",
-                    request.method,
-                    request.url.path,
-                    type(e).__name__,
-                    process_time,
-                    extra=error_metadata,
-                )
-                raise
 
 
 def configure_logging():

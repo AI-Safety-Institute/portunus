@@ -533,14 +533,21 @@ async def test_denied_response_carries_request_id_in_x_portunus_debug_id_header(
 # ---------------------------------------------------------------------------
 
 
-def _signing_ctx() -> "_FakeContext":
-    """Build a gRPC context tagged for the signing pass (ext_authz #2)."""
-    return _FakeContext(
-        metadata=[
-            ("x-portunus-proxy-key", _PROXY_KEY),
-            ("x-portunus-pass", "signing"),
-        ]
-    )
+def _signing_ctx(target_host: str | None = "api.openai.com") -> "_FakeContext":
+    """Build a gRPC context tagged for the signing pass (ext_authz #2).
+
+    Includes ``x-portunus-target-host`` by default — Envoy always injects it,
+    and the signing pass fails closed without it (it refuses to sign a
+    client-controlled @target-uri). Pass ``target_host=None`` to exercise
+    that fail-closed path.
+    """
+    metadata = [
+        ("x-portunus-proxy-key", _PROXY_KEY),
+        ("x-portunus-pass", "signing"),
+    ]
+    if target_host is not None:
+        metadata.append(("x-portunus-target-host", target_host))
+    return _FakeContext(metadata=metadata)
 
 
 @pytest.mark.asyncio
@@ -785,6 +792,40 @@ async def test_signing_pass_fails_closed_if_auth_no_longer_has_signing_key():
 
     assert response.HasField("denied_response"), response
     assert response.denied_response.status.code == http_status_pb2.InternalServerError
+
+
+@pytest.mark.asyncio
+async def test_signing_pass_fails_closed_without_target_host():
+    """No ``target_host`` on the signing pass → 500, never sign.
+
+    The signed ``@target-uri`` must come from the trusted ``target_host``
+    (route context / gRPC metadata). If it's absent we must not fall back to
+    the client-supplied Host header — a forged Host would redirect the signed
+    URI. Fail closed with 500 instead.
+    """
+    signing_key = SigningKey(
+        kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
+        provider_id="signingkey_1234abcd",
+    )
+    auth = FakeAuthService(
+        result=AuthResult(
+            api_key="sk-upstream-test-key",
+            signing_key=signing_key,
+            principal_info=_principal_info(),
+        )
+    )
+    sign = FakeSignRequest(returns={"Signature": "x", "Signature-Input": "y"})
+    servicer, _auth, _sign = _make_servicer(auth=auth, sign=sign)
+
+    # target_host=None → no x-portunus-target-host metadata on the context.
+    response = await servicer.Check(
+        _check_request(body=b"{}"), _signing_ctx(target_host=None)
+    )
+
+    assert response.HasField("denied_response"), response
+    assert response.denied_response.status.code == http_status_pb2.InternalServerError
+    # Crucially, KMS signing was never invoked.
+    assert len(sign.calls) == 0
 
 
 # ---------------------------------------------------------------------------

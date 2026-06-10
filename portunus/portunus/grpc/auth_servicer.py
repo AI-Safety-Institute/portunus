@@ -266,7 +266,10 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                     auth_result.api_key,
                     payload.credentials,
                 )
-            except ValidationError as e:
+            except (ValidationError, ValueError) as e:
+                # ValueError: target_host missing (fail-closed, never sign a
+                # client-controlled @target-uri). ValidationError: malformed
+                # signing params. Both are server-side signing faults → 500.
                 logger.error(
                     "Failed to build signable request (request_id=%s): %s",
                     request_id,
@@ -545,16 +548,24 @@ def _signable_request_from_check(
 ) -> SignableRequest:
     """Construct the SignableRequest from the ext_authz CheckRequest.
 
-    Uses the trusted ``target_host`` from gRPC initial_metadata so a
-    forged Host header cannot redirect the signature.
+    Uses the trusted ``target_host`` from route context / gRPC
+    initial_metadata so a forged Host header cannot redirect the
+    signature. Fails closed (raises ``ValueError``) when ``target_host``
+    is absent rather than falling back to the client-supplied
+    ``:authority`` / ``host`` — signing a URL the client controls would
+    let a forged Host redirect the signed ``@target-uri``. The caller
+    maps this to a 500 "Signing misconfiguration".
     """
+    if not target_host:
+        raise ValueError(
+            "target_host missing on signing pass; refusing to sign a "
+            "client-controlled @target-uri"
+        )
     http = request.attributes.request.http
     path = getattr(http, "path", "") or "/"
     method = (getattr(http, "method", "") or "POST").upper()
     content_type = headers.get("content-type", "")
-    host = target_host or headers.get(":authority") or headers.get("host") or ""
-    scheme = "https" if host else "http"
-    url = f"{scheme}://{host}{path}" if host else f"http://localhost{path}"
+    url = f"https://{target_host}{path}"
     return SignableRequest(
         type="anthropic",
         url=url,  # type: ignore[arg-type]  # HttpUrl coerces from str

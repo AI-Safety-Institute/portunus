@@ -403,7 +403,13 @@ def _ws_frame(payload: bytes) -> bytes:
     return header + payload
 
 
-def test_pre_101_buffer_truncates_single_chunk_to_cap(caplog):
+def test_pre_101_buffer_overflow_poisons_stream_instead_of_truncating(caplog):
+    """An over-cap pre-101 chunk poisons the stream rather than truncating.
+
+    Truncating raw WS bytes mid-frame would desync the frame parser + zlib
+    state on replay, silently corrupting every later frame. Poisoning instead
+    skips observation and records the loss via the truncated counter.
+    """
     servicer, _publish, _queue = _make_servicer()
     state = _StreamState(
         stream_id="stream-pre-101",
@@ -415,13 +421,30 @@ def test_pre_101_buffer_truncates_single_chunk_to_cap(caplog):
     with caplog.at_level(logging.WARNING, logger="api.access"):
         servicer._buffer_pre_101(state, Direction.REQUEST, chunk)
 
-    assert state.pre_101_bytes == _PRE_101_MAX_BYTES
-    assert state.pre_101_buffer == [(Direction.REQUEST, b"x" * _PRE_101_MAX_BYTES)]
-    assert any(
-        "Truncating pre-101 WS bytes" in record.getMessage()
-        and "dropped_bytes=17" in record.getMessage()
-        for record in caplog.records
+    # Poisoned, not truncated: buffer cleared, nothing replayable, loss counted.
+    assert state.pre_101_poisoned is True
+    assert state.pre_101_buffer == []
+    assert state.pre_101_bytes == 0
+    assert state.truncated_client_frames == 1
+    assert any("poisoning stream" in record.getMessage() for record in caplog.records)
+
+
+def test_pre_101_poisoned_stream_skips_replay_and_observation():
+    """Once poisoned, replay is a no-op and further pre-101 chunks are ignored."""
+    servicer, _publish, _queue = _make_servicer()
+    state = _StreamState(
+        stream_id="stream-pre-101-poison",
+        request_id="req-pre-101-poison",
+        mode=StreamMode.WS_UPGRADE,
     )
+    servicer._buffer_pre_101(state, Direction.REQUEST, b"x" * (_PRE_101_MAX_BYTES + 1))
+    assert state.pre_101_poisoned is True
+
+    # Replay must not raise or emit anything (buffer already cleared).
+    servicer._replay_pre_101(state, "2026-01-01T00:00:00Z")
+    # A subsequent under-cap chunk must still be ignored (no re-buffering).
+    servicer._buffer_pre_101(state, Direction.REQUEST, b"small")
+    assert state.pre_101_buffer == []
 
 
 # ---------------------------------------------------------------------------

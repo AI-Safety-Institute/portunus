@@ -16,6 +16,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python:3.12-alpine as runtime
 
+# grpc_health_probe: the standard static binary docker/ECS use to probe a
+# gRPC server's grpc.health.v1.Health service. Replaces the old HTTP /ping
+# probe now that Portunus serves only gRPC (no FastAPI). Fetched as a
+# pinned, musl-compatible static build.
+ARG GRPC_HEALTH_PROBE_VERSION=v0.4.36
+ADD --chmod=0755 \
+    https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64 \
+    /usr/local/bin/grpc_health_probe
+
 RUN mkdir -p /app && chown -R 1000:1000 /app
 USER 1000:1000
 
@@ -25,24 +34,22 @@ ENV VIRTUAL_ENV=/app/.venv \
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 COPY portunus ./portunus
-COPY logconf.yaml .
-ENV LISTEN_PORT=8080
+# gRPC listen port (loopback in the sidecar topology). GRPC_PORT is what the
+# server binds and the health probe targets.
+ENV GRPC_PORT=9000
 ENV LOG_LEVEL=info
 # Force unbuffered stdout/stderr so logs land in CloudWatch in real time
-# rather than being held by the Python runtime's pipe buffering. Without
-# this, uvicorn startup lines and gRPC-server boot logs never reach the
-# awslogs driver until the buffer happens to flush — making "is the
-# service alive?" impossible to answer from logs alone.
+# rather than being held by the Python runtime's pipe buffering — otherwise
+# gRPC-server boot logs never reach the awslogs driver until the buffer
+# happens to flush, making "is the service alive?" impossible from logs.
 ENV PYTHONUNBUFFERED=1
-EXPOSE 8080
+EXPOSE 9000
 
-# Probe the FastAPI /ping endpoint so the orchestrator (docker, ECS, etc.)
-# can tell whether the Portunus process is actually answering HTTP. This
-# restores the health signal that the Portunus-fronting ALB used to give
-# us before we collapsed Portunus into a sidecar of the Envoy proxy task.
-# Uses python (already in the image) rather than adding curl just for
-# this — image stays minimal and topology-agnostic.
+# Probe the gRPC health service so the orchestrator can tell whether the
+# server is serving. grpc_health_probe exits 0 on overall SERVING; the
+# server flips to NOT_SERVING at the start of graceful drain, so draining
+# tasks fail the probe promptly.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('LISTEN_PORT','8080')}/ping\", timeout=2).status==200 else 1)" || exit 1
+    CMD grpc_health_probe -addr=127.0.0.1:${GRPC_PORT} || exit 1
 
-CMD uvicorn portunus.app:portunus --proxy-headers --host 0.0.0.0 --port ${LISTEN_PORT} --log-level ${LOG_LEVEL} --log-config logconf.yaml --loop asyncio  --no-access-log
+CMD ["portunus-server"]

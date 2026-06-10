@@ -98,6 +98,13 @@ class _StreamState:
     # Sec-WebSocket-Extensions). Replayed once the observer is built.
     pre_101_buffer: list[tuple[Direction, bytes]] = field(default_factory=list)
     pre_101_bytes: int = 0
+    # Set when the pre-101 buffer cap is hit. Truncating raw WS bytes
+    # mid-frame would desync the frame parser + per-direction zlib inflate
+    # state, silently corrupting every subsequent frame. Instead we poison
+    # the stream: skip frame observation entirely and report the loss via
+    # the truncated counters / WSSummaryRecord rather than replaying a
+    # corrupt prefix.
+    pre_101_poisoned: bool = False
     response_headers_seen: bool = False
     summary_emitted: bool = False
     audit_metadata_published: bool = False
@@ -331,6 +338,11 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
     ) -> None:
         """Dispatch a body chunk to either the HTTP or WS publish path."""
         if state.mode == StreamMode.WS_UPGRADE:
+            # A poisoned stream (pre-101 buffer overflow) has desynced frame
+            # state; observing further bytes would emit corrupt frames. The
+            # loss is already recorded in the truncated counters.
+            if state.pre_101_poisoned:
+                return
             if not state.response_headers_seen:
                 self._buffer_pre_101(state, direction, msg.body)
                 return
@@ -358,35 +370,44 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         direction: Direction,
         chunk: bytes,
     ) -> None:
-        """Stash a WS body chunk that arrived before the 101 response."""
-        remaining = _PRE_101_MAX_BYTES - state.pre_101_bytes
-        if remaining <= 0:
-            logger.warning(
-                "Dropping pre-101 WS bytes on stream %s (%s): buffer cap %d "
-                "already hit; incoming_bytes=%d",
-                state.stream_id,
-                direction.value,
-                _PRE_101_MAX_BYTES,
-                len(chunk),
-            )
+        """Stash a WS body chunk that arrived before the 101 response.
+
+        If adding ``chunk`` would exceed the cap, poison the stream rather
+        than truncating mid-frame: a partial frame would desync the parser
+        and zlib state on replay, corrupting all later frames. Poisoning
+        skips observation and records the loss cleanly.
+        """
+        if state.pre_101_poisoned:
             return
-        if len(chunk) > remaining:
+        if state.pre_101_bytes + len(chunk) > _PRE_101_MAX_BYTES:
             logger.warning(
-                "Truncating pre-101 WS bytes on stream %s (%s): "
-                "incoming_bytes=%d remaining_bytes=%d dropped_bytes=%d cap=%d",
+                "Pre-101 WS buffer cap hit on stream %s (%s): buffered=%d "
+                "incoming=%d cap=%d — poisoning stream (frame observation "
+                "disabled, loss recorded)",
                 state.stream_id,
                 direction.value,
+                state.pre_101_bytes,
                 len(chunk),
-                remaining,
-                len(chunk) - remaining,
                 _PRE_101_MAX_BYTES,
             )
-            chunk = chunk[:remaining]
+            state.pre_101_poisoned = True
+            # Count the unobservable bytes as truncated frames per direction
+            # so the WSSummaryRecord reflects the audit gap.
+            if direction == Direction.REQUEST:
+                state.truncated_client_frames += 1
+            else:
+                state.truncated_server_frames += 1
+            state.pre_101_buffer.clear()
+            state.pre_101_bytes = 0
+            return
         state.pre_101_buffer.append((direction, chunk))
         state.pre_101_bytes += len(chunk)
 
     def _replay_pre_101(self, state: _StreamState, timestamp: str) -> None:
         """Feed buffered pre-101 bytes through the just-built observer."""
+        if state.pre_101_poisoned:
+            # Buffer was cleared at poison time; nothing safe to replay.
+            return
         if not state.pre_101_buffer or state.observer is None:
             state.pre_101_buffer.clear()
             state.pre_101_bytes = 0

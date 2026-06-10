@@ -1,23 +1,36 @@
-"""gRPC server lifecycle for Portunus's Envoy filter services.
+"""gRPC server lifecycle and process entrypoint for Portunus.
 
-Starts the ``grpc.aio`` server in the same event loop as the FastAPI
-app via ``lifespan``. Gated on :attr:`GrpcConfig.enabled` (default off).
+The gRPC server is the Portunus process: it serves the Envoy ext_authz /
+ext_proc filters, the operational :class:`AdminService`, and the standard
+``grpc.health.v1.Health`` + server-reflection services. There is no HTTP /
+FastAPI surface — :func:`run` owns the asyncio loop and SIGTERM-driven drain
+(the Dockerfile ``CMD`` is ``python -m portunus.grpc.server``).
+
+Gated on :attr:`GrpcConfig.enabled` (default off; tests construct the runtime
+directly).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import signal
 from dataclasses import dataclass
 from typing import Optional
 
 import grpc
 from envoy.service.auth.v3 import external_auth_pb2_grpc
 from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+from grpc_reflection.v1alpha import reflection
+from portunus_admin.v1 import admin_pb2, admin_pb2_grpc
 
 from portunus.config import GrpcConfig
+from portunus.grpc.admin_servicer import PortunusAdminServicer
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.services.auth_service import AuthService
+from portunus.services.cache_service import CacheService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
 from portunus.services.signing_service import sign_request
@@ -37,6 +50,7 @@ class GrpcRuntime:
     proc_servicer: PortunusProcessServicer
     publish_queue: BoundedPublishQueue
     publish_service: PublishService
+    health_servicer: health.aio.HealthServicer
 
 
 async def start_grpc_server(
@@ -44,10 +58,13 @@ async def start_grpc_server(
     config: GrpcConfig,
     auth_service: AuthService,
     publish_service: PublishService,
+    cache_service: CacheService,
 ) -> Optional[GrpcRuntime]:
-    """Start the Portunus gRPC server with ext_authz + ext_proc registered.
+    """Start the Portunus gRPC server.
 
-    Returns None when ``config.enabled`` is False.
+    Registers ext_authz, ext_proc, the operational AdminService, the standard
+    health service, and server reflection. Returns None when
+    ``config.enabled`` is False.
     """
     if not config.enabled:
         logger.info("gRPC server disabled (config.grpc.enabled=false); skipping start")
@@ -99,9 +116,43 @@ async def start_grpc_server(
     )
     proc_grpc.add_ExternalProcessorServicer_to_server(proc_servicer, server)
 
+    # Operational AdminService (cache flush) — replaces the retired
+    # FastAPI POST /cache/flush. Same proxy-key gate as the filters.
+    admin_servicer = PortunusAdminServicer(
+        cache_service=cache_service,
+        proxy_api_key=config.proxy_api_key,
+    )
+    admin_pb2_grpc.add_AdminServiceServicer_to_server(admin_servicer, server)
+
+    # Standard gRPC health service — the ECS / ALB probe target now that
+    # the FastAPI /ping endpoint is gone. Reports SERVING for the overall
+    # server ("") and the AdminService once listening.
+    health_servicer = health.aio.HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
+    # Server reflection so operators can call AdminService with grpcurl
+    # without shipping a local .proto copy.
+    reflection.enable_server_reflection(
+        (
+            admin_pb2.DESCRIPTOR.services_by_name["AdminService"].full_name,
+            health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
+            reflection.SERVICE_NAME,
+        ),
+        server,
+    )
+
     listen_addr = f"{config.host}:{config.port}"
     server.add_insecure_port(listen_addr)
     await server.start()
+
+    # Mark serving only after the listener is up, so a probe can't see
+    # SERVING before the port accepts connections.
+    await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    await health_servicer.set(
+        admin_pb2.DESCRIPTOR.services_by_name["AdminService"].full_name,
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+
     logger.info(
         "gRPC server listening on %s (max_concurrent_streams=%d)",
         listen_addr,
@@ -112,6 +163,7 @@ async def start_grpc_server(
         proc_servicer=proc_servicer,
         publish_queue=publish_queue,
         publish_service=publish_service,
+        health_servicer=health_servicer,
     )
 
 
@@ -136,8 +188,23 @@ async def stop_grpc_server(
         grace_seconds,
     )
 
+    # Flip health to NOT_SERVING first so an in-flight probe (ALB/ECS)
+    # sees the drain immediately and stops routing new connections here.
+    await runtime.health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+
     await runtime.server.stop(grace=grace_seconds)
-    await runtime.publish_queue.stop(drain_timeout=min(5.0, float(grace_seconds)))
+
+    # M5: give the queue the FULL remaining grace to flush to Firehose,
+    # not an arbitrary 5s cap — records already accepted should not be
+    # dropped on shutdown while grace remains. ``stop`` reports how many
+    # buffered records it had to cancel so the loss is observable.
+    cancelled = await runtime.publish_queue.stop(drain_timeout=float(grace_seconds))
+    if cancelled:
+        logger.warning(
+            "gRPC drain cancelled %d unflushed audit records after %ds grace",
+            cancelled,
+            grace_seconds,
+        )
 
     try:
         await runtime.publish_service.state_service.close()
@@ -150,3 +217,64 @@ async def stop_grpc_server(
         runtime.publish_queue.dropped_total,
         runtime.publish_queue.failed_total,
     )
+
+
+async def run() -> None:
+    """Process entrypoint: build services, serve gRPC, drain on SIGTERM.
+
+    This is the whole Portunus process — there is no FastAPI/uvicorn layer.
+    Services are constructed here (previously in the FastAPI module), the
+    gRPC server is started, and we block until SIGTERM/SIGINT, then drain
+    gracefully. ECS sends SIGTERM on task stop; the task ``stopTimeout``
+    (120s in the akp CDK) must exceed ``graceful_shutdown_seconds``.
+    """
+    # Imported here, not at module top, so importing this module for its
+    # start/stop helpers (e.g. in tests) doesn't construct AWS/Redis clients.
+    # Importing portunus.logging runs configure_logging() (structured JSON
+    # to stdout) — previously done via uvicorn's --log-config.
+    import portunus.logging  # noqa: F401 — import side effect: configures logging
+    from portunus.config import config
+    from portunus.services.auth_service import AuthService
+    from portunus.services.cache_service import CacheService
+    from portunus.services.publish_service import PublishService
+    from portunus.services.state_service import StateService
+
+    state_service = StateService()
+    cache_service = CacheService(state_service=state_service)
+    publish_service = PublishService(state_service=state_service)
+    auth_service = AuthService(cache_service=cache_service)
+
+    runtime = await start_grpc_server(
+        config=config.grpc,
+        auth_service=auth_service,
+        publish_service=publish_service,
+        cache_service=cache_service,
+    )
+    if runtime is None:
+        logger.error(
+            "gRPC server disabled (GRPC_ENABLED=false) but it is now the "
+            "only Portunus surface; nothing to serve. Exiting."
+        )
+        return
+
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop_event.set)
+
+    logger.info("Portunus gRPC process ready; awaiting termination signal")
+    await stop_event.wait()
+    logger.info("Termination signal received; draining")
+
+    await stop_grpc_server(runtime, grace_seconds=config.grpc.graceful_shutdown_seconds)
+    await state_service.close_redis_client()
+    logger.info("Portunus gRPC process shut down cleanly")
+
+
+def main() -> None:
+    """Console / ``python -m portunus.grpc.server`` entrypoint."""
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

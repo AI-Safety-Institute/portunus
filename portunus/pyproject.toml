@@ -5,8 +5,10 @@ description = ""
 authors = [{ name = "Tom.Catling", email = "Tom.Catling@dsit.gov.uk" }]
 requires-python = "~=3.12"
 dependencies = [
-    "fastapi>=0.111.0,<0.112",
-    "gunicorn>=22.0.0,<23",
+    # pydantic is used directly by config/models/auth_servicer/signing; it was
+    # previously pulled in transitively via fastapi (now removed), so pin it
+    # explicitly.
+    "pydantic>=2.7.0,<3",
     "cryptography>=43.0.0,<44",
     "rsa~=4.9",
     "boto3>=1.34.144,<2",
@@ -22,6 +24,13 @@ dependencies = [
     "grpcio>=1.66.0,<2",
     "xds-protos>=1.80.0",
     "googleapis-common-protos>=1.65.0,<2",
+    # Standard gRPC health checking (grpc.health.v1.Health) for the ECS /
+    # ALB health probe, and server reflection so operators can call the
+    # admin service with grpcurl without a local .proto copy. protobuf
+    # itself is pinned transitively by xds-protos (>=6.31); we don't pin it
+    # here to avoid fighting that constraint.
+    "grpcio-health-checking>=1.66.0,<2",
+    "grpcio-reflection>=1.66.0,<2",
     # orjson on the publish hot path — every Firehose record goes through
     # ``orjson.dumps`` (3-5x faster than stdlib json on dict-heavy payloads),
     # which adds up at 5+ records per HTTP request × N req/s/pod.
@@ -43,13 +52,13 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "fakeredis>=2.26.0,<3",
     "freezegun>=1.5.0,<2",
-    # httpx ASGI transport for in-process tests of the FastAPI app.
-    # Not used by runtime code.
-    "httpx>=0.27.0",
 ]
 
 [project.scripts]
 portunus = "portunus.cli:main"
+# Process entrypoint for the gRPC server (the whole Portunus runtime now that
+# FastAPI is gone). Used by the container CMD.
+portunus-server = "portunus.grpc.server:main"
 
 [tool.hatch.build.targets.sdist]
 packages = ["portunus"]
@@ -65,6 +74,11 @@ raw-options = { root = "..", local_scheme = "no-local-version" }
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
+[tool.ruff]
+# Buf-generated protobuf stubs are machine-written ("DO NOT EDIT"); don't
+# lint/format them. Regenerate with `buf generate` instead.
+extend-exclude = ["portunus/grpc/_generated"]
+
 [tool.ruff.lint]
 select = ["E",   # pycodestyle errors
           "W",   # pycodestyle warnings
@@ -76,6 +90,37 @@ ignore = ["E203", "D10", "D212"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.mypy]
+# Generated protobuf stubs import each other by their proto package root
+# (portunus_admin.v1), so mypy needs _generated on its search path too.
+mypy_path = "portunus/grpc/_generated"
+
+[[tool.mypy.overrides]]
+# Generated protobuf/gRPC stubs: don't follow into them (they ship .pyi but
+# we treat them as opaque), and don't error on the import. follow_imports=skip
+# makes `from portunus_admin.v1 import admin_pb2` resolve as Any.
+module = ["portunus_admin.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Third-party gRPC / protobuf / boto packages ship without type stubs (or
+# only partial ones).
+module = [
+    "grpc",
+    "grpc.*",
+    "grpc_health.*",
+    "grpc_reflection.*",
+    "google.protobuf.*",
+    "google.rpc.*",
+    "mypy_boto3_kms",
+    "aiobotocore",
+    "aiobotocore.*",
+    "aws_xray_sdk.*",
+    "envoy.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 markers = [

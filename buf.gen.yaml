@@ -1,0 +1,16 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+plugins:
+  # Python message stubs (*_pb2.py + *_pb2.pyi for type-checkers/mypy).
+  # Plugin v31.x emits gencode compatible with the protobuf 6.31+ runtime
+  # that xds-protos pulls in (older v28 gencode raises a runtime version
+  # mismatch against protobuf 6.x).
+  - remote: buf.build/protocolbuffers/python:v31.1
+    out: portunus/portunus/grpc/_generated
+  - remote: buf.build/protocolbuffers/pyi:v31.1
+    out: portunus/portunus/grpc/_generated
+  # gRPC service stubs (*_pb2_grpc.py).
+  - remote: buf.build/grpc/python:v1.71.0
+    out: portunus/portunus/grpc/_generated

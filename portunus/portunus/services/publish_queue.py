@@ -85,7 +85,7 @@ class BoundedPublishQueue:
                 asyncio.create_task(self._worker_loop(), name=f"publish-worker-{i}")
             )
 
-    async def stop(self, *, drain_timeout: float = 5.0) -> None:
+    async def stop(self, *, drain_timeout: float = 5.0) -> int:
         """Stop the worker pool, draining up to ``drain_timeout``.
 
         Sentinels are inserted via ``put`` (not ``put_nowait``) bounded
@@ -94,6 +94,11 @@ class BoundedPublishQueue:
         raise ``QueueFull`` and abort the rest of the shutdown path —
         is handled by cancelling the workers directly rather than by
         letting the exception escape.
+
+        Returns the number of audit records still queued (i.e. accepted
+        but never flushed) when the drain timed out — 0 on a clean drain.
+        Callers log this so shutdown record loss is observable rather than
+        silent.
         """
         try:
             async with asyncio.timeout(drain_timeout):
@@ -101,14 +106,22 @@ class BoundedPublishQueue:
                     await self._queue.put(None)
                 await asyncio.gather(*self._workers, return_exceptions=True)
         except TimeoutError:
+            # Records still queued when we gave up — accepted but never
+            # flushed — so the caller can report the loss.
+            unflushed = self._queue.qsize()
             logger.warning(
-                "Publish workers did not drain within %.1fs; cancelling",
+                "Publish workers did not drain within %.1fs; cancelling "
+                "(%d records unflushed)",
                 drain_timeout,
+                unflushed,
             )
             for w in self._workers:
                 w.cancel()
             await asyncio.gather(*self._workers, return_exceptions=True)
+            self._workers.clear()
+            return unflushed
         self._workers.clear()
+        return 0
 
     async def submit_blocking(self, task: PublishTask) -> None:
         """Submit with normal asyncio backpressure — for headers/trailers."""
