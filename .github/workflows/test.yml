@@ -16,6 +16,11 @@ jobs:
         run: |
           uv sync --locked
 
+      - name: Check pytest collection
+        run: |
+          echo "Expected collection is around 160 tests: root tests plus portunus/tests."
+          uv run pytest --collect-only -q
+
       - name: Test with pytest
         run: uv run pytest -rA -x --color=yes
         env:

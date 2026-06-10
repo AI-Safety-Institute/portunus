@@ -123,7 +123,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         trace_id, parent_id, sampled = parse_trace_header(aws_trace_header)
         app_title = request.app.title.replace(" ", "_").lower()
 
-        # turn /log/<id> into just /log for segment name
+        # X-Ray segment name suffix: first path component only, so request
+        # IDs / dynamic path segments don't blow out the cardinality.
         if len(request.url.path.split("/")) > 1:
             safe_path = request.url.path.split("/")[1]
         else:
@@ -194,19 +195,22 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 # Calculate processing time
                 process_time = time.time() - start_time
 
-                # Add error metadata
+                # Don't promote raw exception text to a structured field —
+                # downstream handlers (boto, pydantic, wsproto) can carry
+                # payload bytes in their messages. Log the class only.
                 error_metadata = {
                     **request_metadata,
-                    "error": str(e),
+                    "error_type": type(e).__name__,
                     "process_time": f"{process_time:.4f}s",
                 }
 
-                # Log the error
                 logger.error(
-                    f"Request error: {request.method} {request.url.path} "
-                    f"Error: {str(e)} {process_time:.4f}s",
+                    "Request error: %s %s Error: %s %.4fs",
+                    request.method,
+                    request.url.path,
+                    type(e).__name__,
+                    process_time,
                     extra=error_metadata,
-                    exc_info=True,
                 )
                 raise
 

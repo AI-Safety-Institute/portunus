@@ -1,10 +1,4 @@
-"""
-Configuration module for the Portunus.
-
-This module centralizes all configuration options for the Portunus service.
-It loads configuration from environment variables with reasonable defaults and
-provides validation and documentation for all options.
-"""
+"""Portunus configuration loaded from environment variables."""
 
 import logging
 import os
@@ -78,6 +72,7 @@ class FirehoseConfig(BaseModel):
         response_headers_stream_name: Firehose delivery stream for response headers
         response_body_stream_name: Firehose delivery stream for response bodies
         response_trailers_stream_name: Firehose delivery stream for response trailers
+        ws_summary_stream_name: Stream name for per-connection WebSocket summaries
         max_record_size: Maximum size in bytes for a single Firehose record
     """
 
@@ -108,6 +103,10 @@ class FirehoseConfig(BaseModel):
     response_trailers_stream_name: Optional[str] = Field(
         default=None,
         description="Firehose delivery stream for response trailers",
+    )
+    ws_summary_stream_name: Optional[str] = Field(
+        default=None,
+        description="Firehose stream for one summary record per WebSocket connection",
     )
     max_record_size: int = Field(
         default=900000,
@@ -149,52 +148,59 @@ class AwsConfig(BaseModel):
     )
 
 
-class RelayConfig(BaseModel):
-    """WebSocket relay configuration settings.
+class GrpcConfig(BaseModel):
+    """gRPC server config for Envoy ext_authz / ext_proc filters."""
 
-    The upstream target (host, port, TLS) is provided per-connection via
-    headers injected by each proxy's Envoy (x-portunus-target-host, etc.).
-    This config only holds Portunus-level settings that apply to all connections.
-
-    Attributes:
-        max_message_size: Maximum WebSocket message size in bytes
-        max_connection_lifetime: Maximum connection lifetime in seconds
-        max_connections: Maximum concurrent WebSocket connections per instance
-        drain_timeout: Seconds to wait for WS connections to drain on shutdown
-    """
-
-    max_message_size: int = Field(
-        default=10_485_760,
-        description="Maximum WebSocket message size in bytes (10MB)",
-        ge=1024,
+    enabled: bool = Field(
+        default=False,
+        description="Whether to start the gRPC server",
     )
-    max_connection_lifetime: int = Field(
-        default=3300,
-        description="Maximum connection lifetime in seconds (55 min)",
-        ge=60,
+    host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Interface the gRPC server binds to. Defaults to loopback for "
+            "the sidecar topology where Envoy reaches Portunus on localhost. "
+            "Set to ``0.0.0.0`` for docker-compose where Envoy and Portunus "
+            "are separate containers reaching each other over a bridge "
+            "network. (In our docker-compose the portunus container shares "
+            "the proxy container's network namespace, so loopback works "
+            "there too — this knob exists for non-shared-netns topologies.)"
+        ),
     )
-    max_connections: int = Field(
-        default=200,
-        description="Maximum concurrent WebSocket connections per instance",
+    port: int = Field(
+        default=9000,
+        description="TCP port the gRPC server binds to",
+        ge=1,
+        le=65535,
+    )
+    max_concurrent_streams: int = Field(
+        default=1000,
+        description="Per-connection HTTP/2 stream limit",
         ge=1,
     )
-    drain_timeout: int = Field(
-        default=10,
-        description="Seconds to wait for WS connections to drain on shutdown",
+    graceful_shutdown_seconds: int = Field(
+        default=30,
+        description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
+    )
+    proxy_api_key: str = Field(
+        default="",
+        description=(
+            "Pre-shared key the proxy presents as `x-portunus-proxy-key` "
+            "gRPC metadata. Empty disables validation (tests only)."
+        ),
+    )
+    proxy_api_key_optional: bool = Field(
+        default=False,
+        description=(
+            "Explicit opt-in to allow empty ``proxy_api_key``. Production "
+            "must leave this False so a missing key fails closed."
+        ),
     )
 
 
 class PortunusConfig(BaseModel):
-    """Main configuration for the Portunus service.
-
-    Attributes:
-        redis: Redis configuration
-        aws: AWS configuration
-        log_level: Logging level
-        api_key_header: Header name to use for the API key
-        api_key_prefix: Prefix to use for the API key
-    """
+    """Top-level Portunus configuration."""
 
     # Service settings
     redis: RedisConfig = Field(
@@ -209,9 +215,9 @@ class PortunusConfig(BaseModel):
         default_factory=FirehoseConfig,
         description="Firehose direct-PUT configuration",
     )
-    relay: RelayConfig = Field(
-        default_factory=RelayConfig,
-        description="WebSocket relay configuration",
+    grpc: GrpcConfig = Field(
+        default_factory=GrpcConfig,
+        description="gRPC server configuration",
     )
     log_level: str = Field(
         default="INFO",
@@ -224,6 +230,13 @@ class PortunusConfig(BaseModel):
     api_key_prefix: str = Field(
         default="Bearer ",
         description="Prefix to use for the API key",
+    )
+    proxy_header_prefix: str = Field(
+        default="portunus",
+        description=(
+            "Prefix for proxy-emitted response headers (e.g. ``x-{prefix}-error``). "
+            "Must match the proxy container's PORTUNUS_HEADER_PREFIX."
+        ),
     )
 
     @field_validator("log_level")
@@ -289,26 +302,35 @@ def get_config() -> PortunusConfig:
         response_trailers_stream_name=os.environ.get(
             "FIREHOSE_RESPONSE_TRAILERS_STREAM", None
         ),
+        ws_summary_stream_name=os.environ.get("FIREHOSE_WS_SUMMARY_STREAM", None),
         max_record_size=int(os.environ.get("FIREHOSE_MAX_RECORD_SIZE", "1000000")),
     )
 
-    relay = RelayConfig(
-        max_message_size=int(os.environ.get("WS_MAX_MESSAGE_SIZE", "10485760")),
-        max_connection_lifetime=int(
-            os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")
+    grpc = GrpcConfig(
+        enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
+        host=os.environ.get("GRPC_HOST", "127.0.0.1"),
+        port=int(os.environ.get("GRPC_PORT", "9000")),
+        max_concurrent_streams=int(
+            os.environ.get("GRPC_MAX_CONCURRENT_STREAMS", "1000")
         ),
-        max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "200")),
-        drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
+        graceful_shutdown_seconds=int(
+            os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
+        ),
+        proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
+        proxy_api_key_optional=(
+            os.environ.get("GRPC_PROXY_API_KEY_OPTIONAL", "false").lower() == "true"
+        ),
     )
 
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
+        proxy_header_prefix=os.environ.get("PORTUNUS_HEADER_PREFIX", "portunus"),
         redis=redis,
         aws=aws,
         firehose=firehose,
-        relay=relay,
+        grpc=grpc,
     )
 
 

@@ -6,13 +6,13 @@ managing Redis connections and providing access to Redis clients.
 """
 
 import asyncio
+import contextlib
 import logging
 import random
-from typing import Optional
+from typing import Any, Optional
 
 import aiobotocore.session
 import redis.asyncio as aioredis
-from aws_xray_sdk.core import xray_recorder
 from redis.exceptions import ConnectionError, MaxConnectionsError
 
 from portunus.config import config
@@ -36,6 +36,14 @@ class StateService:
         """Initialize the StateService."""
         self.redis_client: Optional[aioredis.Redis] = None
         self.boto_session = aiobotocore.session.get_session()
+        # aiobotocore clients are async context managers; entering them
+        # creates a fresh aiohttp connection pool + TLS context (~200ms
+        # cold start). Re-entering on every publish flattens throughput
+        # — instead we keep a singleton client per service, opened once
+        # via an AsyncExitStack and closed in ``close()`` on shutdown.
+        self._aws_stack: Optional[contextlib.AsyncExitStack] = None
+        self._firehose_client: Optional[Any] = None
+        self._aws_client_lock = asyncio.Lock()
 
     async def get_redis_client(self) -> Optional[aioredis.Redis]:
         """
@@ -59,11 +67,13 @@ class StateService:
         """
         if self.redis_client is None:
             try:
-                # Log Redis connection parameters before connecting
+                # Log Redis connection target. Password length is a side
+                # channel — emit a bool instead.
                 logger.info(
-                    f"Connecting to Redis at {config.redis.host}:{config.redis.port} "
-                    f"with password length: "
-                    f"{len(config.redis.password or '')}"
+                    "Connecting to Redis at %s:%d (password_set=%s)",
+                    config.redis.host,
+                    config.redis.port,
+                    bool(config.redis.password),
                 )
 
                 # Create Redis client with built-in connection pooling
@@ -89,7 +99,10 @@ class StateService:
                     f"ping result: {ping_result}"
                 )
             except Exception as e:
-                logger.exception(f"Redis connection failure traceback: {e}")
+                # Don't log full traceback — TLS / auth exceptions from
+                # aioredis can include sensitive bytes (rarely, but worth
+                # bounding).
+                logger.error("Redis connection failure: %s", type(e).__name__)
                 self.redis_client = None  # Reset to None in case of error
                 return None
         return self.redis_client
@@ -106,11 +119,10 @@ class StateService:
                 await self.redis_client.aclose()
                 logger.info("Redis client connection pool closed")
             except Exception as e:
-                logger.error(f"Error closing Redis client: {e}")
+                logger.error("Error closing Redis client: %s", type(e).__name__)
             finally:
                 self.redis_client = None
 
-    @xray_recorder.capture_async()  # type: ignore
     async def acquire_redis_connection(self, max_retries=8):
         """
         Acquire a Redis connection with exponential backoff retry.
@@ -169,18 +181,32 @@ class StateService:
             await client.ping()
             return True
         except Exception as e:
-            logger.error(f"Redis health check failed: {e}")
+            logger.error("Redis health check failed: %s", type(e).__name__)
             return False
 
+    async def _ensure_aws_stack(self) -> contextlib.AsyncExitStack:
+        """Lazily open the shared exit stack used by the AWS client singletons."""
+        if self._aws_stack is None:
+            async with self._aws_client_lock:
+                if self._aws_stack is None:
+                    self._aws_stack = contextlib.AsyncExitStack()
+                    await self._aws_stack.__aenter__()
+        return self._aws_stack
+
     async def get_firehose_client(self):
-        """
-        Get a Kinesis Firehose client using aiobotocore.
+        """Return a shared Firehose direct-PUT client (created once per process)."""
+        if self._firehose_client is None:
+            stack = await self._ensure_aws_stack()
+            async with self._aws_client_lock:
+                if self._firehose_client is None:
+                    self._firehose_client = await stack.enter_async_context(
+                        self.boto_session.create_client("firehose")
+                    )
+        return self._firehose_client
 
-        The returned object is an unentered async context manager; callers
-        should use ``async with await state_service.get_firehose_client()
-        as client`` so the underlying aiohttp session is closed promptly.
-
-        Returns:
-            A Kinesis Firehose client context manager
-        """
-        return self.boto_session.create_client("firehose")
+    async def close(self) -> None:
+        """Tear down cached AWS clients. Called on graceful shutdown."""
+        if self._aws_stack is not None:
+            await self._aws_stack.__aexit__(None, None, None)
+            self._aws_stack = None
+            self._firehose_client = None

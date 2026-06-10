@@ -43,7 +43,7 @@ class TestFirehoseChunking:
         ), "Reassembled body should match original"
 
     def test_chunk_size_within_limits(self):
-        """Each chunk stays within Firehose size limits when base64 encoded."""
+        """Each chunk stays within Firehose size limits when base64-encoded."""
         large_body = b"x" * (2 * 1024 * 1024)  # 2MB
         chunks = chunk_body_data(large_body)
 

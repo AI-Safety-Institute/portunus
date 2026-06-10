@@ -1,19 +1,17 @@
-"""
-Data models for the Portunus.
+"""Data models for Portunus.
 
-This module contains dataclass models and Pydantic models that represent entities
-and data structures used throughout the Portunus service. These models provide
-type safety, validation, and conversion methods.
-
-Note: Non-standard library imports are lazy-loaded to allow safe export to
-environments like AWS Glue where dependencies may not be available.
+Non-standard library imports are lazy-loaded so this module can be
+exported standalone to environments like AWS Glue where heavy
+dependencies aren't available.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import json
+import zlib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import (
@@ -54,30 +52,6 @@ class RowLike(Protocol):
     def asDict(self) -> Dict[str, str]:
         """Convert Row to dict."""
         ...
-
-
-@dataclass
-class ParsedArn:
-    """Result of parsing an AWS ARN."""
-
-    account_id: str
-    path_parts: Optional[List[str]] = None
-
-
-@dataclass
-class RequestSummary:
-    """Summary of request data for notifications."""
-
-    headers: Dict[str, str]
-    size: int
-
-
-@dataclass
-class ResponseSummary:
-    """Summary of response data for notifications."""
-
-    headers: Dict[str, str]
-    size: int
 
 
 def decode_base64(value: str) -> bytes:
@@ -126,9 +100,6 @@ def _decompress_b64_body(
 
     Returns (decoded_text, failed). On failure, decoded_text is None and failed is True.
     """
-    import gzip
-    import zlib
-
     try:
         body_bytes = base64.b64decode(body_b64)
     except (binascii.Error, UnicodeDecodeError):
@@ -172,6 +143,7 @@ class AwsCredentials:
 
     def __post_init__(self) -> None:
         """Validate credentials after initialization."""
+        # Lazy import: models.py ships standalone to AWS Glue.
         from portunus.exceptions import InputValidationError
 
         if not self.access_key_id:
@@ -202,7 +174,9 @@ class AwsCredentials:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse credential expiration: {expiration_str}")
+            # ``expiration_str`` is customer-controlled (from the base64-JSON
+            # bearer payload). Don't log its content — log-injection vector.
+            logger.warning("Could not parse credential expiration string")
             return None
 
     @classmethod
@@ -326,23 +300,12 @@ class AuthPayload:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
         except Exception as e:
-            msg = f"Failed to decode authorization payload: {e}, payload: {raw_payload}"
+            # Never include raw_payload in the message: the base64 blob
+            # contains temporary AWS credentials and would surface in error
+            # responses, structured logs, and Envoy access logs. The `from e`
+            # chain preserves the underlying decode error for debugging.
+            msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary representation.
-
-        Returns:
-            Dict[str, Any]: Dictionary with payload fields
-        """
-        result = {
-            "credentials": self.credentials.to_dict(),
-            "secret_arn": self.secret_arn,
-            "expiration": None,  # This is typically set when creating temporary creds
-        }
-        if self.target_host:
-            result["target_host"] = self.target_host
-        return result
 
 
 @dataclass
@@ -361,15 +324,6 @@ class PrincipalInfo:
     principal: Optional[str] = None
     session_name: Optional[str] = None
     project: Optional[str] = None
-
-    @classmethod
-    def empty(cls) -> "PrincipalInfo":
-        """Create an empty PrincipalInfo object with default values.
-
-        Returns:
-            PrincipalInfo: An empty principal info object
-        """
-        return cls()
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PrincipalInfo":
@@ -428,11 +382,11 @@ class SecretsManagerAuthPayload(BaseModel):
 
         try:
             return cls.model_validate(secret_data)
-        except ValidationError as e:
-            logger.info(
-                "JSON secret with unrecognised schema, using JSON as API key",
-                exc_info=e,
-            )
+        except ValidationError:
+            # Do NOT pass exc_info — pydantic ValidationError formats the
+            # offending input fields verbatim, which on this path is the
+            # raw secret JSON (upstream provider API key).
+            logger.info("JSON secret with unrecognised schema, using JSON as API key")
             return cls(api_key=input)
 
 
@@ -462,25 +416,6 @@ class AuthResult:
     signing_key: Optional[SigningKey]
     principal_info: PrincipalInfo
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "AuthResult":
-        """Create an AuthResult object from a dictionary.
-
-        Args:
-            data (Dict[str, Any]): Dictionary containing auth result fields
-
-        Returns:
-            AuthResult: A new auth result object
-        """
-        principal_info_data = data.get("principal_info", {})
-        principal_info = PrincipalInfo.from_dict(principal_info_data)
-
-        return cls(
-            api_key=data.get("api_key", ""),
-            signing_key=data.get("signing_key", None),
-            principal_info=principal_info,
-        )
-
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation.
 
@@ -499,75 +434,14 @@ class AuthResult:
         return bool(self.api_key)
 
 
-# Request payload models for the new REST endpoints
-class HeadersPayload(BaseModel):
-    """Request payload model for headers endpoints (request/response).
-
-    Attributes:
-        headers: Dictionary of headers with base64-encoded values from Lua
-        timestamp: Unix timestamp number when the event occurred
-    """
-
-    headers: Dict[str, str]
-    timestamp: int
-
-    def get_iso_timestamp(self) -> str:
-        """Convert timestamp to ISO-8601 format if it's a Unix timestamp."""
-        from portunus.util import unix_timestamp_to_iso
-
-        return unix_timestamp_to_iso(self.timestamp)
-
-
-class TrailersPayload(BaseModel):
-    """Request payload model for trailers endpoints (request/response).
-
-    Attributes:
-        trailers: Dictionary of trailers with base64-encoded values from Lua
-        timestamp: Unix timestamp number when the event occurred
-    """
-
-    trailers: Dict[str, str]
-    timestamp: int
-
-    def get_iso_timestamp(self) -> str:
-        """Convert timestamp to ISO-8601 format if it's a Unix timestamp."""
-        from portunus.util import unix_timestamp_to_iso
-
-        return unix_timestamp_to_iso(self.timestamp)
-
-
 # Firehose record dataclasses - define the structure of published records
 
 
 @dataclass
 class MetadataRecord:
-    """Metadata record for Firehose stream containing request and principal information.
+    """Per-request principal + secret identity record published to Firehose.
 
-    This record is generated by Portunus when a request is first authorized and contains
-    identity information extracted from the AWS credentials used for authentication.
-    Published to the metadata Firehose delivery stream.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Used to correlate logs
-            across all streams.
-        timestamp: ISO-8601 formatted timestamp when the request was received by the
-            proxy. This is the canonical timestamp used for partitioning in ETL jobs.
-        published_at: ISO-8601 timestamp when this record was published to Firehose.
-            May differ slightly from timestamp due to processing delays.
-        account_id: AWS account ID extracted from the principal ARN. None if principal
-            information is unavailable (e.g., mock mode).
-        principal: Principal type and name (e.g., "assumed-role/RoleName"). None if
-            principal information is unavailable.
-        principal_arn: Full principal ARN (e.g.
-            "arn:aws:sts::123456789012:assumed-role/...").
-            None if principal information is unavailable.
-        project: Project name extracted from UserProfile_ pattern in role names. None
-            if the role doesn't match the pattern or principal info is unavailable.
-        session_name: Session name from assumed role ARNs. None if not present or
-            principal information is unavailable.
-        secret_arn: Full ARN of the AWS Secrets Manager secret used for the API
-            key. None if not available. Downstream consumers parse the name
-            from the ARN when needed.
+    ``timestamp`` is the canonical partition key for ETL.
     """
 
     request_id: str
@@ -614,35 +488,7 @@ class MetadataRecord:
 
 @dataclass
 class RequestHeadersRecord:
-    """Request headers record for Firehose stream containing HTTP request headers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    request-headers Firehose stream. Headers are base64-encoded by Lua before publishing
-    to safely handle binary or non-UTF-8 header values.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        raw_headers: Complete dictionary of HTTP headers with base64-encoded values.
-            Keys are lowercase header names. Includes pseudo-headers (prefixed with :)
-            from HTTP/2. All values are base64-encoded strings.
-        timestamp: ISO-8601 formatted timestamp when headers were captured (typically
-            matches the metadata timestamp).
-        published_at: ISO-8601 timestamp when this record was published to Firehose.
-        content_type: Decoded content-type header value (UTF-8 string). Automatically
-            decoded from raw_headers during __post_init__. None if header not present
-            or decoding fails.
-        method: Decoded HTTP method from :method pseudo-header (e.g., "GET", "POST").
-            None if not present or decoding fails.
-        path: Decoded request path from :path pseudo-header (e.g.
-            "/v1/chat/completions"). None if not present or decoding fails.
-        authority: Decoded authority from :authority pseudo-header (HTTP/2 equivalent
-            of Host header). None if not present or decoding fails.
-        user_agent: Decoded User-Agent header value. None if not present or decoding
-            fails.
-        content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
-            Indicates compression applied to request body. None if not present or
-            decoding fails.
-    """
+    """Request-headers audit record. ``raw_headers`` values are base64-encoded."""
 
     request_id: str
     raw_headers: Dict[str, str]
@@ -700,29 +546,21 @@ class RequestHeadersRecord:
 
 @dataclass
 class RequestBodyRecord:
-    """Request body record for Firehose stream containing HTTP request body data.
+    """One chunk of a request body. ``body`` is base64; ETL concatenates by chunk_id.
 
-    This record is captured by the Envoy proxy via Lua script and published to the
-    request-body Firehose stream. Large bodies are automatically split into chunks to
-    stay within Firehose record size limits. Each chunk is published as a separate
-    record.
+    ``num_chunks=0`` is the per-chunk wire format where Glue derives the
+    total at aggregation time via ``count_("*")``.
 
-    Body data is base64-encoded by Lua before publishing to safely handle
-    binary content.
+    ``dropped=True`` is a sentinel record marking a chunk that the
+    publish queue could not accept under backpressure — ``body`` and
+    ``body_size`` are empty / zero. Downstream ETL must treat the
+    reassembled body as incomplete when any sentinel is present rather
+    than treating chunk_id gaps as absence-of-data.
 
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        body: Base64-encoded body content for this chunk. May contain compressed data
-            if content-encoding header indicates compression (see request headers).
-        body_size: Size of this chunk's body in bytes (after base64 encoding). Note
-            this is the size of the encoded string, not the original binary data.
-        timestamp: ISO-8601 formatted timestamp when body was captured.
-        chunk_id: Zero-based index of this chunk. 0 for first chunk, incremented for
-            subsequent chunks. ETL jobs currently only process chunk_id=0.
-        num_chunks: Total number of chunks for this request body. If > 1, the body
-            was split across multiple records. ETL jobs set a 'truncated' flag when
-            num_chunks > 1 to indicate incomplete data.
-        published_at: ISO-8601 timestamp when this record was published to Firehose.
+    ``truncated=True`` marks a chunk whose payload was capped by an
+    upstream safety limit (currently only the WS deflate decompression
+    cap in ``frame_observer.py``). The body bytes present are real but
+    incomplete vs. the wire.
     """
 
     request_id: str
@@ -732,6 +570,8 @@ class RequestBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    dropped: bool = False
+    truncated: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Firehose publishing."""
@@ -744,6 +584,8 @@ class RequestBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "dropped": self.dropped,
+            "truncated": self.truncated,
         }
 
     @classmethod
@@ -758,24 +600,14 @@ class RequestBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "dropped", "type": "boolean"},
+            {"name": "truncated", "type": "boolean"},
         ]
 
 
 @dataclass
 class RequestTrailersRecord:
-    """Request trailers record for Firehose stream containing HTTP request trailers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    request-trailers Firehose stream. Trailers are HTTP headers that appear after the
-    message body in chunked transfer encoding. They are relatively uncommon in practice.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        trailers: Dictionary of trailer name-value pairs. Keys are lowercase trailer
-            names. Values may be base64-encoded depending on implementation.
-        timestamp: ISO-8601 formatted timestamp when trailers were captured.
-        published_at: ISO-8601 timestamp when this record was published to Firehose.
-    """
+    """Request-trailers audit record."""
 
     request_id: str
     trailers: Dict[str, str]
@@ -806,35 +638,7 @@ class RequestTrailersRecord:
 
 @dataclass
 class ResponseHeadersRecord:
-    """Response headers record for Firehose stream containing HTTP response headers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    response-headers Firehose stream after receiving headers from the upstream API.
-    Headers are base64-encoded by Lua before publishing to safely handle binary or
-    non-UTF-8 header values.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        raw_headers: Complete dictionary of HTTP response headers with base64-encoded
-            values. Keys are lowercase header names. Includes pseudo-headers (prefixed
-            with :) from HTTP/2. All values are base64-encoded strings.
-        timestamp: ISO-8601 formatted timestamp when response headers were captured.
-            May differ from request timestamp by the upstream API latency.
-        published_at: ISO-8601 timestamp when this record was published to Firehose.
-        server: Decoded Server header value (e.g., "uvicorn"). Automatically decoded
-            from raw_headers during __post_init__. None if header not present or
-            decoding fails.
-        status: Decoded HTTP status code from :status pseudo-header (e.g., "200",
-            "404"). None if not present or decoding fails.
-        content_length: Decoded Content-Length header value as string. Indicates the
-            size of the response body in bytes. None if not present (e.g., chunked
-            encoding) or decoding fails.
-        content_type: Decoded Content-Type header value (e.g., "application/json").
-            None if not present or decoding fails.
-        content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
-            Indicates compression applied to response body. None if not present or
-            decoding fails.
-    """
+    """Response-headers audit record. ``raw_headers`` values are base64-encoded."""
 
     request_id: str
     raw_headers: Dict[str, str]
@@ -888,34 +692,9 @@ class ResponseHeadersRecord:
 
 @dataclass
 class ResponseBodyRecord:
-    """Response body record for Firehose stream containing HTTP response body data.
+    """One chunk of a response body. SSE/chunked streams emit one record per chunk.
 
-    This record is captured by the Envoy proxy via Lua script and published to the
-    response-body Firehose stream. For streaming responses (e.g., Server-Sent Events),
-    each chunk is published as it arrives. Large responses are automatically split into
-    chunks to stay within Firehose record size limits.
-
-    Body data is base64-encoded by Lua before publishing to safely handle
-    binary content.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        body: Base64-encoded body content for this chunk. May contain compressed data
-            if content-encoding header indicates compression (see response headers).
-            For streaming responses, contains the data received in that stream chunk.
-        body_size: Size of this chunk's body in bytes (after base64 encoding). Note
-            this is the size of the encoded string, not the original binary data.
-        timestamp: ISO-8601 formatted timestamp when this body chunk was captured.
-            For streaming responses, each chunk has its own timestamp indicating when
-            it was received.
-        chunk_id: Zero-based index of this chunk. 0 for first chunk, incremented for
-            subsequent chunks. For streaming responses, increments with each received
-            chunk. ETL jobs currently only process chunk_id=0.
-        num_chunks: Total number of chunks for this response body. If > 1, the body
-            was split across multiple records. For streaming responses, this may not
-            be known until the final chunk. ETL jobs set a 'truncated' flag when
-            num_chunks > 1 to indicate incomplete data.
-        published_at: ISO-8601 timestamp when this record was published to Firehose.
+    ``dropped`` / ``truncated`` semantics mirror :class:`RequestBodyRecord`.
     """
 
     request_id: str
@@ -925,6 +704,8 @@ class ResponseBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    dropped: bool = False
+    truncated: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Firehose publishing."""
@@ -937,6 +718,8 @@ class ResponseBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "dropped": self.dropped,
+            "truncated": self.truncated,
         }
 
     @classmethod
@@ -951,25 +734,14 @@ class ResponseBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "dropped", "type": "boolean"},
+            {"name": "truncated", "type": "boolean"},
         ]
 
 
 @dataclass
 class ResponseTrailersRecord:
-    """Response trailers record for Firehose stream containing HTTP response trailers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    response-trailers Firehose stream. Trailers are HTTP headers that appear after the
-    message body in chunked transfer encoding. They are commonly used in streaming
-    responses to send metadata after the body is complete.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        trailers: Dictionary of trailer name-value pairs. Keys are lowercase trailer
-            names. Values may be base64-encoded depending on implementation.
-        timestamp: ISO-8601 formatted timestamp when trailers were captured.
-        published_at: ISO-8601 timestamp when this record was published to Firehose.
-    """
+    """Response-trailers audit record."""
 
     request_id: str
     trailers: Dict[str, str]
@@ -995,6 +767,95 @@ class ResponseTrailersRecord:
             {"name": "trailers", "type": "map<string,string>"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+        ]
+
+
+@dataclass
+class WSSummaryRecord:
+    """Per-connection WebSocket summary emitted on stream end.
+
+    A joinable, cheap view of connection-level shape (duration, frame
+    counts per direction, close code) so analytics don't have to
+    aggregate the body stream.
+    """
+
+    request_id: str
+    timestamp: str
+    published_at: str
+    duration_seconds: float
+    close_code: Optional[int] = None
+    close_initiator: Optional[str] = None
+    client_text_frames: int = 0
+    client_binary_frames: int = 0
+    client_ping_frames: int = 0
+    client_pong_frames: int = 0
+    client_close_frames: int = 0
+    server_text_frames: int = 0
+    server_binary_frames: int = 0
+    server_ping_frames: int = 0
+    server_pong_frames: int = 0
+    server_close_frames: int = 0
+    # Audit-integrity counters: how many frames were lost to publish-queue
+    # backpressure or capped by the deflate decompression limit. Per-frame
+    # records also carry ``dropped`` / ``truncated`` sentinels; these are
+    # the cheap aggregate view downstream analytics can join on without
+    # scanning the body stream.
+    dropped_client_frames: int = 0
+    dropped_server_frames: int = 0
+    truncated_client_frames: int = 0
+    truncated_server_frames: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for Firehose publishing."""
+        return {
+            "record_type": "ws_summary",
+            "request_id": self.request_id,
+            "timestamp": self.timestamp,
+            "published_at": self.published_at,
+            "duration_seconds": self.duration_seconds,
+            "close_code": self.close_code,
+            "close_initiator": self.close_initiator,
+            "client_text_frames": self.client_text_frames,
+            "client_binary_frames": self.client_binary_frames,
+            "client_ping_frames": self.client_ping_frames,
+            "client_pong_frames": self.client_pong_frames,
+            "client_close_frames": self.client_close_frames,
+            "server_text_frames": self.server_text_frames,
+            "server_binary_frames": self.server_binary_frames,
+            "server_ping_frames": self.server_ping_frames,
+            "server_pong_frames": self.server_pong_frames,
+            "server_close_frames": self.server_close_frames,
+            "dropped_client_frames": self.dropped_client_frames,
+            "dropped_server_frames": self.dropped_server_frames,
+            "truncated_client_frames": self.truncated_client_frames,
+            "truncated_server_frames": self.truncated_server_frames,
+        }
+
+    @classmethod
+    def glue_schema(cls) -> List[Dict[str, str]]:
+        """Return Glue table schema for this record type."""
+        return [
+            {"name": "record_type", "type": "string"},
+            {"name": "request_id", "type": "string"},
+            {"name": "timestamp", "type": "string"},
+            {"name": "published_at", "type": "string"},
+            {"name": "duration_seconds", "type": "double"},
+            {"name": "close_code", "type": "int"},
+            {"name": "close_initiator", "type": "string"},
+            {"name": "client_text_frames", "type": "bigint"},
+            {"name": "client_binary_frames", "type": "bigint"},
+            {"name": "client_ping_frames", "type": "bigint"},
+            {"name": "client_pong_frames", "type": "bigint"},
+            {"name": "client_close_frames", "type": "bigint"},
+            {"name": "server_text_frames", "type": "bigint"},
+            {"name": "server_binary_frames", "type": "bigint"},
+            {"name": "server_ping_frames", "type": "bigint"},
+            {"name": "server_pong_frames", "type": "bigint"},
+            {"name": "server_close_frames", "type": "bigint"},
+            {"name": "dropped_client_frames", "type": "bigint"},
+            {"name": "dropped_server_frames", "type": "bigint"},
+            {"name": "truncated_client_frames", "type": "bigint"},
+            {"name": "truncated_server_frames", "type": "bigint"},
         ]
 
 

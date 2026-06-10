@@ -10,11 +10,9 @@ import datetime
 import logging
 import time
 
-import boto3
-from aws_xray_sdk.core import xray_recorder
+from portunus.config import config
 
-# Import function for implementation
-# Re-export these functions for backwards compatibility
+# Re-export these functions for backwards compatibility.
 from portunus.services.arn_service import (
     extract_arn_parts,
     get_role_arn,
@@ -32,25 +30,12 @@ __all__ = [
     "get_role_arn",
     "parse_identity_from_arn",
     "decode_payload",
-    "get_current_session_arn",
     "generate_iso_timestamp",
     "unix_timestamp_to_iso",
     "chunk_body_data",
 ]
 
 
-def get_current_session_arn() -> str:
-    """Get the ARN of the current session.
-
-    Returns:
-        str: The ARN of the current session.
-    """
-    sts_client = boto3.client("sts")
-    response = sts_client.get_caller_identity()
-    return response["Arn"]
-
-
-@xray_recorder.capture_async()  # type: ignore
 async def wait_until(
     condition_func, timeout=3.0, interval=0.05, error_message=None
 ) -> None:
@@ -132,7 +117,7 @@ def unix_timestamp_to_iso(unix_timestamp: int) -> str:
 def chunk_body_data(
     body_bytes: bytes, max_record_size: int | None = None
 ) -> list[bytes]:
-    """Chunk body data into pieces that fit within Firehose limits.
+    """Chunk body data into pieces that fit within Firehose record limits.
 
     Args:
         body_bytes: The body data to chunk
@@ -143,8 +128,6 @@ def chunk_body_data(
     Chunk order in the list determines the chunk_id.
     """
     if max_record_size is None:
-        from portunus.config import config
-
         max_record_size = config.firehose.max_record_size
 
     max_b64_per_chunk = max_record_size - 100

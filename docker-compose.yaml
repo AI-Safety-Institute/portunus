@@ -14,7 +14,11 @@ services:
     networks:
       app_network:
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://portunus:8080/ping | grep -qE '^(200)$'"]
+      # Portunus shares the proxy container's network namespace (see the
+      # ``portunus`` service below), so its REST surface is reachable on the
+      # proxy's bridge IP rather than on a ``portunus`` DNS name. Anything
+      # bound to 0.0.0.0:8080 in portunus answers on ``proxy:8080``.
+      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://proxy:8080/ping | grep -qE '^(200)$'"]
       interval: 15s
       timeout: 2s
       retries: 5
@@ -31,7 +35,7 @@ services:
     environment:
       # LocalStack configuration: https://docs.localstack.cloud/references/configuration/
       - DEBUG=${DEBUG:-0}
-      - SERVICES=glue,kms,firehose,s3,dynamodb,sts,secretsmanager
+      - SERVICES=glue,kms,kinesis,firehose,s3,dynamodb,sts,secretsmanager
       # test credentials to force the same account to be used by default
       - AWS_ACCESS_KEY_ID=000000000000
       - AWS_SECRET_ACCESS_KEY=test
@@ -64,8 +68,13 @@ services:
     init: true
     networks:
       app_network:
+    # Publishes both the Envoy listener (8888) and portunus' REST surface
+    # (8080). Portunus shares this container's network namespace, so its
+    # 8080 listener is reachable as ``proxy:8080`` from other services on
+    # ``app_network`` (e.g. the ``health`` container's smoke probe).
     ports:
       - "8888:8888"
+      - "8080:8080"
     environment:
       TARGET_HOST_HTTP2_OPTIONS: "null"
       TARGET_HOST_TRANSPORT_SOCKET: "null"
@@ -75,11 +84,21 @@ services:
       API_KEY_HEADER: authorization
       API_KEY_PREFIX: "Bearer "
       LISTEN_PORT: 8888
-      PORTUNUS_HOST: portunus
-      PORTUNUS_PORT: 8080
       TARGET_HOST: http-bun
       TARGET_PORT: 80
-      WS_TARGET_HOST: ws-echo  # Override for local WS testing (defaults to TARGET_HOST in prod)
+      # Route WS upgrades to the dedicated ws-echo container, but keep
+      # plain HTTP at http-bun. Prod typically routes both at the same
+      # provider host (entrypoint.sh defaults WS_TARGET_HOST to
+      # TARGET_HOST); this override exists so the docker-compose
+      # behaviour tests can exercise WS round-trips without needing a
+      # provider that responds to both protocols.
+      WS_TARGET_HOST: ws-echo
+      WS_TARGET_PORT: 80
+      # ws-echo speaks HTTP/1.1 plaintext, so disable the cluster's TLS
+      # transport socket. h2 pinning is no longer env-var-driven —
+      # ws_upstream is fixed to HTTP/1.1 at config level via
+      # typed_extension_protocol_options.
+      WS_TARGET_HOST_TRANSPORT_SOCKET: "null"
       ENVOY_LOG_LEVEL: info
       AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
       # Uncomment the three env vars below to
@@ -109,8 +128,13 @@ services:
     build: portunus/
     container_name: portunus
     init: true
-    networks:
-      app_network:
+    # Share the proxy container's network namespace so this mirrors the
+    # prod Fargate-sidecar layout: Envoy dials portunus over loopback
+    # (``127.0.0.1:9000`` in ``proxy/envoy.yaml``), and there's exactly one
+    # network endpoint to think about. Because the namespace is shared,
+    # portunus cannot publish its own port mappings — the ``proxy`` service
+    # publishes 8080 on its behalf for the bridged ``health`` smoke probe.
+    network_mode: "service:proxy"
     # x-ray console can automatically display relevant cloudwatch logs by querying
     # the group for a matching trace id. If you want to log docker to cloudwatch,
     # you must put credentials in /root/.aws/credentials default profile
@@ -141,14 +165,32 @@ services:
       # Localstack endpoint. Unset to make real AWS requests
       AWS_ENDPOINT_URL: http://localstack:4566
       REDIS_USE_TLS: "false"
-      # Firehose delivery stream configuration for local testing
-      FIREHOSE_METADATA_STREAM: portunus-stream-metadata
-      FIREHOSE_REQUEST_HEADERS_STREAM: portunus-stream-request-headers
-      FIREHOSE_REQUEST_BODY_STREAM: portunus-stream-request-body
-      FIREHOSE_REQUEST_TRAILERS_STREAM: portunus-stream-request-trailers
-      FIREHOSE_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
-      FIREHOSE_RESPONSE_BODY_STREAM: portunus-stream-response-body
-      FIREHOSE_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
+      # Firehose direct-PUT delivery streams for local testing. Names
+      # must match the streams created by scripts/localstack-init.sh.
+      FIREHOSE_METADATA_STREAM: portunus-firehose-metadata
+      FIREHOSE_REQUEST_HEADERS_STREAM: portunus-firehose-request-headers
+      FIREHOSE_REQUEST_BODY_STREAM: portunus-firehose-request-body
+      FIREHOSE_REQUEST_TRAILERS_STREAM: portunus-firehose-request-trailers
+      FIREHOSE_RESPONSE_HEADERS_STREAM: portunus-firehose-response-headers
+      FIREHOSE_RESPONSE_BODY_STREAM: portunus-firehose-response-body
+      FIREHOSE_RESPONSE_TRAILERS_STREAM: portunus-firehose-response-trailers
+      FIREHOSE_WS_SUMMARY_STREAM: portunus-firehose-ws-summary
+      # Header prefix the proxy uses; pass it to portunus too so denied
+      # responses carry ``x-{prefix}-error: true`` matching the legacy
+      # Lua-filter contract.
+      PORTUNUS_HEADER_PREFIX: aisi-proxy
+      # gRPC ext_authz + ext_proc server: required for the new Envoy filter
+      # chain to function. Without this, ext_authz connects-refused → 403.
+      GRPC_ENABLED: "true"
+      GRPC_PORT: "9000"
+      # Empty proxy_api_key disables the proxy-identity check (test-only mode);
+      # docker-compose's proxy container reaches this server over the
+      # ``app_network`` bridge, not over Service Connect, so the SC-namespace
+      # identity gate that motivates the key in prod doesn't apply locally.
+      # ``GRPC_PROXY_API_KEY_OPTIONAL=true`` acknowledges the gate is
+      # disabled; without it the server fails closed on startup.
+      GRPC_PROXY_API_KEY: ""
+      GRPC_PROXY_API_KEY_OPTIONAL: "true"
 
   ws-echo:
     build: ws-echo

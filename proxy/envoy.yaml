@@ -5,11 +5,8 @@ static_resources:
       socket_address:
         address: 0.0.0.0
         port_value: ${LISTEN_PORT}
-    # Large buffer size (50 MiB) for buffering complete request bodies
-    # This is necessary because:
-    #  1. Our authentication requires access to the full request before forwarding
-    #  2. Large requests are common with API services (e.g., embedding large documents)
-    # Note that responses are streamed and NOT buffered for better performance
+    # 50 MiB: some upstream LLM APIs accept large request bodies
+    # (e.g. long-document embeddings).
     per_connection_buffer_limit_bytes: 52428800  # 50 MiB
     filter_chains:
     - filters:
@@ -30,7 +27,7 @@ static_resources:
                 segment_name: pp-${TARGET_HOST}
             spawn_upstream_span: true
             verbose: true
-          generate_request_id: false
+          generate_request_id: true
           access_log:
           - name: envoy.access_loggers.file
             typed_config:
@@ -38,7 +35,7 @@ static_resources:
               path: "/dev/stdout"
               json_format:
                 timestamp: "%START_TIME%"
-                http_x_trace_id: "%DYNAMIC_METADATA(envoy.filters.http.lua:request_id)%"
+                http_x_request_id: "%REQ(X-REQUEST-ID)%"
                 http_method: "%REQ(:METHOD)%"
                 http_path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
                 http_protocol: "%PROTOCOL%"
@@ -60,94 +57,133 @@ static_resources:
                 requested_server_name: "%REQUESTED_SERVER_NAME%"
           stat_prefix: ingress_http
           codec_type: AUTO
-          # Increased stream_idle_timeout from default of 5m to 60m (3600s)
-          # This is important for streaming responses (like SSE) where tokens may arrive slowly
-          # or for long-running API calls like those to LLM APIs
-          # Without this, connections would time out after 5 minutes of inactivity
-          # Ref: https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts#stream-timeouts
+          # SSE / slow LLM tokens / WS sessions need a long idle timeout.
           stream_idle_timeout: 3600s
+          # Default is 1s, which adds a full second of latency to every
+          # WS close (those terminate via close frame at the app layer).
+          delayed_close_timeout: 0.1s
           upgrade_configs:
           - upgrade_type: websocket
           route_config:
             name: local_route
+            # Defence in depth: strip internal x-portunus-* inbound;
+            # the authoritative target_host comes via gRPC initial_metadata
+            # below. Client-forgery of x-portunus-signing-required would
+            # spuriously trigger the signing pass.
+            request_headers_to_remove:
+              - x-portunus-debug-id
+              - x-portunus-proxy-key
+              - x-portunus-target-host
+              - x-portunus-signing-required
+              # content-digest / signature / signature-input forgery
+              # protection lives in ext_authz #1's headers_to_remove,
+              # NOT here. Route-level remove applies after ext_authz
+              # mutations, so listing them here would strip the
+              # legitimate values ext_authz #2 adds on the signing pass.
             virtual_hosts:
             - name: local_service
               domains: ["*"]
               routes:
-              # WebSocket upgrades on any path route to the Portunus WS relay.
-              # Envoy matches the Upgrade header before falling through to the
-              # default HTTP route. Portunus handles auth and relays messages
-              # to the upstream target with per-message Kinesis logging.
+              # ALB health check — no auth, no upstream call.
+              - match:
+                  path: "/ping"
+                direct_response:
+                  status: 200
+                  body:
+                    inline_string: "ok\n"
+                response_headers_to_add:
+                - header:
+                    key: x-${PORTUNUS_HEADER_PREFIX}-ping
+                    value: "true"
+                typed_per_filter_config:
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    disabled: true
+                  envoy.filters.http.ext_proc:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                    disabled: true
+              # WS route. ``observability_mode: true`` on the ext_proc
+              # filter only supports body modes NONE or STREAMED — FDS is
+              # silently rejected at runtime with "Wrong body mode for
+              # observability mode, no data is sent." Trailer mode SEND
+              # is kept (no-op for WS, which has no HTTP trailers).
               - match:
                   prefix: "/"
                   headers:
                   - name: "upgrade"
                     string_match:
                       exact: "websocket"
-                # Disable Lua filter for WS — auth is handled by Portunus directly.
+                      # RFC 6455 §4.2.1: HTTP Upgrade tokens are
+                      # case-insensitive. Clients legitimately send
+                      # ``Upgrade: WebSocket`` mixed-case.
+                      ignore_case: true
+                metadata:
+                  filter_metadata:
+                    envoy.filters.http.ext_proc:
+                      websocket: true
                 typed_per_filter_config:
-                  envoy.filters.http.lua:
-                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
-                    disabled: true
-                request_headers_to_add:
-                - header:
-                    key: "${PORTUNUS_API_KEY_HEADER}"
-                    value: "${PORTUNUS_API_KEY}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-host"
-                    value: "${WS_TARGET_HOST}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-port"
-                    value: "${TARGET_PORT}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-use-tls"
-                    value: "${TARGET_HOST_USE_TLS}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    check_settings:
+                      context_extensions:
+                        target_host: "${WS_TARGET_HOST}"
+                  envoy.filters.http.ext_proc:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                    overrides:
+                      processing_mode:
+                        request_header_mode: SEND
+                        response_header_mode: SEND
+                        request_body_mode: STREAMED
+                        response_body_mode: STREAMED
+                        request_trailer_mode: SEND
+                        response_trailer_mode: SEND
                 route:
-                  cluster: ${PORTUNUS_HOST}
+                  # Static name (not ${WS_TARGET_HOST}) so the WS and
+                  # HTTP clusters don't collide when WS_TARGET_HOST
+                  # defaults to TARGET_HOST in prod.
+                  cluster: ws_upstream
                   timeout: 0s
-                  # Rewrite Host so the shared ALB routes to the Portunus service,
-                  # not back to this proxy (which would loop until XFF hits 30 IPs → 463).
-                  host_rewrite_literal: "${PORTUNUS_HOST}"
+                  # Bounded WS connection lifetime so scale-out actually
+                  # rebalances. With ``timeout: 0s`` there is no upstream
+                  # response timeout (correct — WS is long-lived), but
+                  # without a cap a connection opened pre-scale-out stays
+                  # pinned to its original task forever. 55min lets a 60min
+                  # OpenAI Realtime session complete naturally while still
+                  # cycling pathologically long sessions. Per-route so HTTP
+                  # / SSE traffic is unaffected. SDK reconnect handles the
+                  # close (TCP FIN → 1006; cleaner 1001 needs a WASM
+                  # filter, tracked as follow-up).
+                  max_stream_duration:
+                    max_stream_duration: 3300s
+                  # Without host rewrite, Cloudflare etc. reject on
+                  # host/SNI mismatch.
+                  host_rewrite_literal: "${WS_TARGET_HOST}"
                   upgrade_configs:
                   - upgrade_type: websocket
-              # Default HTTP route through Lua filter
               - match:
                   prefix: "/"
                 route:
                   cluster: ${TARGET_HOST}
-                  timeout: 0s # no timeout
+                  timeout: 0s
+                  host_rewrite_literal: "${TARGET_HOST}"
                   retry_policy:
                     retry_on: reset
                     num_retries: 3
           http_filters:
           - name: envoy.filters.http.local_ratelimit
-            # This filter enable rate-limiting on a per-proxy basis, so that we
-            # can rate limit for specific projects/labs as required
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
               stat_prefix: http_local_rate_limiter
-              # Conditionally include token_bucket configuration only when rate limiting is enabled
               token_bucket:
-                # Each request processed by the filter consumes a single token.
-                # If the token is available, the request will be allowed.
-                # If no tokens are available, the request will receive the configured rate limit status.
-                #
-                # https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/local_rate_limit_filter#config-http-filters-local-rate-limit
-                # and
-                # https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/local_ratelimit/v3/local_rate_limit.proto#envoy-v3-api-field-extensions-filters-http-local-ratelimit-v3-localratelimit-token-bucket
                 max_tokens: ${RATE_LIMIT_REQUESTS_PER_INTERVAL}
                 tokens_per_fill: ${RATE_LIMIT_REQUESTS_PER_INTERVAL}
                 fill_interval: ${RATE_LIMIT_INTERVAL_SECONDS}s
-              filter_enabled: # Enable the filter (it defaults to zero percent)
+              filter_enabled:
                 runtime_key: local_rate_limit_enabled
                 default_value:
                   numerator: ${RATE_LIMIT_PERCENT_ENABLED}
                   denominator: HUNDRED
-              filter_enforced: # Also "enforce" the filter (also defaults to zero percent)
+              filter_enforced:
                 runtime_key: local_rate_limit_enforced
                 default_value:
                   numerator: ${RATE_LIMIT_PERCENT_ENABLED}
@@ -155,16 +191,120 @@ static_resources:
               response_headers_to_add:
                 - append_action: OVERWRITE_IF_EXISTS_OR_ADD
                   header:
-                    # Add rate-limit response header when rate-limited,
-                    # so we can debug which rate-limits come from our proxy vs the lab
                     key: x-${PORTUNUS_HEADER_PREFIX}-rate-limit
                     value: "true"
               local_rate_limit_per_downstream_connection: false
-          - name: envoy.filters.http.lua
+          # ext_authz #1 — header-only auth pass. Sets the
+          # ``signing_required`` request header that the composite
+          # filter below uses to gate ext_authz #2.
+          - name: envoy.filters.http.ext_authz
             typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-              default_source_code:
-                filename: /envoy/lua_subst.lua
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              transport_api_version: V3
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: portunus_grpc_cluster
+                timeout: 5s
+                initial_metadata:
+                # Channel-identity gate.
+                - key: x-portunus-proxy-key
+                  value: "${PORTUNUS_API_KEY}"
+                # Authoritative target_host; the matching HTTP header
+                # is stripped at route_config so clients cannot forge.
+                - key: x-portunus-target-host
+                  value: "${TARGET_HOST}"
+              failure_mode_allow: false
+          # composite — invokes ext_authz #2 (signing pass) only when
+          # ext_authz #1 set ``x-portunus-signing-required: true``.
+          # Unsigned tenants stream end-to-end without body buffering.
+          - name: envoy.filters.http.composite
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
+              extension_config:
+                name: composite
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.composite.v3.Composite
+              xds_matcher:
+                matcher_tree:
+                  input:
+                    name: signing-required
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput
+                      header_name: x-portunus-signing-required
+                  exact_match_map:
+                    map:
+                      "true":
+                        action:
+                          name: signing-ext-authz
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.filters.http.composite.v3.ExecuteFilterAction
+                            typed_config:
+                              name: envoy.filters.http.ext_authz
+                              typed_config:
+                                "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                                transport_api_version: V3
+                                grpc_service:
+                                  envoy_grpc:
+                                    cluster_name: portunus_grpc_cluster
+                                  # KMS.Sign tail can exceed 5s under load.
+                                  timeout: 15s
+                                  initial_metadata:
+                                  - key: x-portunus-proxy-key
+                                    value: "${PORTUNUS_API_KEY}"
+                                  - key: x-portunus-target-host
+                                    value: "${TARGET_HOST}"
+                                  # Routes to the signing branch in Portunus's
+                                  # Check method (default is the auth branch).
+                                  - key: x-portunus-pass
+                                    value: signing
+                                failure_mode_allow: false
+                                # Buffer the body so the signing pass can
+                                # compute Content-Digest over the full
+                                # payload. 32 MiB matches Anthropic's
+                                # documented request-body ceiling.
+                                # ``allow_partial_message: false`` so
+                                # Envoy returns 413 instead of silently
+                                # truncating — signing a truncated body
+                                # would produce a valid signature over
+                                # the wrong bytes.
+                                with_request_body:
+                                  max_request_bytes: 33554432
+                                  allow_partial_message: false
+                                  pack_as_bytes: true
+          # Observability via Portunus ext_proc. ``failure_mode_allow:
+          # true`` — if Portunus is slow we lose audit fidelity rather
+          # than dropping customer traffic.
+          - name: envoy.filters.http.ext_proc
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: portunus_grpc_cluster
+                timeout: 30s
+                initial_metadata:
+                - key: x-portunus-proxy-key
+                  value: "${PORTUNUS_API_KEY}"
+              failure_mode_allow: true
+              # Fire-and-forget: Envoy ignores ProcessingResponses, so
+              # the per-message ACK / body-echo round-trips disappear.
+              observability_mode: true
+              # Forward ext_authz #1's dynamic_metadata so the Process
+              # service can publish the audit record off the auth path.
+              metadata_options:
+                forwarding_namespaces:
+                  untyped:
+                  - envoy.filters.http.ext_authz
+              processing_mode:
+                request_header_mode: SEND
+                response_header_mode: SEND
+                # observability_mode only supports body modes NONE and
+                # STREAMED. FDS is silently rejected at runtime with
+                # "Wrong body mode for observability mode, no data is
+                # sent." and no body bytes reach the ext_proc service.
+                request_body_mode: STREAMED
+                response_body_mode: STREAMED
+                request_trailer_mode: SEND
+                response_trailer_mode: SEND
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -174,9 +314,13 @@ static_resources:
     connect_timeout: 5s
     type: LOGICAL_DNS
     dns_lookup_family: V4_ONLY
-    lb_policy: ROUND_ROBIN
+    # LOGICAL_DNS resolves to a single IP per connection, so lb_policy is
+    # mostly decorative here — but if the cluster ever moves to STRICT_DNS
+    # (multivalue A records, multiple endpoints), LEAST_REQUEST is what
+    # we want. Cheap to keep aligned with intent.
+    lb_policy: LEAST_REQUEST
     common_http_protocol_options:
-      idle_timeout: 60s  # Set the idle timeout to 60 seconds
+      idle_timeout: 60s
     upstream_connection_options:
       tcp_keepalive:
         keepalive_probes: 1
@@ -197,11 +341,15 @@ static_resources:
                 address: ${TARGET_HOST}
                 port_value: ${TARGET_PORT}
     transport_socket: ${TARGET_HOST_TRANSPORT_SOCKET}
-  - name: ${PORTUNUS_HOST}
+  # HTTP/1.1-only cluster: if this speaks h2 to the upstream, Envoy
+  # converts inbound h1 Upgrade requests into RFC 8441 extended CONNECT,
+  # which AWS ALB and most CDNs reject with 400. Pin h1 via the typed
+  # extension path so env-substitution can't accidentally enable h2.
+  - name: ws_upstream
     connect_timeout: 5s
     type: LOGICAL_DNS
     dns_lookup_family: V4_ONLY
-    lb_policy: ROUND_ROBIN
+    lb_policy: LEAST_REQUEST
     common_http_protocol_options:
       idle_timeout: 60s
     upstream_connection_options:
@@ -209,16 +357,62 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    # Must stay HTTP/1.1 — WebSocket relay uses the traditional Upgrade mechanism
-    # which is forbidden in HTTP/2 (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441)
-    # would work but uvicorn doesn't support it. Do not add http2_protocol_options here.
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http_protocol_options: {}
+    circuit_breakers:
+      thresholds:
+        - priority: DEFAULT
+          max_connections: ${TARGET_MAX_CONNECTIONS}
     load_assignment:
-      cluster_name: ${PORTUNUS_HOST}
+      cluster_name: ws_upstream
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${WS_TARGET_HOST}
+                port_value: ${WS_TARGET_PORT}
+    transport_socket: ${WS_TARGET_HOST_TRANSPORT_SOCKET}
+  # Portunus gRPC cluster. STRICT_DNS so the same image works for both
+  # the sidecar topology (PORTUNUS_HOST=127.0.0.1 — one endpoint, no
+  # DNS to refresh) and any future DNS-based deployment, without
+  # rebuilding. The SC-era tuning (dns_refresh_rate, LEAST_REQUEST,
+  # max_concurrent_streams) was for spreading across multiple Portunus
+  # tasks behind a multivalue A-record; defaults are fine for a single
+  # endpoint and remain reasonable for a future multi-task setup.
+  - name: portunus_grpc_cluster
+    connect_timeout: 5s
+    type: STRICT_DNS
+    common_http_protocol_options:
+      idle_timeout: 60s
+    upstream_connection_options:
+      tcp_keepalive:
+        keepalive_probes: 1
+        keepalive_interval: 60
+        keepalive_time: 10
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    # Fail fast on a stalled portunus rather than queueing into the 5s
+    # ext_authz timeout.
+    circuit_breakers:
+      thresholds:
+        - priority: DEFAULT
+          max_connections: 1024
+          max_pending_requests: 256
+          max_requests: 2048
+          max_retries: 3
+    load_assignment:
+      cluster_name: portunus_grpc_cluster
       endpoints:
       - lb_endpoints:
         - endpoint:
             address:
               socket_address:
                 address: ${PORTUNUS_HOST}
-                port_value: ${PORTUNUS_PORT}
-    transport_socket: ${PORTUNUS_TRANSPORT_SOCKET}
+                port_value: ${PORTUNUS_GRPC_PORT}

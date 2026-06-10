@@ -83,7 +83,6 @@ def sign_request(
     Raises:
         CredentialsError: If the user's AWS credentials are invalid or expired
     """
-    # RFC 9421 signature base
     created: int = int(datetime.now().timestamp())
     algorithm: str = "ecdsa-p256-sha256"
 
@@ -121,8 +120,8 @@ def sign_request(
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         logging.error(
-            f"KMS sign operation failed: {error_code}",
-            exc_info=e,
+            "KMS sign operation failed: %s",
+            error_code or type(e).__name__,
             extra={
                 "kms_key_arn": signing_key.kms_key_arn,
                 "provider_id": signing_key.provider_id,

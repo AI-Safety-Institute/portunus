@@ -1,157 +1,74 @@
-# Proxy Component
+# Proxy
 
-Envoy-based reverse proxy that intercepts API requests, retrieves credentials from AWS Secrets Manager via Portunus, and forwards requests with proper authentication.
+Envoy-based reverse proxy that handles client traffic and delegates authentication and audit to Portunus via gRPC.
 
 ## Structure
 
 ```
 proxy/
-├── envoy.yaml           # Envoy configuration
-├── lua.lua              # Main Lua filter script
-├── entrypoint.sh        # Startup script (sets defaults, runs envsubst)
-├── Dockerfile           # Proxy container image
-├── xray.json            # AWS X-Ray tracing config
-└── lib/                 # Lua library and tests
-    ├── proxy_utils/     # Reusable Lua modules
-    │   ├── init.lua
-    │   ├── auth.lua
-    │   ├── utils.lua
-    │   └── request_signing.lua
-    ├── spec/            # Unit tests using pure busted stubs
-    ├── Dockerfile.test  # Test container
-    └── proxy-utils-1.0-0.rockspec
+├── envoy.yaml      # Envoy configuration: listener, filter chain, ext_authz/ext_proc clusters, routes
+├── entrypoint.sh   # Startup script — sets defaults and runs envsubst over envoy.yaml
+├── Dockerfile      # Proxy container image
+└── xray.json       # AWS X-Ray tracing config
 ```
 
-## Request Flow
+There is no Lua filter and no proxy-utils library: all auth and audit logic lives in the Portunus gRPC servicers.
 
-1. **Client** sends request with special auth header containing AWS credentials + secret ARN
-2. **Envoy Lua filter** (`lua.lua`) intercepts request:
-   - Extracts auth payload from header
-   - Calls Portunus `/authorise` endpoint (with caching)
-   - Retrieves real API key from response
-   - Replaces auth header with real API key
-   - Optionally signs request (Anthropic signature format)
-3. **Envoy** forwards modified request to target API
-4. **Target API** processes request with real credentials
-5. **Envoy** streams response back to client, logging request/response data to Portunus
+## Filter chain
+
+1. **Common HTTP filters** — request-id, X-Ray tracing.
+2. **`envoy.filters.http.local_ratelimit`** — first in the chain; rejects excess load before any backend RPC.
+3. **`envoy.filters.http.ext_authz` #1** — gRPC call to `PortunusAuthServicer.Check` on headers only. Returns:
+   - The real `Authorization` header (real api_key from the secret).
+   - Request header `x-portunus-signing-required: true|false` (the composite-filter gate; not dynamic_metadata — that matcher input doesn't exist in Envoy 1.36).
+   - `dynamic_metadata` carrying `principal_info` / `secret_arn` for the downstream ext_proc audit.
+4. **`envoy.filters.http.composite`** — matches the `x-portunus-signing-required: true` request header via `HttpRequestHeaderMatchInput` and dispatches a second `ext_authz` (with `with_request_body: max_request_bytes=32MiB, allow_partial_message=false`). The inner filter reads the buffered body, computes Content-Digest, signs via KMS, and adds the Signature / Signature-Input headers. Unsigned tenants skip this entirely.
+5. **`envoy.filters.http.ext_proc`** — gRPC call to `PortunusProcessServicer.Process` under `observability_mode: true` with `request_body_mode / response_body_mode: STREAMED`. Envoy ignores every `ProcessingResponse`, so the call is fire-and-forget from the customer's data path. Streams request / response bodies and post-101 WebSocket frames to Portunus for Firehose publication.
+6. **`envoy.filters.http.router`** — forward to the target cluster.
+
+## Routes
+
+The listener exposes:
+
+- `/ping` — direct 200 OK; both ext_authz and ext_proc are disabled per-route.
+- **WebSocket** — a route matched by `Upgrade: websocket` header. Goes to the `${WS_TARGET_HOST}` cluster with an `ExtProcPerRoute` override that flags the stream as WS (so the Process service parses frames via wsproto).
+- **Default** — everything else goes to the `${TARGET_HOST}` upstream.
 
 ## Configuration
 
-Configuration is injected via environment variables using `envsubst` in `entrypoint.sh`:
+Injected via environment variables using `envsubst` in `entrypoint.sh`:
 
 ```bash
-# Core settings
+# Core
 API_KEY_HEADER=authorization
 API_KEY_PREFIX="Bearer "
+PORTUNUS_HEADER_PREFIX=portunus
 TARGET_HOST=api.example.com
-TARGET_HOST_USE_TLS=true
+WS_TARGET_HOST=ws.example.com     # optional, separate WS upstream
 
-# Portunus connection
-PORTUNUS_HOST=portunus.internal:8080
-PORTUNUS_API_KEY=secret-key
-PORTUNUS_API_KEY_HEADER=x-api-key
+# Portunus gRPC
+PORTUNUS_HOST=portunus.internal
+PORTUNUS_GRPC_PORT=9000
+PORTUNUS_API_KEY=pre-shared-key   # carried in initial_metadata as
+                                   # `x-portunus-proxy-key`. Must equal
+                                   # `GRPC_PROXY_API_KEY` on the Portunus
+                                   # side; in CDK both come from the same
+                                   # Secrets Manager value.
 
 # Optional request signing (Anthropic)
 ANTHROPIC_REQUEST_SIGNING_PROVIDER_KEY_ID=provider-key-id
 ANTHROPIC_REQUEST_SIGNING_KMS_KEY_ARN=arn:aws:kms:...
 
 # Rate limiting
-RATE_LIMIT_PERCENT_ENABLED=0-100
+RATE_LIMIT_PERCENT_ENABLED=0       # 0 disables
 RATE_LIMIT_REQUESTS_PER_INTERVAL=100
 RATE_LIMIT_INTERVAL_SECONDS=60
 ```
 
-See `entrypoint.sh` for full list of environment variables and defaults.
-
-## Lua Library
-
-The `lib/` directory contains a testable Lua library that extracts complex logic from `lua.lua`:
-
-- **`proxy_utils.auth`** - Authentication: extract payloads, call Portunus, send error responses
-- **`proxy_utils.utils`** - Utilities: body/header handling, base64 encoding
-- **`proxy_utils.request_signing`** - Request signing: compute content digests
-
-### Usage
-
-```lua
--- In lua.lua: create config object (populated via envsubst)
-local config = {
-  api_key_header = "${API_KEY_HEADER}",
-  portunus_host = "${PORTUNUS_HOST}",
-  -- ...
-}
-
-local proxy_utils = require("proxy_utils")
-
--- Use library functions
-local payload, err = proxy_utils.auth.extract_auth_payload(request_handle, config.api_key_header, config.api_key_prefix)
-local headers, body = proxy_utils.auth.call_auth_service(request_handle, payload, digest, config)
-```
-
-### Testing
-
-Tests run in Docker using the same `envoyproxy/envoy:v1.31.0` base image as production:
-
-```bash
-cd proxy/lib
-
-# Build and run tests
-docker build -f Dockerfile.test -t proxy-utils-tests .
-docker run --rm proxy-utils-tests
-# ●●●●●●●●●●●●●●●●●●●●●●●
-# X successes / 0 failures / 0 errors / 0 pending : 0.0Xs
-# Exit code 0 on success, 1 on failure
-
-# Show test names (TAP format)
-docker run --rm proxy-utils-tests busted -o TAP
-
-# Run specific test file
-docker run --rm proxy-utils-tests busted spec/auth_spec.lua
-
-# List all test names
-docker run --rm proxy-utils-tests busted --list
-```
-
-Unit tests use pure busted stubs to verify library behavior without running Envoy:
-
-```lua
-it("should extract auth payload", function()
-  local headers_stub = {
-    get = stub.new().returns("Bearer token")
-  }
-  local handle = {
-    headers = stub.new().returns(headers_stub)
-  }
-
-  local payload, err = portunus_client:extract_auth_payload(handle)
-
-  assert.equals("token", payload)
-  assert.is_nil(err)
-end)
-```
-
-See `lib/spec/README.md` for testing philosophy and guidelines.
-
-### Extending the Library
-
-To add a new module:
-
-1. Create `lib/proxy_utils/new_module.lua`
-2. Add to `lib/proxy-utils-1.0-0.rockspec`: `["proxy_utils.new_module"] = "proxy_utils/new_module.lua"`
-3. Import in `lib/proxy_utils/init.lua`: `proxy_utils.new_module = require("proxy_utils.new_module")`
-4. Rebuild Docker image
+See `entrypoint.sh` for the full list of variables and defaults.
 
 ## Building
 
 ```bash
-cd proxy
 docker build -t api-key-proxy .
-```
-
-The library is installed during build:
-
-```dockerfile
-COPY lib /tmp/proxy-utils-lib
-WORKDIR /tmp/proxy-utils-lib
-RUN luarocks-5.1 make proxy-utils-1.0-0.rockspec
 ```

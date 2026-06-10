@@ -34,6 +34,8 @@ async def fake_redis():
 
 @pytest.fixture
 def mock_xray():
+    # ``xray_service`` is a module-level singleton in ``portunus.app``;
+    # the handler reads it directly, so DI wouldn't reach the call site.
     mock_segment = AsyncMock()
     mock_segment.trace_id = "test-trace-id"
     with patch("portunus.app.xray_service") as mock:

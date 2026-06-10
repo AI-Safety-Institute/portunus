@@ -10,7 +10,6 @@ import asyncio
 import logging
 from typing import Optional
 
-from aws_xray_sdk.core import xray_recorder
 from botocore.exceptions import ClientError
 
 from portunus.config import config
@@ -24,13 +23,42 @@ from portunus.models import (
     AuthResult,
     AwsCredentials,
     PrincipalInfo,
+    SecretsManagerAuthPayload,
+    SigningKey,
 )
 from portunus.services.arn_service import parse_identity_from_arn
 from portunus.services.cache_service import CacheService
-from portunus.services.secret_validation_service import SecretValidationService
 from portunus.services.secrets_service import SecretsService
 
 logger = logging.getLogger("api.access")
+
+
+def validate_and_extract_api_key(
+    secret_string: str, target_host: str | None
+) -> tuple[str, Optional[SigningKey]]:
+    """Parse a Secrets Manager secret and enforce its host restriction.
+
+    Plaintext secrets pass through with no validation. JSON secrets that
+    declare a ``host`` field are gated: the proxy-supplied ``target_host``
+    must match exactly, otherwise raises :class:`AuthenticationError`.
+
+    Returns ``(api_key, signing_key)`` — ``signing_key`` is set only for
+    request-signing tenants.
+    """
+    secret = SecretsManagerAuthPayload.from_string(secret_string)
+    if secret.host:
+        if not target_host:
+            logger.warning(f"Secret has host ({secret.host}) but proxy sent no target")
+            raise AuthenticationError(
+                "API key has host restriction but target host unknown"
+            )
+        if target_host != secret.host:
+            logger.warning(f"Host mismatch: proxy={target_host}, secret={secret.host}")
+            raise AuthenticationError("API key is not valid for target host")
+        logger.info(f"Target host validation passed for {target_host}")
+    else:
+        logger.info("Secret has no host restriction, skipping validation")
+    return secret.api_key, secret.signing_key
 
 
 class AuthService:
@@ -50,15 +78,12 @@ class AuthService:
         self,
         secrets_service: Optional[SecretsService] = None,
         cache_service: Optional[CacheService] = None,
-        validation_service: Optional[SecretValidationService] = None,
     ):
         """Initialize the AuthService."""
         self.secrets_service = secrets_service or SecretsService()
         self.cache_service = cache_service or CacheService()
-        self.validation_service = validation_service or SecretValidationService()
         self.boto_session = self.secrets_service.boto_session
 
-    @xray_recorder.capture_async()  # type: ignore
     async def get_aws_identity(
         self, credentials: Optional[AwsCredentials] = None
     ) -> PrincipalInfo:
@@ -95,15 +120,18 @@ class AuthService:
             error_code = e.response.get("Error", {}).get("Code", "")
             # https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html#API_AssumeRole_Errors
             if error_code == "ExpiredToken":
-                logger.info(f"Credentials expired when calling STS: {e}")
+                logger.info(
+                    "Credentials expired when calling STS (Code=%s)", error_code
+                )
                 raise CredentialsError("AWS credentials have expired") from e
-            logger.error(f"STS client error: {e}")
+            # Boto exception __str__ can carry header fragments under
+            # certain error codes — log the Code only.
+            logger.error("STS client error (Code=%s)", error_code or type(e).__name__)
             raise CredentialsError(
                 "Failed to get caller identity with provided credentials"
             ) from e
         except Exception as e:
-            # If client creation fails, raise an error
-            logger.error(f"Failed to create STS client: {e}")
+            logger.error("Failed to create STS client: %s", type(e).__name__)
             raise CredentialsError(
                 "Failed to create STS client with provided credentials"
             ) from e
@@ -114,7 +142,6 @@ class AuthService:
         # Parse the ARN to get identity information
         return parse_identity_from_arn(principal_arn)
 
-    @xray_recorder.capture_async()  # type: ignore
     async def authenticate(
         self, payload: AuthPayload, request_id: str, target_host: Optional[str] = None
     ) -> AuthResult:
@@ -144,12 +171,15 @@ class AuthService:
             CredentialsError: If the AWS credentials are invalid or expired
             AuthenticationError: If there's an error during authentication
         """
-        # Check cache first for better performance
+        # Check cache first for better performance. target_host MUST be
+        # part of the lookup key — without it a cache hit short-circuits
+        # SecretValidationService.validate_and_extract_api_key, which is
+        # where the secret's host-restriction is enforced.
         if payload.raw:
             try:
                 async with asyncio.timeout(5):
                     cached_result = await self.cache_service.get_cached_auth_result(
-                        payload.raw
+                        payload.raw, target_host
                     )
                     if cached_result:
                         return AuthResult(
@@ -158,7 +188,7 @@ class AuthService:
                             principal_info=cached_result.principal_info,
                         )
             except Exception as e:
-                logger.error(f"Cache read error during auth: {e}")
+                logger.error("Cache read error during auth: %s", type(e).__name__)
 
         # If not in cache, proceed with full authentication
         try:
@@ -171,9 +201,7 @@ class AuthService:
             raw_secret = await self.secrets_service.fetch_secret(payload)
 
             # Validate and extract API key
-            api_key, signing_key = self.validation_service.validate_and_extract_api_key(
-                raw_secret, target_host
-            )
+            api_key, signing_key = validate_and_extract_api_key(raw_secret, target_host)
 
             # Create auth result
             auth_result = AuthResult(
@@ -188,14 +216,17 @@ class AuthService:
                     async with asyncio.timeout(3):
                         ttl = credentials.seconds_until_expiration()
                         await self.cache_service.cache_auth_result(
-                            payload.raw, auth_result, ttl
+                            payload.raw, auth_result, ttl, target_host
                         )
                 except Exception as e:
-                    logger.error(f"Cache write error during auth: {e}")
+                    logger.error("Cache write error during auth: %s", type(e).__name__)
 
             return auth_result
-        except (PayloadError, CredentialsError):
+        except (PayloadError, CredentialsError, AuthenticationError):
+            # Own exception types — message is curated by us, surface as-is
+            # so callers (and clients via _denied) see the actual reason
+            # (e.g. "API key is not valid for target host").
             raise
         except Exception as e:
-            logger.error(f"Authentication error: {e}")
-            raise AuthenticationError(f"Authentication failed: {e}")
+            logger.error("Authentication error: %s", type(e).__name__)
+            raise AuthenticationError(f"Authentication failed: {type(e).__name__}")
