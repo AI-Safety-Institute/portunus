@@ -16,9 +16,9 @@ repos:
     hooks:
       - id: trailing-whitespace
         # Generated protobuf gencode is machine-managed.
-        exclude: ^portunus/portunus/grpc/_generated/
+        exclude: ^portunus/portunus/admin/
       - id: end-of-file-fixer
-        exclude: ^portunus/portunus/grpc/_generated/
+        exclude: ^portunus/portunus/admin/
       - id: check-yaml
       - id: check-toml
       - id: check-json
@@ -82,8 +82,8 @@ repos:
       - id: proto-generate-check
         name: proto stubs up to date
         # Regenerate (via grpcio-tools — no Buf Schema Registry / network)
-        # and fail if the committed stubs under grpc/_generated drift.
-        entry: bash -c './scripts/gen_proto.sh && git diff --exit-code -- portunus/portunus/grpc/_generated'
+        # and fail if the committed stubs under portunus/admin drift.
+        entry: bash -c './scripts/gen_proto.sh && git diff --exit-code -- portunus/portunus/admin'
         language: system
         files: ^(proto/.*\.proto|scripts/gen_proto\.sh)$
         pass_filenames: false

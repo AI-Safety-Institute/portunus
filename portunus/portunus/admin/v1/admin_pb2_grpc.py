@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from portunus_admin.v1 import admin_pb2 as portunus__admin_dot_v1_dot_admin__pb2
+from portunus.admin.v1 import admin_pb2 as portunus_dot_admin_dot_v1_dot_admin__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in portunus_admin/v1/admin_pb2_grpc.py depends on'
+        + ' but the generated code in portunus/admin/v1/admin_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -37,9 +37,9 @@ class AdminServiceStub(object):
             channel: A grpc.Channel.
         """
         self.FlushCache = channel.unary_unary(
-                '/portunus_admin.v1.AdminService/FlushCache',
-                request_serializer=portunus__admin_dot_v1_dot_admin__pb2.FlushCacheRequest.SerializeToString,
-                response_deserializer=portunus__admin_dot_v1_dot_admin__pb2.FlushCacheResponse.FromString,
+                '/portunus.admin.v1.AdminService/FlushCache',
+                request_serializer=portunus_dot_admin_dot_v1_dot_admin__pb2.FlushCacheRequest.SerializeToString,
+                response_deserializer=portunus_dot_admin_dot_v1_dot_admin__pb2.FlushCacheResponse.FromString,
                 _registered_method=True)
 
 
@@ -62,14 +62,14 @@ def add_AdminServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'FlushCache': grpc.unary_unary_rpc_method_handler(
                     servicer.FlushCache,
-                    request_deserializer=portunus__admin_dot_v1_dot_admin__pb2.FlushCacheRequest.FromString,
-                    response_serializer=portunus__admin_dot_v1_dot_admin__pb2.FlushCacheResponse.SerializeToString,
+                    request_deserializer=portunus_dot_admin_dot_v1_dot_admin__pb2.FlushCacheRequest.FromString,
+                    response_serializer=portunus_dot_admin_dot_v1_dot_admin__pb2.FlushCacheResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'portunus_admin.v1.AdminService', rpc_method_handlers)
+            'portunus.admin.v1.AdminService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('portunus_admin.v1.AdminService', rpc_method_handlers)
+    server.add_registered_method_handlers('portunus.admin.v1.AdminService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -92,9 +92,9 @@ class AdminService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/portunus_admin.v1.AdminService/FlushCache',
-            portunus__admin_dot_v1_dot_admin__pb2.FlushCacheRequest.SerializeToString,
-            portunus__admin_dot_v1_dot_admin__pb2.FlushCacheResponse.FromString,
+            '/portunus.admin.v1.AdminService/FlushCache',
+            portunus_dot_admin_dot_v1_dot_admin__pb2.FlushCacheRequest.SerializeToString,
+            portunus_dot_admin_dot_v1_dot_admin__pb2.FlushCacheResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
-from portunus_admin.v1 import admin_pb2
 
+from portunus.admin.v1 import admin_pb2
 from portunus.exceptions import CacheError
 from portunus.grpc.admin_servicer import PortunusAdminServicer
 from portunus.grpc.proxy_auth import PROXY_KEY_HEADER

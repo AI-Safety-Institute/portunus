@@ -12,13 +12,13 @@ syntax = "proto3";
 // e.g.:
 //   grpcurl -plaintext \
 //     -H "x-portunus-proxy-key: $GRPC_PROXY_API_KEY" \
-//     127.0.0.1:9000 portunus_admin.v1.AdminService/FlushCache
+//     127.0.0.1:9000 portunus.admin.v1.AdminService/FlushCache
 // Server reflection is enabled, so no local .proto copy is needed.
 //
-// Package is `portunus_admin` (not `portunus.admin`) so the generated Python
-// top-level module doesn't shadow the real `portunus` application package on
-// sys.path.
-package portunus_admin.v1;
+// Package `portunus.admin.v1` → generated Python lands as a real submodule of
+// the installed `portunus` package (portunus/admin/v1/), so the stubs import
+// each other by normal absolute import with no sys.path manipulation.
+package portunus.admin.v1;
 
 // AdminService exposes operational actions that previously lived on the
 // retired FastAPI REST surface (`POST /cache/flush`).

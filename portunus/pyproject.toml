@@ -79,9 +79,9 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.ruff]
-# Buf-generated protobuf stubs are machine-written ("DO NOT EDIT"); don't
-# lint/format them. Regenerate with `buf generate` instead.
-extend-exclude = ["portunus/grpc/_generated"]
+# Generated protobuf stubs are machine-written ("DO NOT EDIT"); don't
+# lint/format them. Regenerate with scripts/gen_proto.sh instead.
+extend-exclude = ["portunus/admin"]
 
 [tool.ruff.lint]
 select = ["E",   # pycodestyle errors
@@ -96,15 +96,12 @@ ignore = ["E203", "D10", "D212"]
 convention = "google"
 
 [tool.mypy]
-# Generated protobuf stubs import each other by their proto package root
-# (portunus_admin.v1), so mypy needs _generated on its search path too.
-mypy_path = "portunus/grpc/_generated"
 
 [[tool.mypy.overrides]]
-# Generated protobuf/gRPC stubs: don't follow into them (they ship .pyi but
-# we treat them as opaque), and don't error on the import. follow_imports=skip
-# makes `from portunus_admin.v1 import admin_pb2` resolve as Any.
-module = ["portunus_admin.*"]
+# Generated protobuf/gRPC stubs (portunus.admin.*): don't follow into them
+# (they ship .pyi but we treat them as opaque). follow_imports=skip makes
+# `from portunus.admin.v1 import admin_pb2` resolve as Any.
+module = ["portunus.admin.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 

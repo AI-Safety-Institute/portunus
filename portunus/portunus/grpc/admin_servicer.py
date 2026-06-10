@@ -3,7 +3,7 @@
 Replaces the retired FastAPI ``POST /cache/flush`` endpoint. Served on the
 same loopback gRPC server (127.0.0.1:9000) as ext_authz / ext_proc and gated
 by the same ``x-portunus-proxy-key`` metadata — there is no separate auth
-surface and no network-reachable admin port. See ``proto/portunus_admin``.
+surface and no network-reachable admin port. See ``proto/portunus/admin``.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 
 import grpc
-from portunus_admin.v1 import admin_pb2, admin_pb2_grpc
 
+from portunus.admin.v1 import admin_pb2, admin_pb2_grpc
 from portunus.exceptions import CacheError
 from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.services.cache_service import CacheService

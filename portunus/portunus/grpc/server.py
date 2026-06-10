@@ -23,8 +23,8 @@ from envoy.service.auth.v3 import external_auth_pb2_grpc
 from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
-from portunus_admin.v1 import admin_pb2, admin_pb2_grpc
 
+from portunus.admin.v1 import admin_pb2, admin_pb2_grpc
 from portunus.config import GrpcConfig
 from portunus.grpc.admin_servicer import PortunusAdminServicer
 from portunus.grpc.auth_servicer import PortunusAuthServicer

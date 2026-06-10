@@ -69,8 +69,11 @@ def _wait_for_proxy_ping(timeout: float = 30.0) -> bool:
     return False
 
 
-def _grpc_health(timeout: float = 2.0) -> "health_pb2.HealthCheckResponse.ServingStatus":
+def _grpc_health(timeout: float = 2.0) -> int:
     """Query Portunus' gRPC health from inside the portunus container.
+
+    Returns a ``health_pb2.HealthCheckResponse.ServingStatus`` enum value
+    (an int): SERVING or NOT_SERVING.
 
     The gRPC port is loopback-only, so we exec grpc_health_probe in the
     container rather than dialling from the test host.
@@ -83,8 +86,10 @@ def _grpc_health(timeout: float = 2.0) -> "health_pb2.HealthCheckResponse.Servin
         timeout=timeout + 3,
     )
     # grpc_health_probe exits 0 = SERVING, non-zero otherwise.
-    return health_pb2.HealthCheckResponse.SERVING if out.returncode == 0 else (
-        health_pb2.HealthCheckResponse.NOT_SERVING
+    return (
+        health_pb2.HealthCheckResponse.SERVING
+        if out.returncode == 0
+        else (health_pb2.HealthCheckResponse.NOT_SERVING)
     )
 
 
@@ -216,7 +221,9 @@ def test_inflight_http_request_during_portunus_restart_does_not_hang(
             if last_status == 200:
                 break
         time.sleep(1)
-    assert last_status == 200, f"did not recover to 200 after restart (last={last_status})"
+    assert (
+        last_status == 200
+    ), f"did not recover to 200 after restart (last={last_status})"
 
 
 def test_portunus_restart_keeps_same_topology_and_recovers(
