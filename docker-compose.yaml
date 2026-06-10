@@ -14,11 +14,12 @@ services:
     networks:
       app_network:
     healthcheck:
-      # Portunus shares the proxy container's network namespace (see the
-      # ``portunus`` service below), so its REST surface is reachable on the
-      # proxy's bridge IP rather than on a ``portunus`` DNS name. Anything
-      # bound to 0.0.0.0:8080 in portunus answers on ``proxy:8080``.
-      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://proxy:8080/ping | grep -qE '^(200)$'"]
+      # Portunus has no HTTP surface (FastAPI was removed; it serves only
+      # gRPC on :9000). Envoy still answers ``/ping`` on its listener (8888)
+      # with the auth/proc filters disabled per-route, so that's the smoke
+      # signal that the proxy task is up. Portunus' own liveness is the gRPC
+      # health service, probed by ECS via grpc_health_probe in prod.
+      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/ping | grep -qE '^(200)$'"]
       interval: 15s
       timeout: 2s
       retries: 5
@@ -68,13 +69,12 @@ services:
     init: true
     networks:
       app_network:
-    # Publishes both the Envoy listener (8888) and portunus' REST surface
-    # (8080). Portunus shares this container's network namespace, so its
-    # 8080 listener is reachable as ``proxy:8080`` from other services on
-    # ``app_network`` (e.g. the ``health`` container's smoke probe).
+    # Publishes the Envoy listener (8888). Portunus shares this container's
+    # network namespace and serves only gRPC on loopback 127.0.0.1:9000
+    # (reached by Envoy's ext_authz/ext_proc filters) — there's no HTTP
+    # surface to publish since FastAPI was removed.
     ports:
       - "8888:8888"
-      - "8080:8080"
     environment:
       TARGET_HOST_HTTP2_OPTIONS: "null"
       TARGET_HOST_TRANSPORT_SOCKET: "null"
@@ -154,7 +154,6 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
       # AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
       LOG_LEVEL: info
-      LISTEN_PORT: 8080
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: redis_secure_password

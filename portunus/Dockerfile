@@ -52,4 +52,7 @@ EXPOSE 9000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD grpc_health_probe -addr=127.0.0.1:${GRPC_PORT} || exit 1
 
-CMD ["portunus-server"]
+# The image installs deps only (uv sync --no-install-project) and COPYs the
+# package source, so the project's console scripts aren't generated — invoke
+# the server as a module instead.
+CMD ["python", "-m", "portunus.grpc.server"]
