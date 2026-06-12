@@ -60,6 +60,31 @@ def get_role_arn(session_arn: str) -> str:
     return f"arn:aws:iam::{account_id}:role/{role_name}"
 
 
+def extract_role_name(arn: str) -> Optional[str]:
+    """Extract the IAM role name from an assumed-role session ARN.
+
+    The role name is the value passed to ``iam:ListRoleTags`` (RoleName=...).
+    This reuses the same parsing as :func:`get_role_arn` but returns just the
+    role name, or None when the ARN does not look like an assumed-role ARN.
+
+    Example:
+        ``arn:aws:sts::123456789012:assumed-role/UserProfile_Name_project/sess``
+        -> ``UserProfile_Name_project``
+
+    Args:
+        arn (str): The assumed-role session ARN.
+
+    Returns:
+        Optional[str]: The role name, or None if it cannot be parsed.
+    """
+    if not arn or "assumed-role" not in arn:
+        return None
+    _account_id, path_parts = extract_arn_parts(arn)
+    if path_parts and len(path_parts) > 0 and path_parts[0]:
+        return path_parts[0]
+    return None
+
+
 def parse_identity_from_arn(arn: str):
     """Extract identity information from an AWS ARN.
 

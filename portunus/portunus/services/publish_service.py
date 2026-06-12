@@ -137,6 +137,8 @@ class PublishService:
             project=principal_info.get("project"),
             session_name=principal_info.get("session_name"),
             secret_arn=secret_arn,
+            # Live team attribution; None when stamping is disabled (back-compat).
+            teams=principal_info.get("teams"),
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream

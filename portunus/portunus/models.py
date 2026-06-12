@@ -47,6 +47,17 @@ import logging
 
 logger = logging.getLogger("api.access")
 
+# Sentinel value stamped onto metadata when the caller's team(s) cannot be
+# resolved (missing/unparseable tag, IAM error, etc.). Downstream consumers
+# treat this as "quarantined / unattributed" rather than a real team so the
+# record is not silently attributed to the wrong team.
+UNATTRIBUTED_TEAM = "__unattributed__"
+
+# Delimiter used to flatten the resolved list of team slugs into the single
+# delimited string stored on PrincipalInfo / MetadataRecord, consistent with
+# the other flat string metadata fields.
+TEAMS_DELIMITER = ","
+
 
 class RowLike(Protocol):
     """Protocol for Spark Row objects that can be converted to dicts."""
@@ -354,6 +365,11 @@ class PrincipalInfo:
         principal (Optional[str]): The principal type and name
         session_name (Optional[str]): The session name if present
         project (str): The project name extracted from UserProfile_ roles
+        teams (Optional[str]): The caller's team membership, resolved live from
+            the role's `teams` tag and stored as a delimited string (see
+            TEAMS_DELIMITER). None when team stamping is disabled (the default),
+            so existing behaviour and cached records remain back-compatible.
+            UNATTRIBUTED_TEAM when stamping is enabled but resolution fails.
     """
 
     arn: str = "unknown"
@@ -361,6 +377,7 @@ class PrincipalInfo:
     principal: Optional[str] = None
     session_name: Optional[str] = None
     project: Optional[str] = None
+    teams: Optional[str] = None
 
     @classmethod
     def empty(cls) -> "PrincipalInfo":
@@ -387,6 +404,9 @@ class PrincipalInfo:
             principal=data["principal"],
             session_name=data["session_name"],
             project=data["project"],
+            # `teams` is nullable for back-compat: records cached before this
+            # field existed will not contain the key.
+            teams=data.get("teams"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -401,6 +421,7 @@ class PrincipalInfo:
             "principal": self.principal,
             "session_name": self.session_name,
             "project": self.project,
+            "teams": self.teams,
         }
 
 
@@ -568,6 +589,12 @@ class MetadataRecord:
         secret_arn: Full ARN of the AWS Secrets Manager secret used for the API
             key. None if not available. Downstream consumers parse the name
             from the ARN when needed.
+        teams: The caller's team membership resolved live from the role's
+            `teams` tag, stored as a delimited string (see TEAMS_DELIMITER).
+            None when team stamping is disabled (the default) so existing
+            records remain back-compatible. UNATTRIBUTED_TEAM when stamping is
+            enabled but the team(s) could not be resolved. Downstream Glue views
+            filter on this field once a coordinated consumer update lands.
     """
 
     request_id: str
@@ -579,6 +606,7 @@ class MetadataRecord:
     project: Optional[str] = None
     session_name: Optional[str] = None
     secret_arn: Optional[str] = None
+    teams: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -593,6 +621,7 @@ class MetadataRecord:
             "project": self.project,
             "session_name": self.session_name,
             "secret_arn": self.secret_arn,
+            "teams": self.teams,
         }
 
     @classmethod
@@ -609,6 +638,7 @@ class MetadataRecord:
             {"name": "project", "type": "string"},
             {"name": "session_name", "type": "string"},
             {"name": "secret_arn", "type": "string"},
+            {"name": "teams", "type": "string"},
         ]
 
 
@@ -1041,6 +1071,7 @@ class JoinedLogRecord:
     metadata_project: Optional[str]
     metadata_session_name: Optional[str]
     metadata_secret_arn: Optional[str]
+    metadata_teams: Optional[str]
 
     # Request headers (from RequestHeadersRecord with request_headers_ prefix)
     request_headers_raw_headers: Union[Dict[str, str], RowLike]
@@ -1159,6 +1190,7 @@ class JoinedLogRecord:
             {"name": "metadata_project", "type": "string"},
             {"name": "metadata_session_name", "type": "string"},
             {"name": "metadata_secret_arn", "type": "string"},
+            {"name": "metadata_teams", "type": "string"},
             # Request headers data
             {"name": "request_headers_raw_headers", "type": "map<string,string>"},
             {"name": "request_headers_decoded", "type": "map<string,string>"},

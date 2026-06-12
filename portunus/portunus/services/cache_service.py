@@ -246,6 +246,88 @@ class CacheService:
             payload, api_key, signing_key, principal_info
         )
 
+    @staticmethod
+    def _team_cache_key(role_arn: str) -> str:
+        """Build the Redis key for a role's resolved teams.
+
+        Keyed on the role ARN and namespaced with a ``team:`` prefix so it is
+        kept completely separate from the SHA-256 payload-keyed auth cache.
+
+        Args:
+            role_arn: The IAM role ARN whose teams are cached.
+
+        Returns:
+            The namespaced Redis key.
+        """
+        return f"team:{role_arn}"
+
+    @xray_recorder.capture_async()  # type: ignore
+    async def get_cached_teams(self, role_arn: str) -> Optional[str]:
+        """Get cached teams (delimited string) for a role ARN.
+
+        This lookup is best-effort: any error returns None (treated as a cache
+        miss) so team resolution can never break the request path.
+
+        Args:
+            role_arn: The IAM role ARN to look up.
+
+        Returns:
+            The cached delimited teams string, or None on miss/error.
+        """
+        client = await self.state_service.acquire_redis_connection()
+        if not client:
+            logger.warning("Redis client unavailable for team cache lookup")
+            return None
+        try:
+            cached = await client.get(self._team_cache_key(role_arn))
+            if cached is None:
+                return None
+            # Redis may return bytes depending on client config; normalise.
+            if isinstance(cached, bytes):
+                return cached.decode("utf-8")
+            return str(cached)
+        except Exception as e:
+            logger.error(f"Error reading team cache for {role_arn}: {e}")
+            return None
+
+    @xray_recorder.capture_async()  # type: ignore
+    async def cache_teams(
+        self, role_arn: str, teams: str, ttl_seconds: Optional[int] = None
+    ) -> bool:
+        """Cache resolved teams (delimited string) for a role ARN.
+
+        Best-effort: errors are logged and swallowed (returns False) so a cache
+        write failure never affects the request path.
+
+        Args:
+            role_arn: The IAM role ARN being cached.
+            teams: The delimited teams string to store.
+            ttl_seconds: TTL override; defaults to config.redis team TTL (~1h).
+
+        Returns:
+            True if stored, False otherwise.
+        """
+        client = await self.state_service.acquire_redis_connection()
+        if not client:
+            logger.warning("Redis client unavailable for team caching")
+            return False
+        effective_ttl = (
+            ttl_seconds if ttl_seconds is not None else config.team_cache_ttl
+        )
+        if effective_ttl <= 0:
+            return False
+        try:
+            result = await client.setex(
+                self._team_cache_key(role_arn), effective_ttl, teams
+            )
+            logger.info(
+                f"Cached teams for role {role_arn}, expires in {effective_ttl}s"
+            )
+            return bool(result)
+        except Exception as e:
+            logger.error(f"Error caching teams for {role_arn}: {e}")
+            return False
+
     @xray_recorder.capture_async()  # type: ignore
     async def invalidate_cache_entry(self, payload: str) -> bool:
         """

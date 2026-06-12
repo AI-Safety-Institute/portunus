@@ -29,6 +29,7 @@ from portunus.services.arn_service import parse_identity_from_arn
 from portunus.services.cache_service import CacheService
 from portunus.services.secret_validation_service import SecretValidationService
 from portunus.services.secrets_service import SecretsService
+from portunus.services.team_service import TeamService
 
 logger = logging.getLogger("api.access")
 
@@ -51,11 +52,17 @@ class AuthService:
         secrets_service: Optional[SecretsService] = None,
         cache_service: Optional[CacheService] = None,
         validation_service: Optional[SecretValidationService] = None,
+        team_service: Optional[TeamService] = None,
     ):
         """Initialize the AuthService."""
         self.secrets_service = secrets_service or SecretsService()
         self.cache_service = cache_service or CacheService()
         self.validation_service = validation_service or SecretValidationService()
+        # Team resolution is only used when team stamping is enabled; share the
+        # auth cache_service so the roleArn->teams cache lives in the same Redis.
+        self.team_service = team_service or TeamService(
+            cache_service=self.cache_service
+        )
         self.boto_session = self.secrets_service.boto_session
 
     @xray_recorder.capture_async()  # type: ignore
@@ -166,6 +173,16 @@ class AuthService:
 
             # Get caller identity from AWS STS
             principal_info = await self.get_aws_identity(credentials)
+
+            # Resolve + stamp live team attribution (logging metadata only).
+            # Gated behind a feature flag (default off): when disabled the hot
+            # path is unchanged and no extra IAM call is made. When enabled,
+            # resolution is best-effort and never blocks, denies, or errors the
+            # request - on any failure principal_info.teams is the sentinel.
+            if config.team_stamping_enabled:
+                principal_info.teams = await self.team_service.resolve_teams(
+                    credentials, principal_info.arn
+                )
 
             # Retrieve raw secret from Secrets Manager
             raw_secret = await self.secrets_service.fetch_secret(payload)

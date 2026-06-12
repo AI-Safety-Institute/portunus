@@ -224,6 +224,25 @@ class PortunusConfig(BaseModel):
         default="Bearer ",
         description="Prefix to use for the API key",
     )
+    team_stamping_enabled: bool = Field(
+        default=False,
+        description=(
+            "Feature flag for live team resolution + stamping. When disabled "
+            "(the default) the hot path is unchanged and no extra IAM calls are "
+            "made. When enabled, Portunus resolves the caller's team(s) from the "
+            "role's `teams` tag and stamps them onto the published metadata "
+            "record for downstream filtering. Resolution is best-effort and never "
+            "blocks, denies, or errors the proxied request."
+        ),
+    )
+    team_cache_ttl: int = Field(
+        default=3600,
+        description=(
+            "TTL in seconds for the roleArn->teams cache (separate from the "
+            "payload-keyed auth cache). Defaults to ~1 hour."
+        ),
+        ge=1,
+    )
 
     @field_validator("log_level")
     def validate_log_level(cls, v):
@@ -304,6 +323,9 @@ def get_config() -> PortunusConfig:
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
+        team_stamping_enabled=os.environ.get("TEAM_STAMPING_ENABLED", "false").lower()
+        == "true",
+        team_cache_ttl=int(os.environ.get("TEAM_CACHE_TTL", "3600")),
         redis=redis,
         aws=aws,
         kinesis=kinesis,
