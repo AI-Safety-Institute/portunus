@@ -1,14 +1,20 @@
 """Tests for live team resolution + stamping (feature-flagged, default off).
 
+Tags are read via a Portunus-held reader role (assumed with Portunus's own task
+creds, session cached/reused), NOT the caller's credentials.
+
 Covers:
     * `teams` tag parsing (comma-split, whitespace, empty).
-    * The `__unattributed__` sentinel on every failure path.
+    * The `__unattributed__` sentinel on every failure path (missing/garbled
+      tag, ListRoleTags failure, AssumeRole failure, no reader role configured).
     * roleArn->teams cache set / get / expiry (separate from the auth cache).
     * ARN -> role-name extraction.
-    * Flag-off no-op: no IAM call, principal_info.teams left untouched.
+    * Reader STS session is assumed once and reused (not per request).
+    * Flag-off no-op: no assume-role/IAM call, principal_info.teams untouched.
     * A tag-read exception does not break authentication.
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import fakeredis.aioredis
@@ -52,15 +58,6 @@ async def fake_redis():
     client = fakeredis.aioredis.FakeRedis(decode_responses=True)
     yield client
     await client.aclose()
-
-
-@pytest.fixture
-def credentials():
-    return AwsCredentials(
-        access_key_id="AKIATEST123",
-        secret_access_key="secretkey123",
-        session_token="sessiontoken123",
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -164,78 +161,179 @@ class TestTeamCache:
 # --------------------------------------------------------------------------- #
 
 
-def _team_service_with_tags(cache, tags):
-    """Build a TeamService whose IAM client returns the given tag list."""
+READER_ROLE_ARN = "arn:aws:iam::302000000000:role/PortunusTeamTagReader"
+
+
+def _async_client_cm(client):
+    """Wrap a mock client as an async context manager (matches create_client)."""
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    return client
+
+
+def _assume_role_response(expires_in_seconds: int = 3600):
+    """Build a fake STS AssumeRole response with an expiry in the future."""
+    return {
+        "Credentials": {
+            "AccessKeyId": "ASIAREADER",
+            "SecretAccessKey": "readersecret",
+            "SessionToken": "readertoken",
+            "Expiration": datetime.now(timezone.utc)
+            + timedelta(seconds=expires_in_seconds),
+        }
+    }
+
+
+def _team_service_with_reader(
+    cache,
+    tags=None,
+    *,
+    assume_role_side_effect=None,
+    list_tags_side_effect=None,
+):
+    """Build a TeamService whose reader-role STS + IAM clients are mocked.
+
+    The session's create_client dispatches by service name: "sts" returns the
+    AssumeRole client, "iam" returns the ListRoleTags client. This mirrors the
+    own-identity flow (assume reader role, then call IAM with that session).
+    """
     service = TeamService(cache_service=cache)
+
+    sts_client = AsyncMock()
+    if assume_role_side_effect is not None:
+        sts_client.assume_role = AsyncMock(side_effect=assume_role_side_effect)
+    else:
+        sts_client.assume_role = AsyncMock(return_value=_assume_role_response())
+    _async_client_cm(sts_client)
+
     iam_client = AsyncMock()
-    iam_client.list_role_tags = AsyncMock(return_value={"Tags": tags})
-    iam_client.__aenter__ = AsyncMock(return_value=iam_client)
-    iam_client.__aexit__ = AsyncMock(return_value=None)
+    if list_tags_side_effect is not None:
+        iam_client.list_role_tags = AsyncMock(side_effect=list_tags_side_effect)
+    else:
+        iam_client.list_role_tags = AsyncMock(return_value={"Tags": tags or []})
+    _async_client_cm(iam_client)
+
+    def _create_client(service_name, *args, **kwargs):
+        return sts_client if service_name == "sts" else iam_client
+
     service.boto_session = MagicMock()
-    service.boto_session.create_client = MagicMock(return_value=iam_client)
-    return service, iam_client
+    service.boto_session.create_client = MagicMock(side_effect=_create_client)
+    return service, sts_client, iam_client
+
+
+@pytest.fixture(autouse=True)
+def reader_role_configured():
+    """Configure the reader role ARN for team_service.config by default."""
+    with patch("portunus.services.team_service.config") as cfg:
+        cfg.team_tag_reader_role_arn = READER_ROLE_ARN
+        cfg.team_tag_reader_region = "eu-west-2"
+        cfg.aws.endpoint_url = None
+        cfg.team_cache_ttl = 3600
+        yield cfg
 
 
 class TestResolveTeams:
     @pytest.mark.asyncio
-    async def test_resolves_and_caches(self, fake_redis, credentials):
+    async def test_resolves_and_caches(self, fake_redis):
         cache = CacheService(state_service=FakeStateService(fake_redis))
-        service, iam_client = _team_service_with_tags(
+        service, _sts, _iam = _team_service_with_reader(
             cache, [{"Key": "teams", "Value": "chembio,soe"}]
         )
 
-        result = await service.resolve_teams(credentials, ASSUMED_ROLE_ARN)
+        result = await service.resolve_teams(ASSUMED_ROLE_ARN)
 
         assert result == "chembio,soe"
         # cached under the role ARN for next time
         assert await cache.get_cached_teams(EXPECTED_ROLE_ARN) == "chembio,soe"
 
     @pytest.mark.asyncio
-    async def test_cache_hit_skips_iam(self, fake_redis, credentials):
+    async def test_reader_session_reused_across_requests(self, fake_redis):
+        """AssumeRole happens once and the session is reused (not per request)."""
+        cache = CacheService(state_service=FakeStateService(fake_redis))
+        service, sts_client, iam_client = _team_service_with_reader(
+            cache, [{"Key": "teams", "Value": "chembio"}]
+        )
+        other_arn = (
+            "arn:aws:sts::123456789012:assumed-role/UserProfile_Bob_soe/session-2"
+        )
+
+        await service.resolve_teams(ASSUMED_ROLE_ARN)
+        await service.resolve_teams(other_arn)
+
+        # Two distinct roles -> two IAM reads, but only one AssumeRole.
+        assert iam_client.list_role_tags.await_count == 2
+        sts_client.assume_role.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_iam(self, fake_redis):
         cache = CacheService(state_service=FakeStateService(fake_redis))
         await cache.cache_teams(EXPECTED_ROLE_ARN, "chembio")
-        service, iam_client = _team_service_with_tags(cache, [])
+        service, sts_client, iam_client = _team_service_with_reader(cache, [])
 
-        result = await service.resolve_teams(credentials, ASSUMED_ROLE_ARN)
+        result = await service.resolve_teams(ASSUMED_ROLE_ARN)
 
         assert result == "chembio"
         iam_client.list_role_tags.assert_not_called()
+        sts_client.assume_role.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_missing_tag_is_unattributed(self, fake_redis, credentials):
+    async def test_missing_tag_is_unattributed(self, fake_redis):
         cache = CacheService(state_service=FakeStateService(fake_redis))
-        service, _ = _team_service_with_tags(
+        service, _sts, _iam = _team_service_with_reader(
             cache, [{"Key": "owner", "Value": "someone"}]
         )
 
-        result = await service.resolve_teams(credentials, ASSUMED_ROLE_ARN)
+        result = await service.resolve_teams(ASSUMED_ROLE_ARN)
 
         assert result == UNATTRIBUTED_TEAM
 
     @pytest.mark.asyncio
-    async def test_unparseable_arn_is_unattributed(self, fake_redis, credentials):
+    async def test_unparseable_arn_is_unattributed(self, fake_redis):
         cache = CacheService(state_service=FakeStateService(fake_redis))
-        service, iam_client = _team_service_with_tags(cache, [])
+        service, sts_client, iam_client = _team_service_with_reader(cache, [])
 
-        result = await service.resolve_teams(credentials, "arn:aws:iam::1:user/bob")
+        result = await service.resolve_teams("arn:aws:iam::1:user/bob")
 
         assert result == UNATTRIBUTED_TEAM
+        sts_client.assume_role.assert_not_called()
         iam_client.list_role_tags.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_iam_exception_is_unattributed(self, fake_redis, credentials):
+    async def test_iam_exception_is_unattributed(self, fake_redis):
         cache = CacheService(state_service=FakeStateService(fake_redis))
-        service = TeamService(cache_service=cache)
-        iam_client = AsyncMock()
-        iam_client.list_role_tags = AsyncMock(side_effect=Exception("AccessDenied"))
-        iam_client.__aenter__ = AsyncMock(return_value=iam_client)
-        iam_client.__aexit__ = AsyncMock(return_value=None)
-        service.boto_session = MagicMock()
-        service.boto_session.create_client = MagicMock(return_value=iam_client)
+        service, _sts, _iam = _team_service_with_reader(
+            cache, list_tags_side_effect=Exception("AccessDenied")
+        )
 
-        result = await service.resolve_teams(credentials, ASSUMED_ROLE_ARN)
+        result = await service.resolve_teams(ASSUMED_ROLE_ARN)
 
         assert result == UNATTRIBUTED_TEAM
+
+    @pytest.mark.asyncio
+    async def test_assume_role_failure_is_unattributed(self, fake_redis):
+        cache = CacheService(state_service=FakeStateService(fake_redis))
+        service, _sts, iam_client = _team_service_with_reader(
+            cache, assume_role_side_effect=Exception("AccessDenied on AssumeRole")
+        )
+
+        result = await service.resolve_teams(ASSUMED_ROLE_ARN)
+
+        assert result == UNATTRIBUTED_TEAM
+        # Never reached the IAM read because assume-role failed first.
+        iam_client.list_role_tags.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_reader_role_configured_is_unattributed(
+        self, fake_redis, reader_role_configured
+    ):
+        cache = CacheService(state_service=FakeStateService(fake_redis))
+        reader_role_configured.team_tag_reader_role_arn = None
+        service, _sts, iam_client = _team_service_with_reader(cache, [])
+
+        result = await service.resolve_teams(ASSUMED_ROLE_ARN)
+
+        assert result == UNATTRIBUTED_TEAM
+        iam_client.list_role_tags.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #

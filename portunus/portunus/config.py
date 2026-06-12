@@ -243,6 +243,26 @@ class PortunusConfig(BaseModel):
         ),
         ge=1,
     )
+    team_tag_reader_role_arn: Optional[str] = Field(
+        default=None,
+        description=(
+            "ARN of the cross-account reader role Portunus assumes (with its own "
+            "task credentials) to read role `teams` tags - the "
+            "`PortunusTeamTagReader` role in the identity account (302), "
+            "provisioned by aisi-research-platform PR #1633. Tags are read via "
+            "this Portunus-held role, NOT the caller's credentials, so resolution "
+            "is immune to aisitools session-policy scoping that strips "
+            "`iam:ListRoleTags`. When unset, team resolution fails safe to the "
+            "unattributed sentinel. Only used when team stamping is enabled."
+        ),
+    )
+    team_tag_reader_region: str = Field(
+        default="eu-west-2",
+        description=(
+            "AWS region used for the STS AssumeRole / IAM client when reading "
+            "role `teams` tags via the Portunus reader role."
+        ),
+    )
 
     @field_validator("log_level")
     def validate_log_level(cls, v):
@@ -326,6 +346,8 @@ def get_config() -> PortunusConfig:
         team_stamping_enabled=os.environ.get("TEAM_STAMPING_ENABLED", "false").lower()
         == "true",
         team_cache_ttl=int(os.environ.get("TEAM_CACHE_TTL", "3600")),
+        team_tag_reader_role_arn=os.environ.get("TEAM_TAG_READER_ROLE_ARN", None),
+        team_tag_reader_region=os.environ.get("TEAM_TAG_READER_REGION", "eu-west-2"),
         redis=redis,
         aws=aws,
         kinesis=kinesis,

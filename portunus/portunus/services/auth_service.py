@@ -176,12 +176,14 @@ class AuthService:
 
             # Resolve + stamp live team attribution (logging metadata only).
             # Gated behind a feature flag (default off): when disabled the hot
-            # path is unchanged and no extra IAM call is made. When enabled,
-            # resolution is best-effort and never blocks, denies, or errors the
-            # request - on any failure principal_info.teams is the sentinel.
+            # path is unchanged and no extra AWS call is made. When enabled,
+            # tags are read via a Portunus-held reader role (not the caller's
+            # creds, which aisitools scopes down), and resolution is best-effort
+            # - it never blocks, denies, or errors the request; on any failure
+            # principal_info.teams is the sentinel.
             if config.team_stamping_enabled:
                 principal_info.teams = await self.team_service.resolve_teams(
-                    credentials, principal_info.arn
+                    principal_info.arn
                 )
 
             # Retrieve raw secret from Secrets Manager
