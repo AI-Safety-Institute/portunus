@@ -1,6 +1,7 @@
 """Tests for ``_decompress_b64_body``: plain, gzip/deflate, eventstream."""
 
 import base64
+import binascii
 import gzip
 import json
 import logging
@@ -19,10 +20,18 @@ def _b64(data: bytes) -> str:
 
 
 def _build_eventstream_message(payload: bytes, headers: bytes = b"") -> bytes:
-    """[12-byte prelude][headers][payload][4-byte CRC]; CRCs zeroed."""
+    """[12-byte prelude][headers][payload][4-byte CRC] with valid CRC32s.
+
+    Mirrors the vnd.amazon.eventstream wire format botocore's
+    ``EventStreamBuffer`` parses: the prelude carries a CRC32 of its first
+    8 bytes, and the message ends with a CRC32 of everything preceding it.
+    """
     total_len = 12 + len(headers) + len(payload) + 4
-    prelude = struct.pack(">III", total_len, len(headers), 0)
-    return prelude + headers + payload + struct.pack(">I", 0)
+    prelude_head = struct.pack(">II", total_len, len(headers))
+    prelude_crc = binascii.crc32(prelude_head) & 0xFFFFFFFF
+    message_no_crc = prelude_head + struct.pack(">I", prelude_crc) + headers + payload
+    message_crc = binascii.crc32(message_no_crc) & 0xFFFFFFFF
+    return message_no_crc + struct.pack(">I", message_crc)
 
 
 def _bedrock_event(inner_obj: dict, headers: bytes = b"") -> bytes:
@@ -222,6 +231,30 @@ def test_eventstream_skips_malformed_bytes_members(bad_bytes, exception_name, ca
 def test_eventstream_structural_failure_returns_none(bad):
     decoded, failed = _decompress_b64_body(
         _b64(bad), None, "application/vnd.amazon.eventstream"
+    )
+    assert failed
+    assert decoded is None
+
+
+def test_eventstream_recovers_events_before_a_corrupt_frame():
+    """A bad CRC mid-stream is best-effort: keep what decoded before it."""
+    good = _bedrock_event({"type": "message_start"})
+    corrupt = bytearray(_bedrock_event({"type": "message_delta"}))
+    corrupt[-1] ^= 0xFF  # break the trailing message CRC
+    decoded, failed = _decompress_b64_body(
+        _b64(good + bytes(corrupt)), None, "application/vnd.amazon.eventstream"
+    )
+    assert not failed
+    assert decoded == 'data: {"type":"message_start"}\n'
+
+
+def test_eventstream_corrupt_first_frame_returns_none():
+    """Nothing recoverable (corruption before any message) still fails."""
+    corrupt = bytearray(_bedrock_event({"type": "message_start"}))
+    corrupt[-1] ^= 0xFF
+    good = _bedrock_event({"type": "message_delta"})
+    decoded, failed = _decompress_b64_body(
+        _b64(bytes(corrupt) + good), None, "application/vnd.amazon.eventstream"
     )
     assert failed
     assert decoded is None

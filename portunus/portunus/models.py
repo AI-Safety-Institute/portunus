@@ -14,7 +14,6 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import struct
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import (
@@ -122,62 +121,82 @@ def _decode_b64_headers(
 
 _EVENTSTREAM_CONTENT_TYPE = "application/vnd.amazon.eventstream"
 
-# vnd.amazon.eventstream wire format: prelude (total_len, headers_len,
-# prelude_crc — three big-endian u32s) then headers, payload, and a
-# trailing message-CRC u32.
-_ES_PRELUDE = struct.Struct(">III")
-_ES_TRAILING_CRC_SIZE = 4
-_ES_FRAME_OVERHEAD = _ES_PRELUDE.size + _ES_TRAILING_CRC_SIZE
+
+def _eventstream_payload_to_sse_line(payload: bytes) -> Optional[str]:
+    r"""Convert one eventstream message payload to an SSE ``data: {...}\n`` line.
+
+    The payload is the Bedrock envelope ``{"bytes": "<base64 inner event>"}``;
+    returns the inner event as a single compact SSE line, or None when the
+    message isn't a usable ``bytes`` envelope (Bedrock emits non-``bytes``
+    exception/throttling shapes mid-stream, which are skipped).
+    """
+    try:
+        envelope = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not (isinstance(envelope, dict) and (inner_b64 := envelope.get("bytes"))):
+        return None
+    try:
+        inner_str = base64.b64decode(inner_b64).decode("utf-8")
+    except (TypeError, ValueError, binascii.Error) as exc:
+        logger.warning(
+            "Skipping malformed eventstream message: %s", exc.__class__.__name__
+        )
+        return None
+    # Re-parse + dict check is the SSE-injection guard: rejects non-object
+    # inners, and inners whose strings contain literal control chars (RFC 8259
+    # forbids those). Re-serializing keeps each SSE event on one data line.
+    try:
+        inner = json.loads(inner_str)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(inner, dict):
+        return None
+    return f"data: {json.dumps(inner, separators=(',', ':'))}\n"
 
 
 def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
     r"""Unwrap eventstream framing into SSE ``data: {...}\n`` lines.
 
-    Each message's payload is ``{"bytes": "<base64 inner event>"}``;
-    one SSE line per inner. Returns None on structural failure;
-    malformed individual messages are skipped (Bedrock emits non-``bytes``
-    exception/throttling shapes mid-stream). CRCs are not checked —
-    Firehose already validated transport.
+    Framing is parsed by botocore's ``EventStreamBuffer`` (the same code path
+    boto3 uses for Bedrock streaming), so prelude/header/CRC handling isn't
+    rolled by hand here. One SSE line per inner ``bytes`` event; non-``bytes``
+    messages are skipped (see ``_eventstream_payload_to_sse_line``).
+
+    Returns None when no complete message could be parsed (truncated or
+    otherwise structurally broken body). Once at least one message has been
+    parsed, a ``ParserError`` from a later corrupt frame is treated as a
+    best-effort truncation: the events recovered so far are returned rather
+    than discarding the whole body. CRCs are validated by botocore, but a
+    mismatch mid-stream is non-fatal for the same reason.
     """
+    # Lazy-loaded per this module's convention (see module docstring): keep
+    # `import portunus.models` free of third-party imports. botocore itself is
+    # always present in both run targets (the service depends on it; Glue
+    # preinstalls boto3).
+    from botocore.eventstream import EventStreamBuffer, ParserError
+
+    buffer = EventStreamBuffer()
+    buffer.add_data(body_bytes)
     sse_lines: list[str] = []
-    pos = 0
-    n = len(body_bytes)
-    while pos < n:
-        if pos + _ES_PRELUDE.size > n:
+    parsed_any = False
+    try:
+        for message in buffer:
+            parsed_any = True
+            line = _eventstream_payload_to_sse_line(message.payload)
+            if line is not None:
+                sse_lines.append(line)
+    except ParserError as exc:
+        if not parsed_any:
+            logger.warning("eventstream parse failed: %s", exc.__class__.__name__)
             return None
-        total_len, headers_len, _ = _ES_PRELUDE.unpack_from(body_bytes, pos)
-        if (
-            total_len < _ES_FRAME_OVERHEAD
-            or pos + total_len > n
-            or headers_len > total_len - _ES_FRAME_OVERHEAD
-        ):
-            return None
-        payload_start = pos + _ES_PRELUDE.size + headers_len
-        payload_end = pos + total_len - _ES_TRAILING_CRC_SIZE
-        payload = body_bytes[payload_start:payload_end]
-        try:
-            envelope = json.loads(payload)
-            if isinstance(envelope, dict) and (inner_b64 := envelope.get("bytes")):
-                try:
-                    inner_bytes = base64.b64decode(inner_b64)
-                    inner_str = inner_bytes.decode("utf-8")
-                except (TypeError, ValueError, binascii.Error) as exc:
-                    logger.warning(
-                        "Skipping malformed eventstream message: %s",
-                        exc.__class__.__name__,
-                    )
-                else:
-                    # Re-parse + dict check is the SSE-injection guard:
-                    # rejects non-object inners, and inners whose strings
-                    # contain literal control chars (RFC 8259 forbids those).
-                    # Re-serializing keeps each SSE event on one data line.
-                    inner = json.loads(inner_str)
-                    if isinstance(inner, dict):
-                        compact_inner = json.dumps(inner, separators=(",", ":"))
-                        sse_lines.append(f"data: {compact_inner}\n")
-        except (json.JSONDecodeError, binascii.Error, UnicodeDecodeError):
-            pass
-        pos += total_len
+        logger.warning(
+            "eventstream truncated after %d message(s): %s",
+            len(sse_lines),
+            exc.__class__.__name__,
+        )
+    if not parsed_any:
+        return None
     return "".join(sse_lines)
 
 
