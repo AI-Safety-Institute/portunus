@@ -3,6 +3,15 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- Decode AWS Bedrock `application/vnd.amazon.eventstream` response bodies into
+  SSE so token usage is parseable for Bedrock streaming responses (previously
+  stored undecoded and dropped downstream). (#17)
+- Treat a truncated/incomplete eventstream as a decode failure rather than a
+  silent partial, so cut-off Bedrock streams don't silently undercount tokens. (#24)
+
 ## [0.5.0]
 
 ### Added
