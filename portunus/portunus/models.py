@@ -163,12 +163,17 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
     rolled by hand here. One SSE line per inner ``bytes`` event; non-``bytes``
     messages are skipped (see ``_eventstream_payload_to_sse_line``).
 
-    Returns None when no complete message could be parsed (truncated or
-    otherwise structurally broken body). Once at least one message has been
-    parsed, a ``ParserError`` from a later corrupt frame is treated as a
-    best-effort truncation: the events recovered so far are returned rather
-    than discarding the whole body. CRCs are validated by botocore, but a
-    mismatch mid-stream is non-fatal for the same reason.
+    Returns None to signal a decode failure (the caller maps that to
+    ``response_body_decode_failure``). That happens when no complete message
+    could be parsed, *and* when the body ends in a truncated (incomplete)
+    trailing frame -- see the truncation guard below. A non-None result means
+    every input byte was accounted for by a complete frame.
+
+    Distinct from truncation: a ``ParserError`` from a corrupt frame *after*
+    at least one message has parsed (e.g. a mid-stream CRC mismatch) is
+    best-effort -- the events recovered before it are returned rather than
+    discarding the whole body. CRCs are validated by botocore; a mismatch
+    mid-stream is non-fatal for that reason.
     """
     # Lazy-loaded per this module's convention (see module docstring): keep
     # `import portunus.models` free of third-party imports. botocore itself is
@@ -180,9 +185,16 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
     buffer.add_data(body_bytes)
     sse_lines: list[str] = []
     parsed_any = False
+    consumed = 0
     try:
         for message in buffer:
             parsed_any = True
+            # total_length spans the whole on-wire frame (prelude + headers +
+            # payload + both CRCs), so accumulating it tracks exactly how many
+            # input bytes complete frames have consumed -- the basis for the
+            # truncation guard below. (botocore-stubs mistypes ``prelude`` as
+            # ``int`` rather than ``MessagePrelude``; hence the attr ignore.)
+            consumed += message.prelude.total_length  # type: ignore[attr-defined]
             line = _eventstream_payload_to_sse_line(message.payload)
             if line is not None:
                 sse_lines.append(line)
@@ -190,12 +202,35 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         if not parsed_any:
             logger.warning("eventstream parse failed: %s", exc.__class__.__name__)
             return None
+        # A corrupt frame after a valid prefix (e.g. CRC mismatch): keep the
+        # events decoded so far. This is NOT the truncation path -- the guard
+        # below must not run here, since an unparsed corrupt frame also leaves
+        # a residual but is deliberately recovered as a partial success.
         logger.warning(
-            "eventstream truncated after %d message(s): %s",
+            "eventstream corrupt after %d message(s), keeping partial: %s",
             len(sse_lines),
             exc.__class__.__name__,
         )
+        return "".join(sse_lines)
     if not parsed_any:
+        return None
+    # Truncation guard (silent-failure fix). botocore's EventStreamBuffer ends
+    # iteration with a bare StopIteration the instant the remaining bytes are
+    # too few to form the next complete frame -- indistinguishable, to the
+    # `for` loop, from a clean end of stream. So a truncated trailing frame
+    # (client disconnect, upstream reset, idle timeout, body-size cap) looked
+    # like success and silently dropped the token-bearing tail (Anthropic's
+    # usage.output_tokens live in the near-final message_delta). Detect it via
+    # the one observable difference: complete frames account for every input
+    # byte, so any residual is an incomplete tail -> mark a decode failure.
+    residual = len(body_bytes) - consumed
+    if residual > 0:
+        logger.warning(
+            "eventstream truncated: %d trailing byte(s) after %d complete "
+            "message(s) do not form a full frame",
+            residual,
+            len(sse_lines),
+        )
         return None
     return "".join(sse_lines)
 
