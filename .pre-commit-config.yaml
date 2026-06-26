@@ -15,10 +15,7 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        # Generated protobuf gencode is machine-managed.
-        exclude: ^portunus/portunus/admin/
       - id: end-of-file-fixer
-        exclude: ^portunus/portunus/admin/
       - id: check-yaml
       - id: check-toml
       - id: check-json
@@ -66,24 +63,4 @@ repos:
         entry: uv run --project portunus mypy --config-file portunus/pyproject.toml portunus/portunus portunus/tests
         language: system
         types: [python]
-        pass_filenames: false
-
-  # ==========================================================================
-  # Proto — buf lint (style) + generated-stub freshness
-  # ==========================================================================
-  - repo: local
-    hooks:
-      - id: buf-lint
-        name: buf lint (proto style)
-        entry: buf lint
-        language: system
-        files: ^proto/.*\.proto$
-        pass_filenames: false
-      - id: proto-generate-check
-        name: proto stubs up to date
-        # Regenerate (via grpcio-tools — no Buf Schema Registry / network)
-        # and fail if the committed stubs under portunus/admin drift.
-        entry: bash -c './scripts/gen_proto.sh && git diff --exit-code -- portunus/portunus/admin'
-        language: system
-        files: ^(proto/.*\.proto|scripts/gen_proto\.sh)$
         pass_filenames: false

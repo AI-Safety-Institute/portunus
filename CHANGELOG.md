@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Operator runbook for flushing the shared auth cache fleet-wide:
+  `docs/runbooks/flush-auth-cache.md`. An operator runs
+  `aws ecs execute-command` into a Portunus task and invokes the app's own
+  `CacheService.flush_all()` (Redis `FLUSHDB`). This documents the
+  replacement for the FastAPI `POST /cache/flush` endpoint retired in the
+  0.6.0 gRPC cutover — the container ships the `redis` library but no
+  `redis-cli` / `grpcurl`, and the single shared ElastiCache means one exec
+  is fleet-wide. Requires ECS Exec on the Portunus service (akp #136).
 - Audit-integrity sentinels on body records and WS summary records.
   Closes the gap where a publish-queue drop or a deflate-cap truncation
   was log-only — downstream ETL could reassemble incomplete bodies and

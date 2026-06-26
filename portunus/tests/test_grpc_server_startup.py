@@ -24,10 +24,6 @@ class _FakePublishService:
         return 0
 
 
-class _FakeCacheService:
-    """Minimal stand-in — ``start_grpc_server`` only stores the reference."""
-
-
 def test_grpc_message_limit_has_signed_body_headroom():
     assert grpc_server._MAX_GRPC_MSG_BYTES == 64 * 1024 * 1024
     assert grpc_server._MAX_GRPC_MSG_BYTES > 32 * 1024 * 1024
@@ -47,7 +43,6 @@ async def test_disabled_server_returns_none_without_checking_proxy_key():
             config=config,
             auth_service=_FakeAuthService(),  # type: ignore[arg-type]
             publish_service=_FakePublishService(),  # type: ignore[arg-type]
-            cache_service=_FakeCacheService(),  # type: ignore[arg-type]
         )
         is None
     )
@@ -71,7 +66,6 @@ async def test_enabled_with_empty_key_and_optional_unset_raises_runtimeerror():
             config=config,
             auth_service=_FakeAuthService(),  # type: ignore[arg-type]
             publish_service=_FakePublishService(),  # type: ignore[arg-type]
-            cache_service=_FakeCacheService(),  # type: ignore[arg-type]
         )
 
 
@@ -91,7 +85,6 @@ async def test_enabled_with_non_empty_key_does_not_raise():
         config=config,
         auth_service=_FakeAuthService(),  # type: ignore[arg-type]
         publish_service=_FakePublishService(),  # type: ignore[arg-type]
-        cache_service=_FakeCacheService(),  # type: ignore[arg-type]
     )
     try:
         assert runtime is not None
@@ -114,7 +107,6 @@ async def test_enabled_with_empty_key_but_optional_true_starts():
         config=config,
         auth_service=_FakeAuthService(),  # type: ignore[arg-type]
         publish_service=_FakePublishService(),  # type: ignore[arg-type]
-        cache_service=_FakeCacheService(),  # type: ignore[arg-type]
     )
     try:
         assert runtime is not None

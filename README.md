@@ -9,7 +9,7 @@ It runs as two cooperating components:
 - **Envoy proxy** (one deployment per target host). Envoy terminates the client's connection and applies a filter chain:
   - **`ext_authz`** calls Portunus's `Check` gRPC servicer to authenticate the request and (for signing tenants) compute the RFC 9421 signature headers.
   - **`ext_proc`** streams request and response bodies — and post-101 WebSocket frames — to Portunus's `Process` gRPC servicer for audit publication.
-- **Portunus backend**. A FastAPI service that hosts the two gRPC servicers above plus operator endpoints (`/ping`, `/cache/flush`):
+- **Portunus backend**. A FastAPI service that hosts the two gRPC servicers above plus the `/ping` operator endpoint (flushing the shared auth cache is now an operator runbook — see [`docs/runbooks/flush-auth-cache.md`](docs/runbooks/flush-auth-cache.md) — not an HTTP endpoint):
   - Decodes the base64-encoded payload in the client's `Authorization` header — `{credentials, secret_arn}` — and uses those AWS credentials to fetch the real API key from Secrets Manager. Clients can't reach Secrets Manager directly; network policy enforces this.
   - Secrets can be stored as plaintext (`"sk-…"`) or as JSON with a target-host check (`{"secret":"sk-…","host":"api.openai.com"}`); the latter only authorises for matching upstreams.
   - Returns the real key as a header mutation; Envoy applies it before forwarding upstream.

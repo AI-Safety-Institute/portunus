@@ -25,10 +25,10 @@ dependencies = [
     "xds-protos>=1.80.0",
     "googleapis-common-protos>=1.65.0,<2",
     # Standard gRPC health checking (grpc.health.v1.Health) for the ECS /
-    # ALB health probe, and server reflection so operators can call the
-    # admin service with grpcurl without a local .proto copy. protobuf
-    # itself is pinned transitively by xds-protos (>=6.31); we don't pin it
-    # here to avoid fighting that constraint.
+    # ALB health probe, and server reflection so operators can introspect
+    # the served services without a local .proto copy. protobuf itself is
+    # pinned transitively by xds-protos (>=6.31); we don't pin it here to
+    # avoid fighting that constraint.
     "grpcio-health-checking>=1.66.0,<2",
     "grpcio-reflection>=1.66.0,<2",
     # orjson on the publish hot path — every Firehose record goes through
@@ -78,11 +78,6 @@ raw-options = { root = "..", local_scheme = "no-local-version" }
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
-[tool.ruff]
-# Generated protobuf stubs are machine-written ("DO NOT EDIT"); don't
-# lint/format them. Regenerate with scripts/gen_proto.sh instead.
-extend-exclude = ["portunus/admin"]
-
 [tool.ruff.lint]
 select = ["E",   # pycodestyle errors
           "W",   # pycodestyle warnings
@@ -96,14 +91,6 @@ ignore = ["E203", "D10", "D212"]
 convention = "google"
 
 [tool.mypy]
-
-[[tool.mypy.overrides]]
-# Generated protobuf/gRPC stubs (portunus.admin.*): don't follow into them
-# (they ship .pyi but we treat them as opaque). follow_imports=skip makes
-# `from portunus.admin.v1 import admin_pb2` resolve as Any.
-module = ["portunus.admin.*"]
-follow_imports = "skip"
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # Third-party gRPC / protobuf / boto packages ship without type stubs (or

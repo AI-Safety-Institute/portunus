@@ -16,11 +16,6 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Install buf
-        uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
-
       - name: Install project (dev deps incl. prek, ruff, mypy)
         run: uv sync --project portunus
 

@@ -8,7 +8,7 @@ For architecture and request flow (ext_authz `Check`, the composite-filter signi
 
 ```
 portunus/
-  app.py            FastAPI app: operator endpoints (/ping, /cache/flush) and
+  app.py            FastAPI app: operator endpoints (/ping) and
                     gRPC server lifecycle via the lifespan context manager.
   cli.py            Console entry point.
   config.py         Env-driven PortunusConfig (singleton at import time).
@@ -81,7 +81,7 @@ Behaviour and end-to-end tests live at the repo root in `tests/` and require `do
 
 ## Running the service locally
 
-The intended entry point is the full stack (`docker compose up --build` at the repo root), which brings up Envoy, Redis, LocalStack, and an httpbun upstream alongside Portunus. To run just the FastAPI app — useful for poking `/ping` or `/cache/flush` against a live Redis — from the repo root:
+The intended entry point is the full stack (`docker compose up --build` at the repo root), which brings up Envoy, Redis, LocalStack, and an httpbun upstream alongside Portunus. To run just the FastAPI app — useful for poking `/ping` against a live Redis — from the repo root:
 
 ```bash
 uv sync

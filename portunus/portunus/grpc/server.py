@@ -1,10 +1,10 @@
 """gRPC server lifecycle and process entrypoint for Portunus.
 
 The gRPC server is the Portunus process: it serves the Envoy ext_authz /
-ext_proc filters, the operational :class:`AdminService`, and the standard
-``grpc.health.v1.Health`` + server-reflection services. There is no HTTP /
-FastAPI surface — :func:`run` owns the asyncio loop and SIGTERM-driven drain
-(the Dockerfile ``CMD`` is ``python -m portunus.grpc.server``).
+ext_proc filters and the standard ``grpc.health.v1.Health`` +
+server-reflection services. There is no HTTP / FastAPI surface — :func:`run`
+owns the asyncio loop and SIGTERM-driven drain (the Dockerfile ``CMD`` is
+``python -m portunus.grpc.server``).
 
 Gated on :attr:`GrpcConfig.enabled` (default off; tests construct the runtime
 directly).
@@ -24,13 +24,10 @@ from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
-from portunus.admin.v1 import admin_pb2, admin_pb2_grpc
 from portunus.config import GrpcConfig
-from portunus.grpc.admin_servicer import PortunusAdminServicer
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.services.auth_service import AuthService
-from portunus.services.cache_service import CacheService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
 from portunus.services.signing_service import sign_request
@@ -58,13 +55,11 @@ async def start_grpc_server(
     config: GrpcConfig,
     auth_service: AuthService,
     publish_service: PublishService,
-    cache_service: CacheService,
 ) -> Optional[GrpcRuntime]:
     """Start the Portunus gRPC server.
 
-    Registers ext_authz, ext_proc, the operational AdminService, the standard
-    health service, and server reflection. Returns None when
-    ``config.enabled`` is False.
+    Registers ext_authz, ext_proc, the standard health service, and server
+    reflection. Returns None when ``config.enabled`` is False.
     """
     if not config.enabled:
         logger.info("gRPC server disabled (config.grpc.enabled=false); skipping start")
@@ -120,25 +115,17 @@ async def start_grpc_server(
     )
     proc_grpc.add_ExternalProcessorServicer_to_server(proc_servicer, server)
 
-    # Operational AdminService (cache flush) — replaces the retired
-    # FastAPI POST /cache/flush. Same proxy-key gate as the filters.
-    admin_servicer = PortunusAdminServicer(
-        cache_service=cache_service,
-        proxy_api_key=config.proxy_api_key,
-    )
-    admin_pb2_grpc.add_AdminServiceServicer_to_server(admin_servicer, server)
-
     # Standard gRPC health service — the ECS / ALB probe target now that
     # the FastAPI /ping endpoint is gone. Reports SERVING for the overall
-    # server ("") and the AdminService once listening.
+    # server ("") once listening.
     health_servicer = health.aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
-    # Server reflection so operators can call AdminService with grpcurl
-    # without shipping a local .proto copy.
+    # Server reflection (the standard health service plus the reflection
+    # service itself) so operators can introspect the server without
+    # shipping a local .proto copy.
     reflection.enable_server_reflection(
         (
-            admin_pb2.DESCRIPTOR.services_by_name["AdminService"].full_name,
             health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
             reflection.SERVICE_NAME,
         ),
@@ -152,10 +139,6 @@ async def start_grpc_server(
     # Mark serving only after the listener is up, so a probe can't see
     # SERVING before the port accepts connections.
     await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-    await health_servicer.set(
-        admin_pb2.DESCRIPTOR.services_by_name["AdminService"].full_name,
-        health_pb2.HealthCheckResponse.SERVING,
-    )
 
     logger.info(
         "gRPC server listening on %s (max_concurrent_streams=%d)",
@@ -254,7 +237,6 @@ async def run() -> None:
         config=config.grpc,
         auth_service=auth_service,
         publish_service=publish_service,
-        cache_service=cache_service,
     )
     if runtime is None:
         logger.error(
