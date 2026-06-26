@@ -273,3 +273,81 @@ def test_non_eventstream_content_types_use_utf8_path(content_type):
     decoded, failed = _decompress_b64_body(_b64(body.encode()), None, content_type)
     assert not failed
     assert decoded == body
+
+
+# --- Truncated trailing frame: detected decode failure, not silent partial ---
+#
+# botocore's EventStreamBuffer ends iteration with a bare StopIteration the
+# moment the remaining bytes are too few for the next complete frame -- the
+# same way a clean end of stream ends. A truncated trailing frame therefore
+# used to look like success (failed=False) and silently drop the token-bearing
+# tail: Anthropic-on-Bedrock puts usage.output_tokens in the near-final
+# message_delta, so a cut-off stream undercounts tokens with no error signal.
+
+# Two-frame Bedrock stream whose final frame carries usage.output_tokens.
+_TEXT_DELTA = {
+    "type": "content_block_delta",
+    "delta": {"type": "text_delta", "text": "Hello world"},
+}
+_MESSAGE_DELTA = {
+    "type": "message_delta",
+    "delta": {"stop_reason": "end_turn"},
+    "usage": {"output_tokens": 1234},
+}
+
+
+def test_eventstream_complete_stream_keeps_token_bearing_tail():
+    """A complete stream still succeeds and keeps the token-bearing tail.
+
+    Baseline for the guard: the success path is byte-for-byte identical and
+    the final message_delta carrying usage.output_tokens is retained.
+    """
+    es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
+    decoded, failed = _decompress_b64_body(
+        _b64(es_bytes), None, "application/vnd.amazon.eventstream"
+    )
+    assert not failed
+    assert decoded == "".join(
+        f"data: {json.dumps(e, separators=(',', ':'))}\n"
+        for e in (_TEXT_DELTA, _MESSAGE_DELTA)
+    )
+    assert "output_tokens" in decoded
+
+
+@pytest.mark.parametrize("cut", [1, 4, 12, 30])
+def test_eventstream_truncated_trailing_frame_marks_failure(cut, caplog):
+    """Cutting bytes off the final frame must surface as a decode failure.
+
+    The body returns failed=True / decoded=None, so downstream token
+    accounting never trusts the silently dropped tail.
+    """
+    caplog.set_level(logging.WARNING, logger="api.access")
+    frame_a = _bedrock_event(_TEXT_DELTA)
+    frame_b = _bedrock_event(_MESSAGE_DELTA)
+    full = frame_a + frame_b
+    truncated = full[: len(full) - cut]
+    # Sanity: still truncating *within* the last frame, not at a boundary.
+    assert len(frame_a) < len(truncated) < len(full)
+
+    decoded, failed = _decompress_b64_body(
+        _b64(truncated), None, "application/vnd.amazon.eventstream"
+    )
+
+    assert failed
+    assert decoded is None
+    assert any("truncated" in record.message for record in caplog.records)
+
+
+def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
+    """Cutting at an exact frame boundary leaves a complete (shorter) stream.
+
+    There is no incomplete tail, so the guard must NOT fire -- this protects
+    against over-flagging streams that simply end on fewer frames.
+    """
+    frame_a = _bedrock_event(_TEXT_DELTA)
+    full = frame_a + _bedrock_event(_MESSAGE_DELTA)
+    decoded, failed = _decompress_b64_body(
+        _b64(full[: len(frame_a)]), None, "application/vnd.amazon.eventstream"
+    )
+    assert not failed
+    assert decoded == f"data: {json.dumps(_TEXT_DELTA, separators=(',', ':'))}\n"
