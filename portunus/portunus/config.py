@@ -115,6 +115,32 @@ class FirehoseConfig(BaseModel):
         ge=1000,
     )
 
+    def missing_required_streams(self) -> list[str]:
+        """Return the ``FIREHOSE_*`` env-var names whose stream is unset.
+
+        Every audit record type is published unconditionally, so all seven
+        delivery streams must be configured; a missing one means that record
+        type is silently dropped at request time. This is the single source of
+        truth used both to fail fast at startup and to gate ``/ping`` readiness,
+        so a task whose audit sink is misconfigured (e.g. one still carrying the
+        pre-migration ``KINESIS_*`` env vars, leaving ``FIREHOSE_*`` unset) never
+        serves traffic while silently dropping 100% of audit records.
+
+        Returns:
+            The names of the ``FIREHOSE_*`` env vars whose stream is unset
+            (an empty list when every required stream is configured).
+        """
+        required = {
+            "FIREHOSE_METADATA_STREAM": self.metadata_stream_name,
+            "FIREHOSE_REQUEST_HEADERS_STREAM": self.request_headers_stream_name,
+            "FIREHOSE_REQUEST_BODY_STREAM": self.request_body_stream_name,
+            "FIREHOSE_REQUEST_TRAILERS_STREAM": self.request_trailers_stream_name,
+            "FIREHOSE_RESPONSE_HEADERS_STREAM": self.response_headers_stream_name,
+            "FIREHOSE_RESPONSE_BODY_STREAM": self.response_body_stream_name,
+            "FIREHOSE_RESPONSE_TRAILERS_STREAM": self.response_trailers_stream_name,
+        }
+        return [env_var for env_var, value in required.items() if not value]
+
 
 class AwsConfig(BaseModel):
     """AWS-related configuration settings.

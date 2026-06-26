@@ -8,6 +8,7 @@ It implements the authentication logic and log event publishing to Firehose.
 import asyncio
 import logging
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -58,6 +59,32 @@ xray_service = XRayService()
 
 common_router = APIRouter()
 portunus_router = APIRouter()
+
+# Count of audit records that failed to publish, keyed by "<record_type>:<reason>".
+# Audit publishing is intentionally non-blocking, so a drop is surfaced here
+# (rather than by failing the customer-facing request) and via an alarmable log.
+audit_publish_failures: Counter = Counter()
+
+
+def _record_audit_drop(record_type: str, reason: str, trace_id: str) -> None:
+    """Record an audit-publish drop/failure so it is observable, not silent.
+
+    Increments an in-process counter and logs at CRITICAL with a stable
+    ``AUDIT_PUBLISH_DROPPED`` marker, so a CloudWatch Logs metric filter can
+    alarm on it. Does not change the HTTP status returned to the caller — audit
+    is non-blocking, so customer latency/status stays decoupled from the sink.
+
+    Args:
+        record_type: Audit record type that was dropped (e.g. ``"metadata"``).
+        reason: Why it was dropped (``"stream_unconfigured"``, ``"publish_error"``
+            or ``"publish_timeout"``).
+        trace_id: Request/trace ID for correlation.
+    """
+    audit_publish_failures[f"{record_type}:{reason}"] += 1
+    logger.critical(
+        f"AUDIT_PUBLISH_DROPPED record_type={record_type} reason={reason} "
+        f"request_id={trace_id}"
+    )
 
 
 class ErrorResponse(BaseModel):
@@ -174,18 +201,23 @@ async def authorise(
             # Publish to Firehose for long-term storage
             try:
                 async with asyncio.timeout(3):
-                    await publish_service.publish_metadata(
+                    published = await publish_service.publish_metadata(
                         request_id=trace_id,
                         timestamp=timestamp,
                         principal_info=principal_info,
                         secret_arn=payload.secret_arn,
                     )
+                # publish_* returns False (rather than raising) when its stream is
+                # unset; surface that drop instead of silently discarding the bool.
+                if not published:
+                    _record_audit_drop("metadata", "stream_unconfigured", trace_id)
             # There are some synchronous actions happening which can succeed even
             # if the timeout is hit
             except TimeoutError as e:
                 # Add exception to X-Ray trace for visibility
                 # but don't fail the whole request
                 segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+                _record_audit_drop("metadata", "publish_timeout", trace_id)
                 logger.critical(
                     f"Publishing metadata to firehose timed out for {trace_id}: {e}, ",
                     "although may have succeeded",
@@ -194,6 +226,7 @@ async def authorise(
                 # Add exception to X-Ray trace for visibility
                 # but don't fail the whole request
                 segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+                _record_audit_drop("metadata", "publish_error", trace_id)
                 logger.critical(
                     f"Failed to publish metadata to Firehose for {trace_id}: {e}"
                 )
@@ -241,22 +274,29 @@ async def log_request_headers(
     content: HeadersPayload,
     response: Response,
 ) -> Optional[ErrorResponse]:
-    """Store request headers."""
+    """Store request headers.
+
+    Audit publishing is non-blocking: a drop (publish returns ``False``) or a
+    publish error is recorded as an observable, alarmable event via
+    ``_record_audit_drop`` but never fails the request, so customer
+    latency/status stays decoupled from the audit sink.
+    """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Firehose for long-term storage
-        await publish_service.publish_request_headers(
+        published = await publish_service.publish_request_headers(
             request_id=request_id,
             headers=content.headers,
             timestamp=content.get_iso_timestamp(),
         )
+        if not published:
+            _record_audit_drop("request_headers", "stream_unconfigured", trace_id)
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+        _record_audit_drop("request_headers", "publish_error", trace_id)
         logger.critical(f"Firehose publishing failed for request headers: {e}")
-        response.status_code = 500
-        return ErrorResponse(message="Request headers storage error", debug_id=trace_id)
 
     response.status_code = 200
     return None
@@ -268,7 +308,12 @@ async def log_request_body(
     request: Request,
     response: Response,
 ) -> Optional[ErrorResponse]:
-    """Store request body as raw bytes."""
+    """Store request body as raw bytes.
+
+    Audit publishing is non-blocking: a dropped chunk (publish returns
+    ``False``) or a publish error is recorded as an observable, alarmable event
+    via ``_record_audit_drop`` but never fails the request.
+    """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
@@ -284,27 +329,30 @@ async def log_request_body(
 
         if chunks:
             for chunk_id, chunk in enumerate(chunks):
-                await publish_service.publish_request_body(
+                published = await publish_service.publish_request_body(
                     request_id=request_id,
                     body_bytes=chunk,
                     timestamp=timestamp,
                     chunk_id=chunk_id,
                     num_chunks=len(chunks),
                 )
+                if not published:
+                    _record_audit_drop("request_body", "stream_unconfigured", trace_id)
         else:
             # Handle empty body case by sending a single empty chunk
-            await publish_service.publish_request_body(
+            published = await publish_service.publish_request_body(
                 request_id=request_id,
                 body_bytes=b"",
                 timestamp=timestamp,
                 chunk_id=0,
                 num_chunks=1,
             )
+            if not published:
+                _record_audit_drop("request_body", "stream_unconfigured", trace_id)
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+        _record_audit_drop("request_body", "publish_error", trace_id)
         logger.critical(f"Firehose publishing failed for request body: {e}")
-        response.status_code = 500
-        return ErrorResponse(message="Request body storage error", debug_id=trace_id)
 
     response.status_code = 200
     return None
@@ -316,24 +364,28 @@ async def log_request_trailers(
     content: TrailersPayload,
     response: Response,
 ) -> Optional[ErrorResponse]:
-    """Store request trailers."""
+    """Store request trailers.
+
+    Audit publishing is non-blocking: a drop (publish returns ``False``) or a
+    publish error is recorded as an observable, alarmable event via
+    ``_record_audit_drop`` but never fails the request.
+    """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Firehose
-        await publish_service.publish_request_trailers(
+        published = await publish_service.publish_request_trailers(
             request_id=request_id,
             trailers=content.trailers,
             timestamp=content.get_iso_timestamp(),
         )
+        if not published:
+            _record_audit_drop("request_trailers", "stream_unconfigured", trace_id)
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+        _record_audit_drop("request_trailers", "publish_error", trace_id)
         logger.critical(f"Firehose publishing failed for request trailers: {e}")
-        response.status_code = 500
-        return ErrorResponse(
-            message="Request trailers storage error", debug_id=trace_id
-        )
 
     response.status_code = 200
     return None
@@ -345,24 +397,28 @@ async def log_response_headers(
     content: HeadersPayload,
     response: Response,
 ) -> Optional[ErrorResponse]:
-    """Store response headers."""
+    """Store response headers.
+
+    Audit publishing is non-blocking: a drop (publish returns ``False``) or a
+    publish error is recorded as an observable, alarmable event via
+    ``_record_audit_drop`` but never fails the request.
+    """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Firehose
-        await publish_service.publish_response_headers(
+        published = await publish_service.publish_response_headers(
             request_id=request_id,
             headers=content.headers,
             timestamp=content.get_iso_timestamp(),
         )
+        if not published:
+            _record_audit_drop("response_headers", "stream_unconfigured", trace_id)
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+        _record_audit_drop("response_headers", "publish_error", trace_id)
         logger.critical(f"Firehose publishing failed for response headers: {e}")
-        response.status_code = 500
-        return ErrorResponse(
-            message="Response headers storage error", debug_id=trace_id
-        )
 
     response.status_code = 200
     return None
@@ -374,7 +430,12 @@ async def log_response_body(
     request: Request,
     response: Response,
 ) -> Optional[ErrorResponse]:
-    """Store response body as raw bytes."""
+    """Store response body as raw bytes.
+
+    Audit publishing is non-blocking: a dropped chunk (publish returns
+    ``False``) or a publish error is recorded as an observable, alarmable event
+    via ``_record_audit_drop`` but never fails the request.
+    """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
@@ -390,27 +451,30 @@ async def log_response_body(
 
         if chunks:
             for chunk_id, chunk in enumerate(chunks):
-                await publish_service.publish_response_body(
+                published = await publish_service.publish_response_body(
                     request_id=request_id,
                     body_bytes=chunk,
                     timestamp=timestamp,
                     chunk_id=chunk_id,
                     num_chunks=len(chunks),
                 )
+                if not published:
+                    _record_audit_drop("response_body", "stream_unconfigured", trace_id)
         else:
             # Handle empty body case by sending a single empty chunk
-            await publish_service.publish_response_body(
+            published = await publish_service.publish_response_body(
                 request_id=request_id,
                 body_bytes=b"",
                 timestamp=timestamp,
                 chunk_id=0,
                 num_chunks=1,
             )
+            if not published:
+                _record_audit_drop("response_body", "stream_unconfigured", trace_id)
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+        _record_audit_drop("response_body", "publish_error", trace_id)
         logger.critical(f"Firehose publishing failed for response body: {e}")
-        response.status_code = 500
-        return ErrorResponse(message="Response body storage error", debug_id=trace_id)
 
     response.status_code = 200
     return None
@@ -422,24 +486,28 @@ async def log_response_trailers(
     content: TrailersPayload,
     response: Response,
 ) -> Optional[ErrorResponse]:
-    """Store response trailers."""
+    """Store response trailers.
+
+    Audit publishing is non-blocking: a drop (publish returns ``False``) or a
+    publish error is recorded as an observable, alarmable event via
+    ``_record_audit_drop`` but never fails the request.
+    """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Firehose
-        await publish_service.publish_response_trailers(
+        published = await publish_service.publish_response_trailers(
             request_id=request_id,
             trailers=content.trailers,
             timestamp=content.get_iso_timestamp(),
         )
+        if not published:
+            _record_audit_drop("response_trailers", "stream_unconfigured", trace_id)
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+        _record_audit_drop("response_trailers", "publish_error", trace_id)
         logger.critical(f"Firehose publishing failed for response trailers: {e}")
-        response.status_code = 500
-        return ErrorResponse(
-            message="Response trailers storage error", debug_id=trace_id
-        )
 
     response.status_code = 200
     return None
@@ -542,24 +610,37 @@ async def flush_cache(
 
 
 @common_router.get("/ping")
-async def ping(request: Request) -> dict:
+async def ping(request: Request, response: Response) -> dict:
     """
-    Health check endpoint for monitoring system status.
+    Health/readiness check endpoint for monitoring system status.
 
-    This endpoint checks the health of the Portunus service
-    and its connection to Redis. It returns a status indicator for
-    each component.
+    Reports Redis connectivity (informational) and Firehose audit
+    configuration (readiness-gating). A missing required Firehose delivery
+    stream is a static misconfiguration that would cause silent audit loss, so
+    it fails readiness (HTTP 503) and the task is taken out of rotation; a
+    transient Redis blip stays informational and does not flip the task
+    unhealthy. This complements the hard fail-fast at startup (see ``lifespan``).
 
     Returns:
         dict: Health status with the following fields:
-            - status: Overall service status ("healthy")
+            - status: Overall readiness ("healthy" or "unhealthy")
             - redis: Redis connection status ("OK" or "FAIL")
+            - firehose: Firehose audit config status ("OK" or "FAIL")
             - timestamp: ISO-formatted current timestamp
     """
     redis_health = "OK" if await state_service.health_check() else "FAIL"
+    missing_streams = config.firehose.missing_required_streams()
+    firehose_health = "OK" if not missing_streams else "FAIL"
+    if firehose_health == "FAIL":
+        logger.critical(
+            "Readiness check failed: missing required Firehose delivery stream "
+            f"env vars: {', '.join(missing_streams)}"
+        )
+        response.status_code = 503
     return {
-        "status": "healthy",
+        "status": "healthy" if firehose_health == "OK" else "unhealthy",
         "redis": redis_health,
+        "firehose": firehose_health,
         "timestamp": generate_iso_timestamp(),
     }
 
@@ -568,9 +649,23 @@ async def ping(request: Request) -> dict:
 async def lifespan(app: FastAPI):
     """Manage application lifecycle.
 
-    Starts the WS log queue on startup, drains active WS connections
-    and cleans up Redis on shutdown.
+    Fails fast at startup if any required Firehose delivery stream is unset,
+    so a task whose audit sink is misconfigured (e.g. one still carrying the
+    pre-migration ``KINESIS_*`` env vars, leaving ``FIREHOSE_*`` unset) never
+    starts serving — instead of silently dropping 100% of audit records while
+    returning 200. Then starts the WS log queue on startup, and drains active
+    WS connections and cleans up Redis on shutdown.
     """
+    missing_streams = config.firehose.missing_required_streams()
+    if missing_streams:
+        raise RuntimeError(
+            "Refusing to start: Firehose audit publishing is misconfigured. "
+            f"Missing required delivery stream env vars: {', '.join(missing_streams)}. "
+            "Serving with these unset would silently drop 100% of audit records "
+            "while returning 200 (most likely a task still carrying the "
+            "pre-migration KINESIS_* env vars)."
+        )
+
     await start_log_queue(num_workers=config.relay.max_connections)
     yield
 
