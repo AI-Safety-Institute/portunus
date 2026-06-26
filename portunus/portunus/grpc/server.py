@@ -179,18 +179,42 @@ async def stop_grpc_server(
     # sees the drain immediately and stops routing new connections here.
     await runtime.health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
 
+    # Share a SINGLE drain budget across both stops. ``server.stop`` and
+    # ``publish_queue.stop`` were previously each passed the full
+    # ``grace_seconds`` and awaited sequentially, so a wedged sink + an
+    # active stream could consume up to 2×grace before returning — an
+    # overrun that risks a SIGKILL (137) if an operator raises grace
+    # toward the ECS ``stopTimeout``. Compute the deadline once and give
+    # the queue only the time the server drain didn't already use, so the
+    # total is bounded by ``grace_seconds``.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace_seconds
+
     await runtime.server.stop(grace=grace_seconds)
 
-    # M5: give the queue the FULL remaining grace to flush to Firehose,
-    # not an arbitrary 5s cap — records already accepted should not be
-    # dropped on shutdown while grace remains. ``stop`` reports how many
-    # buffered records it had to cancel so the loss is observable.
-    cancelled = await runtime.publish_queue.stop(drain_timeout=float(grace_seconds))
+    # The queue gets the remaining grace to flush to Firehose — records
+    # already accepted should not be dropped on shutdown while grace
+    # remains. ``stop`` reports how many buffered records it had to cancel
+    # so the loss is observable.
+    queue_drain_budget = max(0.0, deadline - loop.time())
+    cancelled = await runtime.publish_queue.stop(drain_timeout=queue_drain_budget)
     if cancelled:
-        logger.warning(
-            "gRPC drain cancelled %d unflushed audit records after %ds grace",
+        # ERROR, not WARNING: a clean ``exit 0`` otherwise masks audit
+        # loss entirely. The ``extra`` fields give a stable key
+        # (``event=audit_records_lost_on_drain``) for a CloudWatch metric
+        # filter / alarm — ``cancelled_total`` on the queue is the
+        # in-process counter for the same loss.
+        logger.error(
+            "AUDIT LOSS on drain: %d accepted audit records were never "
+            "flushed within the %ds grace window (sink wedged or too "
+            "slow); they are permanently lost",
             cancelled,
             grace_seconds,
+            extra={
+                "event": "audit_records_lost_on_drain",
+                "lost_audit_records": cancelled,
+                "grace_seconds": grace_seconds,
+            },
         )
 
     try:
@@ -200,11 +224,12 @@ async def stop_grpc_server(
 
     logger.info(
         "gRPC drain complete: published=%d queue_dropped=%d "
-        "delivery_failed=%d build_failed=%d",
+        "delivery_failed=%d build_failed=%d drain_cancelled=%d",
         runtime.publish_queue.published_total,
         runtime.publish_queue.dropped_total,
         runtime.publish_queue.delivery_failed_total,
         runtime.publish_queue.build_failed_total,
+        runtime.publish_queue.cancelled_total,
     )
 
 

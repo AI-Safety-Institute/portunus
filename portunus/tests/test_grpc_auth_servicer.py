@@ -930,3 +930,211 @@ async def test_signing_pass_unexpected_exception_returns_500_without_leaking_mes
 
     assert response.denied_response.status.code == 500
     assert "internal stack trace string" not in response.denied_response.body
+
+
+# ---------------------------------------------------------------------------
+# Signing pass rides the Redis cache — no double STS/Secrets round-trip.
+#
+# The signing pass deliberately carries NO AWS credentials in
+# dynamic_metadata (that would leak them to every downstream filter), so
+# it re-derives the upstream key + signing_key by re-running
+# ``AuthService.authenticate`` — which is a Redis cache HIT in prod
+# because the auth pass populated it. These tests use a REAL AuthService
+# + CacheService (in-memory Redis) and count STS / Secrets Manager calls,
+# so a regression that breaks the cache hit (an extra STS+Secrets on
+# every signed request — 2× latency/cost, risking the 4s _AUTH_TIMEOUT_S)
+# fails loudly instead of silently doubling AWS traffic.
+# ---------------------------------------------------------------------------
+
+
+class _CountingAwsClient:
+    """Async-context AWS client stand-in; counts the call that matters."""
+
+    def __init__(self, service: str, counters: dict, secret_string: str) -> None:
+        self._service = service
+        self._counters = counters
+        self._secret_string = secret_string
+
+    async def __aenter__(self) -> "_CountingAwsClient":
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        return None
+
+    async def get_caller_identity(self) -> dict:
+        self._counters["sts"] += 1
+        return {
+            "Arn": "arn:aws:sts::111111111111:assumed-role/UserProfile_x_proj/sess-1"
+        }
+
+    async def get_secret_value(self, SecretId: str) -> dict:  # noqa: N803 — boto kwarg
+        self._counters["secrets"] += 1
+        return {"SecretString": self._secret_string}
+
+
+class _CountingBotoSession:
+    """aiobotocore-session stand-in handing out counting clients."""
+
+    def __init__(self, counters: dict, secret_string: str) -> None:
+        self._counters = counters
+        self._secret_string = secret_string
+
+    def create_client(self, service: str, **_kwargs: Any) -> _CountingAwsClient:
+        return _CountingAwsClient(service, self._counters, self._secret_string)
+
+
+class _FakeRedis:
+    """Minimal in-memory Redis: enough for CacheService get/setex/ping."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    async def get(self, key: str) -> Optional[str]:
+        return self._store.get(key)
+
+    async def setex(self, key: str, ttl: int, value: str) -> bool:
+        self._store[key] = value
+        return True
+
+    async def ping(self) -> bool:
+        return True
+
+
+class _FakeStateService:
+    def __init__(self) -> None:
+        self._redis = _FakeRedis()
+
+    async def acquire_redis_connection(self, *_a: Any, **_k: Any) -> _FakeRedis:
+        return self._redis
+
+
+_SIGNING_SECRET = json.dumps(
+    {
+        "secret": "sk-upstream-test-key",
+        "signing_key": {
+            "provider_id": "signingkey_1234abcd",
+            "kms_key_arn": "arn:aws:kms:eu-west-2:111111111111:alias/test-key",
+        },
+    }
+)
+
+
+def _signing_payload() -> str:
+    """A bearer payload whose credentials carry a far-future expiration.
+
+    The expiration gives the cache write a positive TTL so the entry is
+    actually stored (CacheService skips caching when TTL <= 0).
+    """
+    return base64.b64encode(
+        json.dumps(
+            {
+                "credentials": {
+                    "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                    "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                    "session_token": "FQoGZXIvYXdzEPj//////////wEaDExample",
+                    "expiration": "2099-01-01T00:00:00Z",
+                },
+                "secret_arn": (
+                    "arn:aws:secretsmanager:eu-west-2:111111111111:secret:signing-test"
+                ),
+            }
+        ).encode()
+    ).decode()
+
+
+def _real_servicer_with_counting_aws() -> tuple[PortunusAuthServicer, dict]:
+    """Wire a real AuthService (real cache) over counting AWS fakes."""
+    from portunus.services.auth_service import AuthService
+    from portunus.services.cache_service import CacheService
+    from portunus.services.secrets_service import SecretsService
+
+    counters = {"sts": 0, "secrets": 0}
+    session = _CountingBotoSession(counters, _SIGNING_SECRET)
+    auth_service = AuthService(
+        secrets_service=SecretsService(boto_session=session),
+        cache_service=CacheService(state_service=_FakeStateService()),  # type: ignore[arg-type]
+    )
+    servicer = PortunusAuthServicer(
+        auth_service=auth_service,
+        sign_request_fn=FakeSignRequest(
+            returns={"Signature": "sig1=:x:", "Signature-Input": "sig1=()"}
+        ),  # type: ignore[arg-type]
+    )
+    return servicer, counters
+
+
+def _auth_ctx_with_host(target_host: str) -> _FakeContext:
+    """Auth-pass context carrying the trusted target_host via gRPC metadata."""
+    return _FakeContext(
+        metadata=[
+            ("x-portunus-proxy-key", _PROXY_KEY),
+            ("x-portunus-target-host", target_host),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_signing_pass_cache_hit_issues_sts_and_secrets_once_not_twice():
+    """Auth pass then signing pass hit AWS exactly once between them.
+
+    With the SAME trusted ``target_host`` on both passes (what Envoy
+    sends — identical ``x-portunus-target-host`` initial_metadata on
+    ext_authz #1 and #2), the signing pass is a Redis cache hit and does
+    NOT re-run STS / Secrets Manager.
+    """
+    servicer, counters = _real_servicer_with_counting_aws()
+    payload = _signing_payload()
+    host = "api.openai.com"
+
+    # Pass 1 — header-only auth. Populates the cache (miss → 1×STS+Secrets).
+    auth_resp = await servicer.Check(
+        _check_request(payload_header=payload, target_host=None),
+        _auth_ctx_with_host(host),
+    )
+    assert auth_resp.HasField("ok_response"), auth_resp
+    assert counters == {"sts": 1, "secrets": 1}
+
+    # Pass 2 — signing. Re-authenticates off the SAME (payload, host) key
+    # → cache hit → no further AWS round-trip.
+    sign_resp = await servicer.Check(
+        _check_request(payload_header=payload, target_host=None, body=b'{"m":1}'),
+        _signing_ctx(target_host=host),
+    )
+    assert sign_resp.HasField("ok_response"), sign_resp
+    sign_headers = {h.header.key: h.header.value for h in sign_resp.ok_response.headers}
+    assert sign_headers.get("Signature", "").startswith("sig1=:")
+
+    # The crux: STS and Secrets Manager were each touched exactly ONCE
+    # across both passes — the signing pass rode the cache.
+    assert counters == {"sts": 1, "secrets": 1}, (
+        f"signing pass did a fresh AWS round-trip instead of a cache hit: {counters}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_divergent_target_host_between_passes_forces_double_sts():
+    """A target_host mismatch across passes defeats the cache → double AWS.
+
+    Documents WHY both Envoy ext_authz filters MUST inject the same
+    ``x-portunus-target-host``: ``generate_cache_key`` is host-scoped, so
+    if the signing pass saw a different host it would miss the cache and
+    re-run STS + Secrets on every signed request. This is the failure the
+    cache-hit test guards against — pinned here so a config that lets the
+    two passes diverge can't regress silently.
+    """
+    servicer, counters = _real_servicer_with_counting_aws()
+    payload = _signing_payload()
+
+    await servicer.Check(
+        _check_request(payload_header=payload, target_host=None),
+        _auth_ctx_with_host("api.openai.com"),
+    )
+    assert counters == {"sts": 1, "secrets": 1}
+
+    # Signing pass sees a DIFFERENT trusted host → different cache key →
+    # miss → a second full STS + Secrets round-trip.
+    await servicer.Check(
+        _check_request(payload_header=payload, target_host=None, body=b'{"m":1}'),
+        _signing_ctx(target_host="api.anthropic.com"),
+    )
+    assert counters == {"sts": 2, "secrets": 2}

@@ -79,6 +79,13 @@ class BoundedPublishQueue:
         #                            capacity/retry concern.
         self._build_failed_total = 0
         self._delivery_failed_total = 0
+        # Audit records accepted into the queue but cancelled (never
+        # flushed) because a drain timed out — e.g. a wedged Firehose
+        # sink at shutdown. Tracked separately from ``dropped_total``
+        # (queue-pressure drops) and ``delivery_failed_total`` (Firehose
+        # rejections): this is shutdown loss, and a clean process exit
+        # would otherwise hide it. ``stop_grpc_server`` alarms on it.
+        self._cancelled_total = 0
 
         # Default 90/10 split: bodies cap at 90% of maxsize, reserving
         # 10% headroom for blocking metadata submits.
@@ -107,6 +114,17 @@ class BoundedPublishQueue:
     def delivery_failed_total(self) -> int:
         """Records built but rejected/errored by Firehose (throttling, outage)."""
         return self._delivery_failed_total
+
+    @property
+    def cancelled_total(self) -> int:
+        """Records accepted but cancelled unflushed when a drain timed out.
+
+        Distinct from ``dropped_total`` (rejected at submit under queue
+        pressure) and ``delivery_failed_total`` (built but rejected by
+        Firehose). A non-zero value means audit was lost at shutdown
+        despite a clean process exit — alarm on it.
+        """
+        return self._cancelled_total
 
     @property
     def failed_total(self) -> int:
@@ -154,6 +172,7 @@ class BoundedPublishQueue:
             # Records still queued when we gave up — accepted but never
             # flushed — so the caller can report the loss.
             unflushed = self._queue.qsize()
+            self._cancelled_total += unflushed
             logger.warning(
                 "Publish workers did not drain within %.1fs; cancelling "
                 "(%d records unflushed)",

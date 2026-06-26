@@ -22,7 +22,6 @@ import base64
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,7 +34,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "portun
 os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
-from conftest import encode_base64  # noqa: E402
+from conftest import _read_audit_s3_records, encode_base64  # noqa: E402
 
 # Import the ws-client used by the behaviour suite so we're on the
 # same client surface (additional_headers, asyncio API).
@@ -49,85 +48,32 @@ def _auth_header(api_key_prefix: str = "Bearer ") -> str:
     return f"{api_key_prefix}{encode_base64({'credentials': {}, 'secret_arn': ''})}"
 
 
-def _read_kinesis_records(stream_name: str) -> list[dict[str, Any]]:
-    """Drain a Kinesis stream from LocalStack, deserialising each record.
-
-    Returns one decoded JSON object per record. Safe to call repeatedly;
-    Kinesis returns TRIM_HORIZON onward each time, so tests get the full
-    history regardless of how many records they're after.
-    """
-    shard_result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "localstack-main",
-            "awslocal",
-            "kinesis",
-            "get-shard-iterator",
-            "--stream-name",
-            stream_name,
-            "--shard-id",
-            "shardId-000000000000",
-            "--shard-iterator-type",
-            "TRIM_HORIZON",
-            "--region",
-            "eu-west-2",
-            "--query",
-            "ShardIterator",
-            "--output",
-            "text",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if shard_result.returncode != 0:
-        return []
-    shard_iterator = shard_result.stdout.strip()
-    records_result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "localstack-main",
-            "awslocal",
-            "kinesis",
-            "get-records",
-            "--shard-iterator",
-            shard_iterator,
-            "--region",
-            "eu-west-2",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if records_result.returncode != 0:
-        return []
-    response = json.loads(records_result.stdout)
-    out: list[dict[str, Any]] = []
-    for r in response.get("Records", []):
-        out.append(json.loads(base64.b64decode(r["Data"])))
-    return out
-
-
-async def _wait_for_records(
-    stream_name: str,
+async def _wait_for_s3_records(
+    stream: str,
     predicate,
     *,
-    timeout: float = 15.0,
+    timeout: float = 20.0,
     poll_interval: float = 0.5,
 ) -> list[dict[str, Any]]:
-    """Poll a Kinesis stream until ``predicate(records)`` returns truthy.
+    """Poll the Firehose→S3 audit prefix until ``predicate(records)`` holds.
 
-    LocalStack Kinesis lags 0.5–2s behind put_records under load; polling
-    instead of a fixed sleep keeps the suite fast without flaking on slow
-    runners.
+    The audit pipeline is Firehose direct-PUT → S3 (Kinesis Data Streams
+    were retired in #22). ``conftest._read_audit_s3_records`` reads one
+    logical stream's S3 prefix (e.g. ``response-body``) and parses the
+    newline-delimited JSON; LocalStack's 1s/1MiB buffer hints
+    (``scripts/localstack-init-firehose.sh``) land records within ~1-2s.
+    Each call re-reads the whole (cumulative, per-test-cleared) prefix, so
+    we poll until enough records have flushed rather than after a fixed
+    sleep.
     """
     deadline = time.monotonic() + timeout
+    records = _read_audit_s3_records(stream, timeout=0.1)
     while time.monotonic() < deadline:
-        records = _read_kinesis_records(stream_name)
         if predicate(records):
             return records
         await asyncio.sleep(poll_interval)
-    return _read_kinesis_records(stream_name)
+        records = _read_audit_s3_records(stream, timeout=0.1)
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -135,18 +81,11 @@ async def _wait_for_records(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Reads from LocalStack Kinesis Data Streams. After the Firehose "
-    "direct-PUT migration, audit records flow to Firehose → S3 with a "
-    "~60s buffer (too slow for a smoke test). Needs a "
-    "LocalStack-Firehose flush-then-S3 verification path; tracked as a "
-    "follow-up."
-)
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
     docker_setup,
-    clean_kinesis_streams,
+    clean_audit_pipeline,
 ) -> None:
     """End-to-end audit-pipeline smoke for the Codex WS flow.
 
@@ -180,13 +119,13 @@ async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
         f"got {server_frame_count}"
     )
 
-    # ``clean_kinesis_streams`` reset the streams before this test, so any
-    # ``response_body`` record on the stream is one of ours.
+    # ``clean_audit_pipeline`` cleared the S3 audit prefix before this
+    # test, so any ``response_body`` record under it is one of ours.
     def _response_body_records(rs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [r for r in rs if r.get("record_type") == "response_body"]
 
-    resp_records = await _wait_for_records(
-        "portunus-stream-response-body",
+    resp_records = await _wait_for_s3_records(
+        "response-body",
         lambda rs: len(_response_body_records(rs)) >= server_frame_count,
         timeout=20,
     )
@@ -206,8 +145,8 @@ async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
     )
     our_req = next(iter(request_ids))
 
-    summary_records = await _wait_for_records(
-        "portunus-stream-ws-summary",
+    summary_records = await _wait_for_s3_records(
+        "ws-summary",
         lambda rs: any(r.get("record_type") == "ws_summary" for r in rs),
         timeout=20,
     )
@@ -245,12 +184,7 @@ def _load_anthropic_signing_vector() -> dict[str, Any]:
     )
 
 
-@pytest.mark.skip(
-    reason="Reads from Kinesis Data Streams via LocalStack, but the audit "
-    "pipeline now uses Firehose direct-PUT → S3 with default ~60s buffer "
-    "(too slow for a smoke test). Needs a LocalStack-Firehose flush-then-S3 "
-    "verification path; tracked as a follow-up."
-)
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "docker_setup",
     [
@@ -266,18 +200,18 @@ def _load_anthropic_signing_vector() -> dict[str, Any]:
     ],
     indirect=True,
 )
-def test_signed_request_publishes_digest_and_signature_headers_to_kinesis(
+def test_signed_request_publishes_digest_and_signature_headers_to_s3(
     api_key_prefix: str,
     api_key_header: str,
     docker_setup: str,
-    clean_kinesis_streams,
+    clean_audit_pipeline,
 ):
-    """Signing-pass smoke: Kinesis carries Content-Digest + Signature headers.
+    """Signing-pass smoke: S3 audit carries Content-Digest + Signature headers.
 
     Complements ``test_e2e_signing.py``, which validates the headers as
     seen by the upstream. This validates the same headers reach the
-    audit pipeline — a publish-side regression in the signing-pass flow
-    surfaces here, not in the wire-level check.
+    Firehose→S3 audit pipeline — a publish-side regression in the
+    signing-pass flow surfaces here, not in the wire-level check.
     """
     vector = _load_anthropic_signing_vector()
     body = vector["request"]["body"]
@@ -296,13 +230,13 @@ def test_signed_request_publishes_digest_and_signature_headers_to_kinesis(
     def _header_records() -> list[dict[str, Any]]:
         return [
             r
-            for r in _read_kinesis_records("portunus-stream-request-headers")
+            for r in _read_audit_s3_records("request-headers", timeout=0.1)
             if r.get("record_type") == "request_headers"
         ]
 
-    # Poll briefly — Kinesis publish is async-fire-and-forget through the
-    # publish queue.
-    deadline = time.monotonic() + 15
+    # Poll briefly — publish is async-fire-and-forget through the publish
+    # queue, then Firehose buffers ~1-2s before the record lands on S3.
+    deadline = time.monotonic() + 20
     header_records = _header_records()
     while time.monotonic() < deadline and not header_records:
         time.sleep(0.5)

@@ -254,3 +254,108 @@ async def test_stop_with_queue_full_cancels_workers_without_raising(caplog) -> N
     assert any(
         "did not drain" in record.message for record in caplog.records
     ), "expected the slow-shutdown warning to be emitted"
+
+
+@pytest.mark.asyncio
+async def test_stop_counts_unflushed_records_on_cancelled_total(caplog) -> None:
+    """A timed-out drain records the lost count on ``cancelled_total``.
+
+    ``cancelled_total`` is the in-process counter ``stop_grpc_server``
+    alarms on: a clean ``exit 0`` would otherwise hide audit dropped at
+    shutdown. It must match what ``stop()`` returns and stay distinct
+    from ``dropped_total`` (submit-time pressure) and
+    ``delivery_failed_total`` (Firehose rejections), both of which stay 0
+    here — the records were accepted and built fine, just never flushed.
+    """
+    sleeping = asyncio.Event()
+
+    async def _slow_sender(stream_name: str, records: list[bytes]) -> int:
+        sleeping.set()
+        await asyncio.sleep(60)
+        return 0
+
+    queue = _queue(
+        maxsize=10,
+        body_capacity=10,
+        num_workers=1,
+        batch_sender=_slow_sender,
+        max_batch=1,
+    )
+    await queue.start()
+
+    queue.submit_droppable(_noop_task("trigger"))
+    await asyncio.wait_for(sleeping.wait(), timeout=1.0)
+    for n in range(4):
+        queue.submit_droppable(_noop_task(f"filler-{n}"))
+
+    assert queue.cancelled_total == 0  # nothing lost yet
+
+    cancelled = await queue.stop(drain_timeout=0.1)
+
+    assert cancelled > 0
+    assert queue.cancelled_total == cancelled
+    # Shutdown loss is a separate bucket from queue-pressure drops and
+    # Firehose delivery failures.
+    assert queue.dropped_total == 0
+    assert queue.delivery_failed_total == 0
+
+
+@pytest.mark.asyncio
+async def test_saturation_drops_bodies_keeps_metadata_and_drains_sentinels() -> None:
+    """Flood PAST body capacity; bodies drop, metadata survives, drain is clean.
+
+    The four-part contract the tiered queue exists to uphold under
+    genuine saturation (the load-test "zero drops" runs never crossed
+    ``body_capacity``, so this is the path that was unit-only):
+
+    (a) body records drop once the queue hits ``body_capacity``;
+    (b) header/metadata records still enqueue (blocking submit uses the
+        reserved headroom and never waits on a worker);
+    (c) ``dropped_total`` accounts for every rejected body;
+    (d) shutdown sentinels are NOT lost among the flood — every worker
+        consumes its sentinel and the drain completes cleanly (returns 0,
+        nothing cancelled), so no queued record is silently discarded.
+    """
+    published: dict[str, int] = {}
+
+    async def _counting_sender(stream_name: str, records: list[bytes]) -> int:
+        published[stream_name] = published.get(stream_name, 0) + len(records)
+        return 0
+
+    # 100/90 mirrors the prod 10000/9000 ratio at a test-fast scale.
+    queue = _queue(
+        maxsize=100,
+        body_capacity=90,
+        num_workers=4,
+        batch_sender=_counting_sender,
+    )
+
+    # Saturate with bodies BEFORE starting workers so the drop policy is
+    # exercised deterministically (no worker draining underneath us).
+    accepted = [queue.submit_droppable(_task("body")) for _ in range(200)]
+    assert accepted.count(True) == 90  # (a) bodies capped at body_capacity
+    assert accepted.count(False) == 110
+    assert queue.dropped_total == 110  # (c) every rejected body counted
+    assert queue.qsize() == 90
+
+    # (b) metadata uses the 10-slot headroom above body_capacity and must
+    # enqueue immediately — never block on a body-saturated queue.
+    for _ in range(10):
+        await asyncio.wait_for(
+            queue.submit_blocking(_task("headers", label="header")),
+            timeout=0.5,
+        )
+    assert queue.qsize() == 100  # full, but metadata all landed
+
+    # (d) Now drain. A sentinel lost among the queued items would hang a
+    # worker and force the timeout path (cancelled > 0); a clean drain
+    # proves sentinels are immune to the drop policy.
+    await queue.start()
+    cancelled = await queue.stop(drain_timeout=5.0)
+
+    assert cancelled == 0
+    assert queue.cancelled_total == 0
+    assert queue._workers == []  # noqa: SLF001 — all workers exited on their sentinel
+    # Every accepted record flushed: 90 bodies + 10 metadata, none lost.
+    assert published == {"body": 90, "headers": 10}
+    assert queue.published_total == 100
