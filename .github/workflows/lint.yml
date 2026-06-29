@@ -1,6 +1,6 @@
 name: Checks (prek)
 
-# Single source of truth for lint / format / type-check / proto checks.
+# Single source of truth for lint / format / type-check.
 # Runs the exact same prek hook set developers run locally
 # (.pre-commit-config.yaml), so local and CI enforcement never drift.
 

@@ -9,7 +9,7 @@ on:
       - main
 
 jobs:
-  # Lint, format, type-check and proto checks all run via the single prek
+  # Lint, format and type-check all run via the single prek
   # hook set (.pre-commit-config.yaml) — the same one developers run locally.
   checks:
     uses: ./.github/workflows/lint.yml
