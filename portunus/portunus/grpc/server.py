@@ -24,7 +24,7 @@ from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
-from portunus.config import GrpcConfig
+from portunus.config import FirehoseConfig, GrpcConfig
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.services.auth_service import AuthService
@@ -53,6 +53,7 @@ class GrpcRuntime:
 async def start_grpc_server(
     *,
     config: GrpcConfig,
+    firehose: FirehoseConfig,
     auth_service: AuthService,
     publish_service: PublishService,
 ) -> Optional[GrpcRuntime]:
@@ -60,6 +61,11 @@ async def start_grpc_server(
 
     Registers ext_authz, ext_proc, the standard health service, and server
     reflection. Returns None when ``config.enabled`` is False.
+
+    Refuses to start (raises ``RuntimeError``) when the channel-identity key
+    or the Firehose audit sink is misconfigured, so a task that would either
+    accept unauthenticated callers or silently drop 100% of audit records
+    never comes up serving.
     """
     if not config.enabled:
         logger.info("gRPC server disabled (config.grpc.enabled=false); skipping start")
@@ -79,6 +85,26 @@ async def start_grpc_server(
             "GRPC_PROXY_API_KEY_OPTIONAL=true to acknowledge that the "
             "channel-identity gate is disabled (local dev / tests "
             "only)."
+        )
+
+    # Fail fast if the Firehose audit sink is misconfigured. Every audit
+    # record type is published unconditionally, but each ``build_*`` short-
+    # circuits to ``None`` (warning only) when its stream is unset, so a task
+    # with ``FIREHOSE_*`` unset would serve traffic while silently dropping
+    # 100% of audit records — no error to the caller, no alarm. This ports the
+    # FastAPI ``lifespan`` boot-guard from #22 (commit 0c9ff50) into the gRPC
+    # startup path that replaced ``app.py``: refuse to come up serving rather
+    # than let a blue task drop all audit. There is no opt-out (matching #22);
+    # a task that genuinely needs no audit sink should not be in rotation.
+    missing_streams = firehose.missing_required_streams()
+    if missing_streams:
+        raise RuntimeError(
+            "Refusing to start the gRPC server: Firehose audit publishing is "
+            "misconfigured. Missing required delivery stream env vars: "
+            f"{', '.join(missing_streams)}. Serving with these unset would "
+            "silently drop 100% of audit records while reporting success "
+            "(most likely a task still carrying the pre-migration KINESIS_* "
+            "env vars)."
         )
 
     server = grpc.aio.server(
@@ -260,6 +286,7 @@ async def run() -> None:
 
     runtime = await start_grpc_server(
         config=config.grpc,
+        firehose=config.firehose,
         auth_service=auth_service,
         publish_service=publish_service,
     )

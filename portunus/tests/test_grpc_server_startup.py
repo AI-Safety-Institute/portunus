@@ -4,9 +4,27 @@ from __future__ import annotations
 
 import pytest
 
-from portunus.config import GrpcConfig
+from portunus.config import FirehoseConfig, GrpcConfig
 from portunus.grpc import server as grpc_server
 from portunus.grpc.server import start_grpc_server
+
+
+def _configured_firehose() -> FirehoseConfig:
+    """A FirehoseConfig with every required stream set.
+
+    These tests exercise the proxy-key / message-limit checks, so the audit
+    fail-fast guard must pass; the Firehose guard itself is covered in
+    ``test_firehose_config_guard.py``.
+    """
+    return FirehoseConfig(
+        metadata_stream_name="metadata",
+        request_headers_stream_name="req-headers",
+        request_body_stream_name="req-body",
+        request_trailers_stream_name="req-trailers",
+        response_headers_stream_name="resp-headers",
+        response_body_stream_name="resp-body",
+        response_trailers_stream_name="resp-trailers",
+    )
 
 
 class _FakeAuthService:
@@ -41,6 +59,7 @@ async def test_disabled_server_returns_none_without_checking_proxy_key():
     assert (
         await start_grpc_server(
             config=config,
+            firehose=_configured_firehose(),
             auth_service=_FakeAuthService(),  # type: ignore[arg-type]
             publish_service=_FakePublishService(),  # type: ignore[arg-type]
         )
@@ -64,6 +83,7 @@ async def test_enabled_with_empty_key_and_optional_unset_raises_runtimeerror():
     with pytest.raises(RuntimeError, match="GRPC_PROXY_API_KEY"):
         await start_grpc_server(
             config=config,
+            firehose=_configured_firehose(),
             auth_service=_FakeAuthService(),  # type: ignore[arg-type]
             publish_service=_FakePublishService(),  # type: ignore[arg-type]
         )
@@ -83,6 +103,7 @@ async def test_enabled_with_non_empty_key_does_not_raise():
     )
     runtime = await start_grpc_server(
         config=config,
+        firehose=_configured_firehose(),
         auth_service=_FakeAuthService(),  # type: ignore[arg-type]
         publish_service=_FakePublishService(),  # type: ignore[arg-type]
     )
@@ -105,6 +126,7 @@ async def test_enabled_with_empty_key_but_optional_true_starts():
     )
     runtime = await start_grpc_server(
         config=config,
+        firehose=_configured_firehose(),
         auth_service=_FakeAuthService(),  # type: ignore[arg-type]
         publish_service=_FakePublishService(),  # type: ignore[arg-type]
     )
