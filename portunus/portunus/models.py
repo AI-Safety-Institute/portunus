@@ -119,12 +119,133 @@ def _decode_b64_headers(
     return result, failures
 
 
-def _decompress_b64_body(
-    body_b64: str, content_encoding: Optional[str]
-) -> tuple[Optional[str], bool]:
-    """Base64-decode, optionally decompress, and UTF-8 decode a body.
+_EVENTSTREAM_CONTENT_TYPE = "application/vnd.amazon.eventstream"
 
-    Returns (decoded_text, failed). On failure, decoded_text is None and failed is True.
+
+def _eventstream_payload_to_sse_line(payload: bytes) -> Optional[str]:
+    r"""Convert one eventstream message payload to an SSE ``data: {...}\n`` line.
+
+    The payload is the Bedrock envelope ``{"bytes": "<base64 inner event>"}``;
+    returns the inner event as a single compact SSE line, or None when the
+    message isn't a usable ``bytes`` envelope (Bedrock emits non-``bytes``
+    exception/throttling shapes mid-stream, which are skipped).
+    """
+    try:
+        envelope = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not (isinstance(envelope, dict) and (inner_b64 := envelope.get("bytes"))):
+        return None
+    try:
+        inner_str = base64.b64decode(inner_b64).decode("utf-8")
+    except (TypeError, ValueError, binascii.Error) as exc:
+        logger.warning(
+            "Skipping malformed eventstream message: %s", exc.__class__.__name__
+        )
+        return None
+    # Re-parse + dict check is the SSE-injection guard: rejects non-object
+    # inners, and inners whose strings contain literal control chars (RFC 8259
+    # forbids those). Re-serializing keeps each SSE event on one data line.
+    try:
+        inner = json.loads(inner_str)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(inner, dict):
+        return None
+    return f"data: {json.dumps(inner, separators=(',', ':'))}\n"
+
+
+def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
+    r"""Unwrap eventstream framing into SSE ``data: {...}\n`` lines.
+
+    Framing is parsed by botocore's ``EventStreamBuffer`` (the same code path
+    boto3 uses for Bedrock streaming), so prelude/header/CRC handling isn't
+    rolled by hand here. One SSE line per inner ``bytes`` event; non-``bytes``
+    messages are skipped (see ``_eventstream_payload_to_sse_line``).
+
+    Returns None to signal a decode failure (the caller maps that to
+    ``response_body_decode_failure``). That happens when no complete message
+    could be parsed, *and* when the body ends in a truncated (incomplete)
+    trailing frame -- see the truncation guard below. A non-None result means
+    every input byte was accounted for by a complete frame.
+
+    Distinct from truncation: a ``ParserError`` from a corrupt frame *after*
+    at least one message has parsed (e.g. a mid-stream CRC mismatch) is
+    best-effort -- the events recovered before it are returned rather than
+    discarding the whole body. CRCs are validated by botocore; a mismatch
+    mid-stream is non-fatal for that reason.
+    """
+    # Lazy-loaded per this module's convention (see module docstring): keep
+    # `import portunus.models` free of third-party imports. botocore itself is
+    # always present in both run targets (the service depends on it; Glue
+    # preinstalls boto3).
+    from botocore.eventstream import EventStreamBuffer, ParserError
+
+    buffer = EventStreamBuffer()
+    buffer.add_data(body_bytes)
+    sse_lines: list[str] = []
+    parsed_any = False
+    consumed = 0
+    try:
+        for message in buffer:
+            parsed_any = True
+            # total_length spans the whole on-wire frame (prelude + headers +
+            # payload + both CRCs), so accumulating it tracks exactly how many
+            # input bytes complete frames have consumed -- the basis for the
+            # truncation guard below. (botocore-stubs mistypes ``prelude`` as
+            # ``int`` rather than ``MessagePrelude``; hence the attr ignore.)
+            consumed += message.prelude.total_length  # type: ignore[attr-defined]
+            line = _eventstream_payload_to_sse_line(message.payload)
+            if line is not None:
+                sse_lines.append(line)
+    except ParserError as exc:
+        if not parsed_any:
+            logger.warning("eventstream parse failed: %s", exc.__class__.__name__)
+            return None
+        # A corrupt frame after a valid prefix (e.g. CRC mismatch): keep the
+        # events decoded so far. This is NOT the truncation path -- the guard
+        # below must not run here, since an unparsed corrupt frame also leaves
+        # a residual but is deliberately recovered as a partial success.
+        logger.warning(
+            "eventstream corrupt after %d message(s), keeping partial: %s",
+            len(sse_lines),
+            exc.__class__.__name__,
+        )
+        return "".join(sse_lines)
+    if not parsed_any:
+        return None
+    # Truncation guard (silent-failure fix). botocore's EventStreamBuffer ends
+    # iteration with a bare StopIteration the instant the remaining bytes are
+    # too few to form the next complete frame -- indistinguishable, to the
+    # `for` loop, from a clean end of stream. So a truncated trailing frame
+    # (client disconnect, upstream reset, idle timeout, body-size cap) looked
+    # like success and silently dropped the token-bearing tail (Anthropic's
+    # usage.output_tokens live in the near-final message_delta). Detect it via
+    # the one observable difference: complete frames account for every input
+    # byte, so any residual is an incomplete tail -> mark a decode failure.
+    residual = len(body_bytes) - consumed
+    if residual > 0:
+        logger.warning(
+            "eventstream truncated: %d trailing byte(s) after %d complete "
+            "message(s) do not form a full frame",
+            residual,
+            len(sse_lines),
+        )
+        return None
+    return "".join(sse_lines)
+
+
+def _decompress_b64_body(
+    body_b64: str,
+    content_encoding: Optional[str],
+    content_type: Optional[str] = None,
+) -> tuple[Optional[str], bool]:
+    """Base64-decode, optionally decompress, and decode a body to text.
+
+    Plain UTF-8 by default; gzip/deflate via ``content_encoding``;
+    AWS event-stream binary via ``content_type`` (see
+    ``_parse_vnd_amazon_eventstream``). Returns ``(text, failed)``;
+    ``text`` is None when ``failed``.
     """
     import gzip
     import zlib
@@ -146,6 +267,12 @@ def _decompress_b64_body(
                 body_bytes = zlib.decompress(body_bytes)
             except (zlib.error, EOFError):
                 return None, True
+
+    if content_type and _EVENTSTREAM_CONTENT_TYPE in content_type.lower():
+        sse = _parse_vnd_amazon_eventstream(body_bytes)
+        if sse is None:
+            return None, True
+        return sse, False
 
     try:
         return body_bytes.decode("utf-8"), False
@@ -1138,7 +1265,9 @@ class JoinedLogRecord:
             True if decoding succeeded, False otherwise
         """
         decoded, failed = _decompress_b64_body(
-            self.response_body_body, self.response_headers_content_encoding
+            self.response_body_body,
+            self.response_headers_content_encoding,
+            self.response_headers_content_type,
         )
         self.response_body_decoded = decoded
         self.response_body_decode_failure = failed
