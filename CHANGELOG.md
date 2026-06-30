@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.1]
+
 ### Fixed
 - Decode AWS Bedrock `application/vnd.amazon.eventstream` response bodies into
   SSE so token usage is parseable for Bedrock streaming responses (previously
