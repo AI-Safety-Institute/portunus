@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.2]
+
+### Fixed
+- Restore `aws-xray-sdk` to `>=2.15.0,<3`. v0.5.1 accidentally capped it to
+  `<2.15` (an unrelated, undocumented rider in the #17 eventstream-decode change,
+  `daf52c4`), which resolved the SDK *down* to 2.14.0 in downstream consumers.
+  2.14.0 fails to propagate the X-Ray trace context in the proxy runtime, so
+  every proxied request was logged with `request_id="No-Trace-Id"`; that
+  collapsed all logs into a single request_id group and OOM-ed the downstream
+  `portunus-log-analysis` Glue ETL, taking down joined-logs, token usage, and the
+  misalignment-monitor dashboard for ~4 days (from 2026-07-02). Floored at
+  2.15.0 so 2.14.0 can no longer resolve.
+
 ## [0.5.1]
 
 ### Fixed
