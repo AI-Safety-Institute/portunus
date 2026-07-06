@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.3]
+
+### Fixed
+- v0.5.2's aws-xray-sdk fix never reached the built image: the Docker build
+  installs from the package-level `portunus/uv.lock`, which still pinned
+  2.14.0 (only the workspace-root lock was regenerated). Regenerate the
+  package lock (aws-xray-sdk 2.14.0 → 2.15.0) so the backend image actually
+  ships 2.15.0.
+- Build with `uv sync --locked` instead of `--frozen`, so a `uv.lock` that has
+  drifted from `pyproject.toml` fails the image build instead of silently
+  installing stale pins (the exact failure mode above).
+
 ## [0.5.2]
 
 ### Fixed

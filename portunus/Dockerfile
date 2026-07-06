@@ -11,8 +11,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN touch README.md
 
+# --locked (not --frozen) so a uv.lock that has drifted from pyproject.toml
+# fails the build instead of silently installing stale pins (v0.5.2 shipped
+# aws-xray-sdk 2.14.0 this way despite pyproject requiring >=2.15.0).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project
+    uv sync --locked --no-install-project
 
 FROM python:3.12-alpine as runtime
 
