@@ -8,45 +8,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.5.3]
 
 ### Fixed
-- Pin `uvicorn>=0.29.0,<0.47` — the actual root cause of the 2026-07-02
-  trace-id outage. v0.5.1's bulk lock regeneration bumped uvicorn
-  0.29.0 → 0.47.0 in the package lock; uvicorn 0.47.0 eagerly imports the
-  ASGI app in the parent process (encode/uvicorn#2919), before the serving
-  event loop exists. `XRayService()` runs at import time and `AsyncContext()`
-  binds its task factory to the loop present at construction, so under
-  uvicorn >=0.47 X-Ray segments never propagate to request handlers:
-  `current_segment()` returns None and every request logs
+- Revert the dependency lock changes accidentally introduced by the #17 bulk
+  lock regeneration (v0.5.1): restore both `uv.lock` files to the v0.5.0
+  version set, and drop the `aws-xray-sdk` / `types-aws-xray-sdk` caps added
+  alongside them. Among the accidental bumps, uvicorn 0.29.0 → 0.47.0 broke
+  X-Ray trace propagation — uvicorn 0.47.0 imports the ASGI app before the
+  serving event loop exists (encode/uvicorn#2919), so `AsyncContext()`
+  (constructed at import time via `XRayService()`) binds to the wrong loop,
+  `current_segment()` returns None in handlers, and every request logged
   `request_id="No-Trace-Id"`, collapsing all proxy logs into one group and
-  OOMing the joined-logs ETL. Bisected and verified by A/B test against real
-  uvicorn servers (0.46.0 traced, 0.47.0 broken); regression-guarded by
-  `tests/test_trace_propagation.py`. Note: the aws-xray-sdk 2.14/2.15
-  difference flagged in v0.5.2 was a red herring — the built image ran 2.14.0
-  in both the working and broken deployments.
-- Roll the package-level `portunus/uv.lock` (the lock the Docker image
-  actually installs from — v0.5.2 only regenerated the workspace-root lock,
-  so its intended change never shipped) back to the **exact v0.5.0 version
-  set** — the configuration with months of proven production service. The
-  v0.5.1 bulk regen bumped 73 packages unreviewed inside an unrelated feature
-  PR; only uvicorn is a confirmed regression, but the remaining 72 are
-  unvetted (tracing was down the whole time they've been live). Verified:
-  zero version differences vs v0.5.0 except `freezegun` (see below); full
-  test suite (110) passes on this set, including the #17 eventstream decode
-  under botocore 1.34. Deliberate, reviewed dependency upgrades can follow
-  separately with `tests/test_trace_propagation.py` as a gate.
-- Revert the aws-xray-sdk floor to `>=2.14.0,<3`: the 2.14/2.15 theory from
-  v0.5.2 was wrong — the image ran 2.14.0 in both the working and broken
+  OOMing the joined-logs ETL (2026-07-02 outage). The v0.5.2 aws-xray-sdk
+  theory was wrong: the built image ran 2.14.0 in both the working and broken
   deployments.
-- Declare `freezegun` in the package dev group: `tests/test_signing.py`
-  imports it but it was only ever available transitively via the
-  workspace-root lock (latent undeclared dependency).
-- Build with `uv sync --locked` instead of `--frozen`, so a `uv.lock` that has
-  drifted from `pyproject.toml` fails the image build instead of silently
-  installing stale pins.
-
-### Added
-- `tests/test_trace_propagation.py`: boots a real uvicorn subprocess (matching
-  the production CMD) and asserts an ALB-style `X-Amzn-Trace-Id` round-trips
-  into the handler's current segment — fails on uvicorn >=0.47, passes on <0.47.
 
 ## [0.5.2]
 
