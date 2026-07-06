@@ -19,6 +19,13 @@ dependencies = [
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
     "websockets>=12.0,<14",
+    # <0.47: uvicorn 0.47.0 eagerly imports the ASGI app in the parent process
+    # (encode/uvicorn#2919), before the serving event loop exists. XRayService()
+    # runs at import time and AsyncContext() binds its task factory to whatever
+    # loop exists at construction, so under >=0.47 X-Ray segments never propagate
+    # to request handlers and every request logs request_id="No-Trace-Id"
+    # (2026-07-02 pipeline outage). Verified by tests/test_trace_propagation.py.
+    "uvicorn>=0.29.0,<0.47",
 ]
 
 [dependency-groups]

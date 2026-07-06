@@ -8,14 +8,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.5.3]
 
 ### Fixed
-- v0.5.2's aws-xray-sdk fix never reached the built image: the Docker build
-  installs from the package-level `portunus/uv.lock`, which still pinned
-  2.14.0 (only the workspace-root lock was regenerated). Regenerate the
-  package lock (aws-xray-sdk 2.14.0 → 2.15.0) so the backend image actually
-  ships 2.15.0.
+- Pin `uvicorn>=0.29.0,<0.47` — the actual root cause of the 2026-07-02
+  trace-id outage. v0.5.1's bulk lock regeneration bumped uvicorn
+  0.29.0 → 0.47.0 in the package lock; uvicorn 0.47.0 eagerly imports the
+  ASGI app in the parent process (encode/uvicorn#2919), before the serving
+  event loop exists. `XRayService()` runs at import time and `AsyncContext()`
+  binds its task factory to the loop present at construction, so under
+  uvicorn >=0.47 X-Ray segments never propagate to request handlers:
+  `current_segment()` returns None and every request logs
+  `request_id="No-Trace-Id"`, collapsing all proxy logs into one group and
+  OOMing the joined-logs ETL. Bisected and verified by A/B test against real
+  uvicorn servers (0.46.0 traced, 0.47.0 broken); regression-guarded by
+  `tests/test_trace_propagation.py`. Note: the aws-xray-sdk 2.14/2.15
+  difference flagged in v0.5.2 was a red herring — the built image ran 2.14.0
+  in both the working and broken deployments.
+- Regenerate the package-level `portunus/uv.lock` (the lock the Docker image
+  actually installs from — v0.5.2 only regenerated the workspace-root lock,
+  so its intended aws-xray-sdk change never shipped). Now: uvicorn 0.46.0,
+  aws-xray-sdk 2.15.0, consistent with pyproject.
 - Build with `uv sync --locked` instead of `--frozen`, so a `uv.lock` that has
   drifted from `pyproject.toml` fails the image build instead of silently
-  installing stale pins (the exact failure mode above).
+  installing stale pins.
+
+### Added
+- `tests/test_trace_propagation.py`: boots a real uvicorn subprocess (matching
+  the production CMD) and asserts an ALB-style `X-Amzn-Trace-Id` round-trips
+  into the handler's current segment — fails on uvicorn >=0.47, passes on <0.47.
 
 ## [0.5.2]
 
