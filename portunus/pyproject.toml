@@ -19,6 +19,13 @@ dependencies = [
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
     "websockets>=12.0,<14",
+    # <0.47: uvicorn 0.47.0 imports the ASGI app before the serving event loop
+    # exists (encode/uvicorn#2919); XRayService()/AsyncContext() run at import
+    # and bind to the wrong loop, so segments never reach handlers and every
+    # request logs "No-Trace-Id" (2026-07-02 outage). Guarded by
+    # tests/test_trace_propagation.py; lift only when AsyncContext moves to
+    # app startup.
+    "uvicorn>=0.29.0,<0.47",
 ]
 
 [dependency-groups]

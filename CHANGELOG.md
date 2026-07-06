@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Constrain `uvicorn>=0.29.0,<0.47`: portunus is incompatible with
+  uvicorn >=0.47.0, which imports the ASGI app before the serving event loop
+  exists (encode/uvicorn#2919) — `AsyncContext()` (constructed at import via
+  `XRayService()`) binds to the wrong loop and X-Ray trace propagation breaks
+  (the 2026-07-02 `No-Trace-Id` outage). The constraint makes the requirement
+  explicit so a future lock regeneration cannot silently reintroduce it.
+  Locked versions are unchanged.
+- `tests/test_trace_propagation.py`: boots a real uvicorn subprocess with the
+  production flags and asserts an ALB-style `X-Amzn-Trace-Id` header
+  round-trips into the handler's current X-Ray segment (fails on
+  uvicorn >=0.47; TestClient cannot catch this class of regression).
+
 ## [0.5.3]
 
 ### Fixed
