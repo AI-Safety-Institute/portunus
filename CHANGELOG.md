@@ -22,10 +22,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `tests/test_trace_propagation.py`. Note: the aws-xray-sdk 2.14/2.15
   difference flagged in v0.5.2 was a red herring — the built image ran 2.14.0
   in both the working and broken deployments.
-- Regenerate the package-level `portunus/uv.lock` (the lock the Docker image
+- Roll the package-level `portunus/uv.lock` (the lock the Docker image
   actually installs from — v0.5.2 only regenerated the workspace-root lock,
-  so its intended aws-xray-sdk change never shipped). Now: uvicorn 0.46.0,
-  aws-xray-sdk 2.15.0, consistent with pyproject.
+  so its intended change never shipped) back to the **exact v0.5.0 version
+  set** — the configuration with months of proven production service. The
+  v0.5.1 bulk regen bumped 73 packages unreviewed inside an unrelated feature
+  PR; only uvicorn is a confirmed regression, but the remaining 72 are
+  unvetted (tracing was down the whole time they've been live). Verified:
+  zero version differences vs v0.5.0 except `freezegun` (see below); full
+  test suite (110) passes on this set, including the #17 eventstream decode
+  under botocore 1.34. Deliberate, reviewed dependency upgrades can follow
+  separately with `tests/test_trace_propagation.py` as a gate.
+- Revert the aws-xray-sdk floor to `>=2.14.0,<3`: the 2.14/2.15 theory from
+  v0.5.2 was wrong — the image ran 2.14.0 in both the working and broken
+  deployments.
+- Declare `freezegun` in the package dev group: `tests/test_signing.py`
+  imports it but it was only ever available transitively via the
+  workspace-root lock (latent undeclared dependency).
 - Build with `uv sync --locked` instead of `--frozen`, so a `uv.lock` that has
   drifted from `pyproject.toml` fails the image build instead of silently
   installing stale pins.

@@ -15,7 +15,10 @@ dependencies = [
     "pyyaml>=6.0.1,<7",
     "redis>=5.0.0,<6",
     "async-timeout>=4.0.3,<5",
-    "aws-xray-sdk>=2.15.0,<3",
+    # >=2.14: 2.14.0 is the version the image has run in prod throughout (the
+    # 2.15-vs-2.14 theory during the 2026-07 outage was a red herring; uvicorn
+    # was the cause — see the uvicorn pin below).
+    "aws-xray-sdk>=2.14.0,<3",
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
     "websockets>=12.0,<14",
@@ -30,6 +33,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    # tests/test_signing.py imports this; it was previously only available
+    # transitively in the workspace-root lock (undeclared dep).
+    "freezegun>=1.5.5,<2",
     "mypy>=1.11.0,<2",
     "ruff>=0.5.5,<0.6",
     "boto3-stubs[secretsmanager, logs]>=1.34.149,<2",
