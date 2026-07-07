@@ -122,16 +122,28 @@ admin_post() {
   wget -q -O /dev/null --post-data='' "${ADMIN}${1}" 2>/dev/null
 }
 
-# Sum of active downstream connections across HTTP connection managers
-# (WebSocket upgrades included — an upgraded connection still belongs to
-# the HCM). The admin interface's own stats live under http.admin.* and
-# each poll here is itself one admin connection, so that scope must be
-# excluded or the drain counts its own poller and never reaches zero.
+# Active work Envoy still owes someone, summed from /stats:
+#
+#   * downstream connections (WebSocket upgrades included — an upgraded
+#     connection still belongs to the HCM), excluding http.admin.*
+#     because each poll here is itself one admin connection and would
+#     otherwise count its own poller and never reach zero;
+#   * active upstream requests (cluster.*.upstream_rq_active) — the
+#     ext_authz/ext_proc gRPC streams and any trailing audit work can
+#     outlive the last downstream connection, and quitting under an
+#     in-flight AsyncClient stream trips an Envoy shutdown SIGSEGV
+#     (AsyncClient teardown, observed on the Lua/REST branch on 1.31 and
+#     1.36 alike) and loses the audit tail.
+#
 # Prints 0 if the admin endpoint is unreachable, which fails towards
 # "stop now" rather than hanging until SIGKILL.
-active_cx() {
-  wget -q -O - "${ADMIN}/stats?filter=downstream_cx_active" 2>/dev/null \
-    | awk -F': ' '/^http\.admin\./ { next } /^http\..*\.downstream_cx_active/ { s += $2 } END { printf "%d", s+0 }'
+active_work() {
+  wget -q -O - "${ADMIN}/stats?filter=downstream_cx_active|upstream_rq_active" 2>/dev/null \
+    | awk -F': ' '
+        $1 ~ /^http\.admin\./ { next }
+        $1 ~ /^http\..*\.downstream_cx_active$/ { s += $2 }
+        $1 ~ /^cluster\..*\.upstream_rq_active$/ { s += $2 }
+        END { printf "%d", s+0 }'
 }
 
 drain_and_quit() {
@@ -140,12 +152,12 @@ drain_and_quit() {
   admin_post "/healthcheck/fail"
   admin_post "/drain_listeners?graceful&skip_exit"
   deadline=$(($(date +%s) + DRAIN_TIME_S))
-  cx=$(active_cx)
+  cx=$(active_work)
   while [ "$(date +%s)" -lt "$deadline" ] && [ "${cx:-0}" -gt 0 ]; do
     sleep 1
-    cx=$(active_cx)
+    cx=$(active_work)
   done
-  echo "[entrypoint] drain done (active connections: ${cx:-0}); stopping Envoy" >&2
+  echo "[entrypoint] drain done (active work: ${cx:-0}); stopping Envoy" >&2
   admin_post "/quitquitquit" || kill -TERM "$ENVOY_PID" 2>/dev/null
 }
 

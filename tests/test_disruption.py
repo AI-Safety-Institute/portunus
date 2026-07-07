@@ -339,6 +339,9 @@ def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_prox
     """
     proxy = _proxy_container()
     assert _container_state(proxy) == "running"
+    # First authed request on a cold stack can 5xx while the auth path
+    # warms; this test is about draining, not cold starts.
+    assert _wait_for_authed_200(), "stack not serving authed traffic"
 
     num_bytes = 12
     received: list[float] = []
@@ -350,27 +353,34 @@ def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_prox
     # (which the drain rightly cannot force-close mid-nothing on HTTP/1.1)
     # holds the drain open until its deadline. Prod behaves the same way:
     # the ALB closes its idle keep-alives to a deregistered target.
-    with requests.get(
-        f"{PROXY_URL}/drip?duration={num_bytes}&numbytes={num_bytes}&delay=0",
-        headers={"Authorization": _auth_header(), "Connection": "close"},
-        stream=True,
-        timeout=(5, 30),
-    ) as resp:
-        assert resp.status_code == 200
-        for _ in resp.iter_content(chunk_size=1):
-            received.append(time.monotonic())
-            if stop is None:
-                # First byte is flowing — SIGTERM the proxy under it.
-                stop_started = time.monotonic()
-                stop = subprocess.Popen(
-                    ["docker", "stop", "-t", "90", proxy],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-    # Response fully read and closed; only now wait for the stop to land.
-    assert stop is not None, "stream produced no bytes"
-    stop.wait(timeout=120)
+    # The finally ensures the background ``docker stop`` has landed before
+    # restore_proxy runs, even when the stream dies mid-read (the failure
+    # mode this test exists to catch) — otherwise the fixture's
+    # ``docker start`` races the still-running stop.
+    try:
+        with requests.get(
+            f"{PROXY_URL}/drip?duration={num_bytes}&numbytes={num_bytes}&delay=0",
+            headers={"Authorization": _auth_header(), "Connection": "close"},
+            stream=True,
+            timeout=(5, 30),
+        ) as resp:
+            assert resp.status_code == 200
+            for _ in resp.iter_content(chunk_size=1):
+                received.append(time.monotonic())
+                if stop is None:
+                    # First byte is flowing — SIGTERM the proxy under it.
+                    stop_started = time.monotonic()
+                    stop = subprocess.Popen(
+                        ["docker", "stop", "-t", "90", proxy],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+    finally:
+        if stop is not None:
+            stop.wait(timeout=120)
     stop_elapsed = time.monotonic() - stop_started
+
+    assert stop is not None, "stream produced no bytes"
 
     assert len(received) == num_bytes, (
         f"stream cut mid-response: {len(received)}/{num_bytes} bytes "
@@ -453,6 +463,10 @@ def test_envoy_sigterm_quiescent_exits_fast_and_clean(docker_setup, restore_prox
     """
     proxy = _proxy_container()
     assert _container_state(proxy) == "running"
+    # Let the async audit tail of any preceding test's traffic flush —
+    # the drain rightly waits for in-flight audit work, and this test is
+    # about the no-traffic path.
+    time.sleep(3)
 
     start = time.monotonic()
     result = _docker("stop", "-t", "90", proxy, timeout=100)
