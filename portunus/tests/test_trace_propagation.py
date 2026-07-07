@@ -26,7 +26,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-APP_SOURCE = '''
+APP_SOURCE = """
 from fastapi import FastAPI
 from portunus.logging import LoggingMiddleware
 from portunus.services.xray_service import XRayService
@@ -41,7 +41,7 @@ app.add_middleware(LoggingMiddleware)
 async def trace():
     segment = xray_service.recorder.current_segment()
     return {"request_id": segment.trace_id if segment else "No-Trace-Id"}
-'''
+"""
 
 
 def _free_port() -> int:
