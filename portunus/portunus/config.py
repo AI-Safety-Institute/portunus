@@ -148,6 +148,30 @@ class AwsConfig(BaseModel):
     )
 
 
+class ServiceAuthConfig(BaseModel):
+    """Service-to-service authentication settings.
+
+    The Envoy proxy sends a shared secret with every call it makes to
+    Portunus (/authorise, /log/*, WebSocket upgrades). When `shared_secret`
+    is set, Portunus rejects requests to its service endpoints unless they
+    carry the matching header. When unset, the endpoints are unauthenticated
+    and must be protected at the network layer instead.
+
+    Attributes:
+        shared_secret: Shared secret expected from the proxy (optional)
+        header: Header name carrying the shared secret
+    """
+
+    shared_secret: Optional[str] = Field(
+        default=None,
+        description="Shared secret expected from the proxy on service endpoints",
+    )
+    header: str = Field(
+        default="x-api-key",
+        description="Header name carrying the shared secret",
+    )
+
+
 class RelayConfig(BaseModel):
     """WebSocket relay configuration settings.
 
@@ -211,6 +235,10 @@ class PortunusConfig(BaseModel):
     relay: RelayConfig = Field(
         default_factory=RelayConfig,
         description="WebSocket relay configuration",
+    )
+    service_auth: ServiceAuthConfig = Field(
+        default_factory=ServiceAuthConfig,
+        description="Service-to-service authentication configuration",
     )
     log_level: str = Field(
         default="INFO",
@@ -300,6 +328,14 @@ def get_config() -> PortunusConfig:
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
     )
 
+    # Empty string is treated as unset so that deployments passing
+    # PORTUNUS_API_KEY="" (e.g. the proxy entrypoint default) disable auth
+    # explicitly rather than requiring an empty header match.
+    service_auth = ServiceAuthConfig(
+        shared_secret=os.environ.get("PORTUNUS_API_KEY") or None,
+        header=os.environ.get("PORTUNUS_API_KEY_HEADER", "x-api-key"),
+    )
+
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -308,6 +344,7 @@ def get_config() -> PortunusConfig:
         aws=aws,
         kinesis=kinesis,
         relay=relay,
+        service_auth=service_auth,
     )
 
 

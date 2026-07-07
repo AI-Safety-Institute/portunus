@@ -13,7 +13,7 @@ from typing import Optional
 
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
-from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
+from fastapi import APIRouter, Depends, FastAPI, Request, Response, WebSocket
 from pydantic import BaseModel, ValidationError
 
 from portunus.config import config  # noqa: E402 — also used by XRayService
@@ -35,6 +35,11 @@ from portunus.relay.logger import start_log_queue, stop_log_queue
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.publish_service import PublishService
+from portunus.services.service_auth import (
+    require_shared_secret,
+    shared_secret_valid,
+    warn_if_unauthenticated,
+)
 from portunus.services.signing_service import (
     SignableRequest,
     SignatureHeaders,
@@ -57,7 +62,11 @@ auth_service = AuthService(cache_service=cache_service)
 xray_service = XRayService()
 
 common_router = APIRouter()
-portunus_router = APIRouter()
+# Service endpoints require the proxy's shared secret when one is configured.
+# The WebSocket relay lives on a separate router because the HTTP dependency
+# can't run on upgrade requests; it performs the same check explicitly.
+portunus_router = APIRouter(dependencies=[Depends(require_shared_secret)])
+ws_router = APIRouter()
 
 
 class ErrorResponse(BaseModel):
@@ -449,7 +458,7 @@ async def log_response_trailers(
 _active_ws_connections: set[asyncio.Task] = set()
 
 
-@portunus_router.websocket("/{path:path}")
+@ws_router.websocket("/{path:path}")
 async def ws_relay(websocket: WebSocket, path: str):
     """WebSocket relay endpoint.
 
@@ -459,8 +468,17 @@ async def ws_relay(websocket: WebSocket, path: str):
 
     Authenticates the upgrade request, connects to the upstream WebSocket,
     and relays messages bidirectionally with per-message Kinesis logging.
-    Rejects with 1013 (Try Again Later) if connection limit is reached.
+    Rejects with 4001 if the proxy shared secret is configured but missing,
+    or 1013 (Try Again Later) if the connection limit is reached.
     """
+    if not shared_secret_valid(websocket.headers):
+        logger.warning("WS upgrade rejected: missing or invalid service credentials")
+        await websocket.close(
+            code=WsCloseCode.AUTH_FAILED,
+            reason="Missing or invalid service credentials",
+        )
+        return
+
     max_conns = config.relay.max_connections
     if len(_active_ws_connections) >= max_conns:
         logger.warning(f"WS connection limit reached ({max_conns}), rejecting")
@@ -571,6 +589,7 @@ async def lifespan(app: FastAPI):
     Starts the WS log queue on startup, drains active WS connections
     and cleans up Redis on shutdown.
     """
+    warn_if_unauthenticated()
     await start_log_queue(num_workers=config.relay.max_connections)
     yield
 
@@ -599,4 +618,5 @@ async def lifespan(app: FastAPI):
 portunus = FastAPI(title="Portunus", lifespan=lifespan)
 portunus.add_middleware(LoggingMiddleware)
 portunus.include_router(portunus_router)
+portunus.include_router(ws_router)
 portunus.include_router(common_router)

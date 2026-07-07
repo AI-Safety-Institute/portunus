@@ -35,6 +35,7 @@ The service follows a modular architecture with the following components:
 The service is configured via environment variables. See `config.py` for a complete list of available options.
 
 Key environment variables:
+- `PORTUNUS_API_KEY`, `PORTUNUS_API_KEY_HEADER`: Shared secret (and its header, default `x-api-key`) required on the service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay). Must match the proxy's `PORTUNUS_API_KEY`. If unset, these endpoints accept unauthenticated requests and access must be restricted at the network layer
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: Redis connection settings
 - `CACHE_DURATION`: How long to cache authorization responses (seconds)
 - `LOG_TTL`: How long to store log data in Redis (seconds)
