@@ -716,9 +716,14 @@ async def test_streamed_body_chunks_have_monotonic_ids_and_sentinel_num_chunks()
         ids = [b.payload["chunk_id"] for b in bodies]
         nums = [b.payload["num_chunks"] for b in bodies]
         body_bytes = [b.payload["body_bytes"] for b in bodies]
+        finals = [b.payload["final_chunk"] for b in bodies]
         assert ids == [0, 1, 2]
         assert nums == [0, 0, 0]
         assert body_bytes == [b"chunk-a", b"chunk-b", b"chunk-c"]
+        # Only the terminal chunk (the one carrying end_of_stream) is marked —
+        # this is the end-of-body signal the num_chunks=0 sentinel format lacks,
+        # so the Glue ETL can tell a complete body from one missing its tail.
+        assert finals == [False, False, True]
     finally:
         await queue.stop()
 
@@ -745,6 +750,11 @@ async def test_large_body_message_is_split_into_monotonic_body_records():
         assert [b.payload["chunk_id"] for b in bodies] == list(range(len(bodies)))
         assert [b.payload["num_chunks"] for b in bodies] == [0] * len(bodies)
         assert b"".join(b.payload["body_bytes"] for b in bodies) == body
+        # A single end_of_stream HttpBody split across many Firehose records
+        # marks final_chunk on exactly the last record — not every sub-chunk —
+        # so the ETL's "marker on the max chunk_id" completeness check holds.
+        finals = [b.payload["final_chunk"] for b in bodies]
+        assert finals == [False] * (len(bodies) - 1) + [True]
     finally:
         await queue.stop()
 
@@ -813,6 +823,47 @@ async def test_aborted_stream_emits_records_for_chunks_seen_so_far():
         bodies = publish.of_kind("response_body")
         assert [b.payload["body_bytes"] for b in bodies] == [b"partial-", b"body"]
         assert [b.payload["chunk_id"] for b in bodies] == [0, 1]
+        # No chunk carried end_of_stream, so none is marked final — the ETL
+        # sees no terminal marker and (correctly) treats the body as truncated.
+        assert [b.payload["final_chunk"] for b in bodies] == [False, False]
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_final_chunk_marks_terminal_chunk_per_direction():
+    """The end_of_stream chunk of each direction is marked final independently.
+
+    Request and response bodies stream on separate chunk_id counters, so each
+    direction's terminal chunk carries its own ``final_chunk=True`` — the ETL
+    reassembles the two bodies separately and needs an end-of-body marker for
+    each.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(headers={}, is_request=True, request_id="eos-1"),
+                _http_body_message(body=b"req-0", is_request=True),
+                _http_body_message(body=b"req-1", is_request=True, end_of_stream=True),
+                _http_body_message(body=b"resp-0", is_request=False),
+                _http_body_message(
+                    body=b"resp-1", is_request=False, end_of_stream=True
+                ),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        req_finals = [b.payload["final_chunk"] for b in publish.of_kind("request_body")]
+        resp_finals = [
+            b.payload["final_chunk"] for b in publish.of_kind("response_body")
+        ]
+        assert req_finals == [False, True]
+        assert resp_finals == [False, True]
     finally:
         await queue.stop()
 

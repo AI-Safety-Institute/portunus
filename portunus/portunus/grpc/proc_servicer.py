@@ -361,7 +361,16 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     self._submit_frame(state, frame, timestamp)
             return
 
-        for body_chunk in chunk_body_data(msg.body) or [b""]:
+        # One ext_proc HttpBody message may split into several Firehose-sized
+        # records; only the very last record of the message carrying
+        # ``end_of_stream`` is the terminal chunk of the whole body. Marking it
+        # gives the ETL an explicit end-of-body signal the ``num_chunks=0``
+        # sentinel format otherwise lacks (a lost trailing chunk would leave
+        # the surviving chunk_ids contiguous and indistinguishable from a
+        # complete body).
+        body_chunks = chunk_body_data(msg.body) or [b""]
+        last_index = len(body_chunks) - 1
+        for index, body_chunk in enumerate(body_chunks):
             chunk_id = self._next_chunk_id(state, direction)
             self._submit_body_record(
                 state=state,
@@ -370,6 +379,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 timestamp=timestamp,
                 chunk_id=chunk_id,
                 label=f"{direction.value}_body",
+                final_chunk=msg.end_of_stream and index == last_index,
             )
 
     def _buffer_pre_101(
@@ -503,10 +513,14 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         chunk_id: int,
         label: str,
         truncated: bool = False,
+        final_chunk: bool = False,
         frame_index: Optional[int] = None,
     ) -> bool:
         """Submit one Firehose-sized body record and its drop sentinel.
 
+        ``final_chunk`` marks the terminal chunk of a streamed HTTP body (the
+        chunk carrying Envoy's ``end_of_stream``); it lets the Glue ETL detect
+        a lost trailing chunk in the ``num_chunks=0`` sentinel wire format.
         ``frame_index`` is set for WS frames (per-frame ordinal, shared by all
         chunks of one frame) and None for HTTP bodies.
         """
@@ -524,6 +538,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     chunk_id=chunk_id,
                     num_chunks=0,
                     truncated=truncated,
+                    final_chunk=final_chunk,
                     frame_index=frame_index,
                 ),
                 label=label,
@@ -554,6 +569,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                         chunk_id=chunk_id,
                         num_chunks=0,
                         dropped=True,
+                        final_chunk=final_chunk,
                         frame_index=frame_index,
                     ),
                     label=f"{label}_drop_sentinel",

@@ -561,6 +561,16 @@ class RequestBodyRecord:
     upstream safety limit (currently only the WS deflate decompression
     cap in ``frame_observer.py``). The body bytes present are real but
     incomplete vs. the wire.
+
+    ``final_chunk=True`` marks the terminal chunk of a streamed
+    (``num_chunks=0``) ext_proc body — the chunk emitted with Envoy's
+    ``end_of_stream`` set. It is the explicit end-of-body marker the
+    sentinel wire format otherwise lacks: without it the ETL derives the
+    total as ``count(*)``, so a dropped/late *trailing* chunk is invisible
+    (the surviving ids stay contiguous and match the count) and a
+    silently-partial body gets written. The declared (buffered) path
+    stamps the real total on every chunk and doesn't need this, so it
+    leaves it ``False``.
     """
 
     request_id: str
@@ -572,6 +582,10 @@ class RequestBodyRecord:
     published_at: str
     dropped: bool = False
     truncated: bool = False
+    # True only on the terminal chunk of a streamed (``num_chunks=0``)
+    # ext_proc body — the chunk carrying Envoy's ``end_of_stream``. Lets the
+    # ETL detect a lost trailing chunk that would otherwise be undetectable.
+    final_chunk: bool = False
     # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS
     # frames by (request_id, frame_index) to reassemble per-frame and to
     # disambiguate otherwise-identical frames.
@@ -590,6 +604,7 @@ class RequestBodyRecord:
             "published_at": self.published_at,
             "dropped": self.dropped,
             "truncated": self.truncated,
+            "final_chunk": self.final_chunk,
             "frame_index": self.frame_index,
         }
 
@@ -607,6 +622,7 @@ class RequestBodyRecord:
             {"name": "published_at", "type": "string"},
             {"name": "dropped", "type": "boolean"},
             {"name": "truncated", "type": "boolean"},
+            {"name": "final_chunk", "type": "boolean"},
             {"name": "frame_index", "type": "bigint"},
         ]
 
@@ -700,7 +716,8 @@ class ResponseHeadersRecord:
 class ResponseBodyRecord:
     """One chunk of a response body. SSE/chunked streams emit one record per chunk.
 
-    ``dropped`` / ``truncated`` semantics mirror :class:`RequestBodyRecord`.
+    ``dropped`` / ``truncated`` / ``final_chunk`` semantics mirror
+    :class:`RequestBodyRecord`.
     """
 
     request_id: str
@@ -712,6 +729,10 @@ class ResponseBodyRecord:
     published_at: str
     dropped: bool = False
     truncated: bool = False
+    # True only on the terminal chunk of a streamed (``num_chunks=0``)
+    # ext_proc body — the chunk carrying Envoy's ``end_of_stream``. Lets the
+    # ETL detect a lost trailing chunk that would otherwise be undetectable.
+    final_chunk: bool = False
     # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS
     # frames by (request_id, frame_index) to reassemble per-frame and to
     # disambiguate otherwise-identical frames.
@@ -730,6 +751,7 @@ class ResponseBodyRecord:
             "published_at": self.published_at,
             "dropped": self.dropped,
             "truncated": self.truncated,
+            "final_chunk": self.final_chunk,
             "frame_index": self.frame_index,
         }
 
@@ -747,6 +769,7 @@ class ResponseBodyRecord:
             {"name": "published_at", "type": "string"},
             {"name": "dropped", "type": "boolean"},
             {"name": "truncated", "type": "boolean"},
+            {"name": "final_chunk", "type": "boolean"},
             {"name": "frame_index", "type": "bigint"},
         ]
 

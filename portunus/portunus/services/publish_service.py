@@ -221,6 +221,7 @@ class PublishService:
         *,
         dropped: bool = False,
         truncated: bool = False,
+        final_chunk: bool = False,
         frame_index: Optional[int] = None,
     ) -> Optional[BuiltRecord]:
         """Build one request-body chunk record.
@@ -228,9 +229,12 @@ class PublishService:
         ``dropped=True`` is a sentinel marker emitted in place of a chunk
         the publish queue could not accept; ``body_bytes`` is empty in
         that case. ``truncated=True`` marks a chunk whose payload was
-        capped (currently only the WS deflate path). ``frame_index`` is the
-        per-direction WS frame ordinal (None for HTTP); Glue keys WS frames
-        by (request_id, frame_index).
+        capped (currently only the WS deflate path). ``final_chunk=True``
+        marks the terminal chunk of a streamed (``num_chunks=0``) body — the
+        chunk emitted with Envoy's ``end_of_stream`` — so the ETL can detect
+        a lost trailing chunk. ``frame_index`` is the per-direction WS frame
+        ordinal (None for HTTP); Glue keys WS frames by (request_id,
+        frame_index).
         """
         if not config.firehose.request_body_stream_name:
             logger.warning("Request body stream not configured, skipping publish")
@@ -247,6 +251,7 @@ class PublishService:
             published_at=generate_iso_timestamp(),
             dropped=dropped,
             truncated=truncated,
+            final_chunk=final_chunk,
             frame_index=frame_index,
         )
         return config.firehose.request_body_stream_name, _serialize(record.to_dict())
@@ -303,12 +308,13 @@ class PublishService:
         *,
         dropped: bool = False,
         truncated: bool = False,
+        final_chunk: bool = False,
         frame_index: Optional[int] = None,
     ) -> Optional[BuiltRecord]:
         """Build one response-body chunk record.
 
-        ``dropped`` / ``truncated`` / ``frame_index`` semantics mirror
-        :meth:`build_request_body`.
+        ``dropped`` / ``truncated`` / ``final_chunk`` / ``frame_index``
+        semantics mirror :meth:`build_request_body`.
         """
         if not config.firehose.response_body_stream_name:
             logger.warning("Response body stream not configured, skipping publish")
@@ -325,6 +331,7 @@ class PublishService:
             published_at=generate_iso_timestamp(),
             dropped=dropped,
             truncated=truncated,
+            final_chunk=final_chunk,
             frame_index=frame_index,
         )
         return config.firehose.response_body_stream_name, _serialize(record.to_dict())
