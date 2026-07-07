@@ -8,12 +8,11 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from portunus.app import portunus
-from portunus.config import config
+from portunus.app import portunus, service_auth
 from portunus.services.cache_service import CacheService
 
 # Service endpoints require the shared secret (set in conftest.py)
-SERVICE_AUTH_HEADERS = {config.service_auth.header: config.service_auth.shared_secret}
+SERVICE_AUTH_HEADERS = {service_auth.header: service_auth.secret}
 
 
 class FakeStateService:

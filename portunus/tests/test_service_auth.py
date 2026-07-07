@@ -5,11 +5,12 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import portunus.app as app_module
-from portunus.config import config
-from portunus.services.service_auth import shared_secret_valid
+from portunus.config import PortunusConfig, ServiceAuthConfig
+from portunus.services.service_auth import ServiceAuth
 
-SECRET = "test-shared-secret"
-HEADER = "x-api-key"
+# The app's ServiceAuth is parsed from the PORTUNUS_API_KEY set in conftest.py
+SECRET = app_module.service_auth.secret
+HEADER = app_module.service_auth.header
 
 
 @pytest.fixture
@@ -33,50 +34,60 @@ def client(monkeypatch):
     return TestClient(app_module.portunus)
 
 
-@pytest.fixture
-def secret_configured(monkeypatch):
-    """Configure a shared secret for the duration of a test."""
-    monkeypatch.setattr(config.service_auth, "shared_secret", SECRET)
-    monkeypatch.setattr(config.service_auth, "header", HEADER)
+class TestFromConfig:
+    def test_missing_secret_raises(self):
+        config = PortunusConfig(service_auth=ServiceAuthConfig(shared_secret=None))
+        with pytest.raises(RuntimeError, match="PORTUNUS_API_KEY must be set"):
+            ServiceAuth.from_config(config)
+
+    def test_empty_secret_raises(self):
+        config = PortunusConfig(service_auth=ServiceAuthConfig(shared_secret=""))
+        with pytest.raises(RuntimeError, match="PORTUNUS_API_KEY must be set"):
+            ServiceAuth.from_config(config)
+
+    def test_parses_secret_and_header(self):
+        config = PortunusConfig(
+            service_auth=ServiceAuthConfig(shared_secret="s3cret", header="x-custom")
+        )
+        auth = ServiceAuth.from_config(config)
+        assert auth.secret == "s3cret"
+        assert auth.header == "x-custom"
 
 
-class TestSharedSecretValid:
-    def test_no_secret_configured_denies_all(self, monkeypatch):
-        monkeypatch.setattr(config.service_auth, "shared_secret", None)
-        assert shared_secret_valid({}) is False
-        assert shared_secret_valid({HEADER: "anything"}) is False
+class TestValid:
+    auth = ServiceAuth(secret="s3cret", header="x-custom-key")
 
-    def test_matching_secret(self, secret_configured):
-        assert shared_secret_valid({HEADER: SECRET}) is True
+    def test_matching_secret(self):
+        assert self.auth.valid({"x-custom-key": "s3cret"}) is True
 
-    def test_missing_header(self, secret_configured):
-        assert shared_secret_valid({}) is False
+    def test_missing_header(self):
+        assert self.auth.valid({}) is False
 
-    def test_wrong_secret(self, secret_configured):
-        assert shared_secret_valid({HEADER: "wrong"}) is False
+    def test_wrong_secret(self):
+        assert self.auth.valid({"x-custom-key": "wrong"}) is False
 
 
 class TestHttpEndpoints:
-    def test_cache_flush_rejected_without_secret(self, client, secret_configured):
+    def test_cache_flush_rejected_without_secret(self, client):
         response = client.post("/cache/flush")
         assert response.status_code == 401
 
-    def test_cache_flush_rejected_with_wrong_secret(self, client, secret_configured):
+    def test_cache_flush_rejected_with_wrong_secret(self, client):
         response = client.post("/cache/flush", headers={HEADER: "wrong"})
         assert response.status_code == 401
 
-    def test_cache_flush_allowed_with_secret(self, client, secret_configured):
+    def test_cache_flush_allowed_with_secret(self, client):
         response = client.post("/cache/flush", headers={HEADER: SECRET})
         assert response.status_code == 200
 
-    def test_log_endpoint_rejected_without_secret(self, client, secret_configured):
+    def test_log_endpoint_rejected_without_secret(self, client):
         response = client.post(
             "/log/req-1/request/headers",
             json={"timestamp": 1700000000, "headers": {"host": "example.com"}},
         )
         assert response.status_code == 401
 
-    def test_log_endpoint_allowed_with_secret(self, client, secret_configured):
+    def test_log_endpoint_allowed_with_secret(self, client):
         response = client.post(
             "/log/req-1/request/headers",
             json={"timestamp": 1700000000, "headers": {"host": "example.com"}},
@@ -84,34 +95,17 @@ class TestHttpEndpoints:
         )
         assert response.status_code == 200
 
-    def test_authorise_rejected_without_secret(self, client, secret_configured):
+    def test_authorise_rejected_without_secret(self, client):
         response = client.post("/authorise", json={"payload": "irrelevant"})
         assert response.status_code == 401
 
-    def test_ping_open_without_secret(self, client, secret_configured):
+    def test_ping_open_without_secret(self, client):
         response = client.get("/ping")
         assert response.status_code == 200
 
-    def test_no_secret_configured_denies_requests(self, client, monkeypatch):
-        monkeypatch.setattr(config.service_auth, "shared_secret", None)
-        response = client.post("/cache/flush", headers={HEADER: "anything"})
-        assert response.status_code == 401
-
-
-class TestStartup:
-    def test_startup_fails_without_secret(self, monkeypatch):
-        monkeypatch.setattr(config.service_auth, "shared_secret", None)
-        with pytest.raises(RuntimeError, match="PORTUNUS_API_KEY must be set"):
-            with TestClient(app_module.portunus):
-                pass
-
-    def test_startup_succeeds_with_secret(self, secret_configured):
-        with TestClient(app_module.portunus):
-            pass
-
 
 class TestWebSocketRelay:
-    def test_ws_rejected_without_secret(self, client, secret_configured):
+    def test_ws_rejected_without_secret(self, client):
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/v1/responses"):
                 pass

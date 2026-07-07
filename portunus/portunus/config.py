@@ -154,8 +154,11 @@ class ServiceAuthConfig(BaseModel):
     The Envoy proxy sends a shared secret with every call it makes to
     Portunus (/authorise, /log/*, WebSocket upgrades). Portunus rejects
     requests to its service endpoints unless they carry the matching header.
-    The secret is required: the app refuses to start without one (enforced
-    at startup rather than here so that importing config never fails).
+    This model holds the raw environment input and so allows an absent
+    secret; the app parses it into the required, strictly-typed
+    ``ServiceAuth`` at import (services/service_auth.py), failing fast if
+    PORTUNUS_API_KEY is unset. Kept optional here so that importing config
+    (e.g. for client-side payload generation in util.py) never fails.
 
     Attributes:
         shared_secret: Shared secret expected from the proxy
