@@ -31,8 +31,11 @@ services:
     networks:
       app_network:
     ports:
-      - "127.0.0.1:4566:4566"            # LocalStack Gateway
-      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
+      # Host publishes are a dev convenience only — the test suite drives
+      # LocalStack via ``docker exec localstack-main awslocal`` — so both
+      # are overridable for machines where something else holds 4566.
+      - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"                      # LocalStack Gateway
+      - "127.0.0.1:${LOCALSTACK_HOST_SERVICES_PORTS:-4510-4559}:4510-4559"  # external services port range
     environment:
       # LocalStack configuration: https://docs.localstack.cloud/references/configuration/
       - DEBUG=${DEBUG:-0}

@@ -13,6 +13,10 @@ can't reach end to end:
 * no audit-record loss / no client hang while a request is in flight during a
   Portunus restart
 * auth failure short-circuiting at ext_authz without touching the upstream
+* Envoy drain on SIGTERM (proxy/entrypoint.sh): in-flight streaming HTTP
+  responses (the SSE / eventstream shape) and established WebSocket sessions
+  survive a task stop and keep flowing through the drain window; Envoy exits
+  0 as soon as the last downstream connection closes, not at the SIGKILL
 
 Destructive (they kill/restart containers), so they run serially and are
 marked ``slow`` + ``disruption``. Run with the stack up:
@@ -23,6 +27,7 @@ marked ``slow`` + ``disruption``. Run with the stack up:
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 
@@ -242,3 +247,219 @@ def test_portunus_restart_keeps_same_topology_and_recovers(
             break
         time.sleep(0.5)
     assert serving, "gRPC health did not return to SERVING after restart"
+
+
+# ---------------------------------------------------------------------------
+# Envoy drain on SIGTERM — in-flight streams across protocols
+#
+# ECS task stop is: ALB target deregistration (10s delay) → SIGTERM →
+# stopTimeout → SIGKILL. Everything Claude Code / Inspect sees as a
+# "connection closed mid-response" during a scale-in happens in that window.
+# proxy/entrypoint.sh owns the SIGTERM side: it must put Envoy into a drain
+# (in-flight streams keep flowing, no new connections routed here anyway)
+# and only exit once downstream connections hit zero or the drain budget
+# expires. SSE and AWS eventstream are both just long streaming HTTP
+# responses through Envoy, so one streaming-HTTP test covers that class;
+# WebSocket is a separate upgraded-connection path and gets its own test.
+# ---------------------------------------------------------------------------
+
+_PROXY_CONTAINER_CACHE: str | None = None
+
+
+def _proxy_container() -> str:
+    """Resolve the proxy service's container name for this compose project.
+
+    The compose project name derives from the checkout directory, so the
+    container name isn't stable across clones — resolve it via the compose
+    service label rather than hardcoding.
+    """
+    global _PROXY_CONTAINER_CACHE
+    if _PROXY_CONTAINER_CACHE is None:
+        out = subprocess.run(
+            ["docker", "compose", "ps", "--format", "{{.Name}}", "proxy"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        names = [line for line in out.stdout.splitlines() if line.strip()]
+        assert names, f"could not resolve proxy container: {out.stderr}"
+        _PROXY_CONTAINER_CACHE = names[0]
+    return _PROXY_CONTAINER_CACHE
+
+
+def _exit_code(name: str) -> str:
+    return _docker("inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip()
+
+
+def _wait_for_authed_200(timeout: float = 45.0) -> bool:
+    """Wait until an authorised request round-trips 200 through the stack."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            resp = requests.get(
+                f"{PROXY_URL}/get",
+                headers={"Authorization": _auth_header()},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(1)
+    return False
+
+
+@pytest.fixture
+def restore_proxy():
+    """Bring the proxy (and its netns-sharing portunus sidecar) back after a test.
+
+    Stopping the proxy container tears down the network namespace portunus
+    shares (``network_mode: service:proxy``), so after restarting the proxy
+    the portunus container must also be restarted to join the fresh
+    namespace — ``docker start`` alone would leave it in the dead one.
+    """
+    yield
+    proxy = _proxy_container()
+    if _container_state(proxy) != "running":
+        _docker("start", proxy)
+        _docker("restart", "-t", "10", PORTUNUS_CONTAINER, timeout=60)
+    assert _wait_for_proxy_ping(timeout=30), "proxy did not come back up"
+    assert _wait_for_authed_200(), "authed path did not recover after restart"
+
+
+def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_proxy):
+    """A streaming HTTP response in flight at SIGTERM completes, uncut.
+
+    This is the SSE / eventstream shape: a long-lived chunked response
+    trickling through Envoy (httpbun ``/drip`` at ~1 byte/sec). SIGTERM
+    lands ~2s into a ~12s stream; the drain must let the remaining ~10s
+    stream to the client rather than resetting the connection, and Envoy
+    must exit 0 shortly after the stream (its last downstream connection)
+    completes — well before the 90s SIGKILL backstop.
+    """
+    proxy = _proxy_container()
+    assert _container_state(proxy) == "running"
+
+    num_bytes = 12
+    received: list[float] = []
+    stop: subprocess.Popen | None = None
+    stop_started = 0.0
+
+    # ``Connection: close`` so Envoy closes the wire once the response
+    # completes — otherwise the client's parked keep-alive connection
+    # (which the drain rightly cannot force-close mid-nothing on HTTP/1.1)
+    # holds the drain open until its deadline. Prod behaves the same way:
+    # the ALB closes its idle keep-alives to a deregistered target.
+    with requests.get(
+        f"{PROXY_URL}/drip?duration={num_bytes}&numbytes={num_bytes}&delay=0",
+        headers={"Authorization": _auth_header(), "Connection": "close"},
+        stream=True,
+        timeout=(5, 30),
+    ) as resp:
+        assert resp.status_code == 200
+        for _ in resp.iter_content(chunk_size=1):
+            received.append(time.monotonic())
+            if stop is None:
+                # First byte is flowing — SIGTERM the proxy under it.
+                stop_started = time.monotonic()
+                stop = subprocess.Popen(
+                    ["docker", "stop", "-t", "90", proxy],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+    # Response fully read and closed; only now wait for the stop to land.
+    assert stop is not None, "stream produced no bytes"
+    stop.wait(timeout=120)
+    stop_elapsed = time.monotonic() - stop_started
+
+    assert len(received) == num_bytes, (
+        f"stream cut mid-response: {len(received)}/{num_bytes} bytes "
+        f"({(received[-1] - stop_started):.1f}s after SIGTERM was issued)"
+    )
+    # The stream must have kept flowing well into the drain, not raced it.
+    assert (
+        received[-1] - stop_started > 3
+    ), "stream finished before the drain was meaningfully exercised"
+    assert stop.returncode == 0
+    # Drain exits when connections hit zero — not at the 90s SIGKILL.
+    assert stop_elapsed < 45, f"drain held Envoy for {stop_elapsed:.1f}s"
+    assert (
+        _exit_code(proxy) == "0"
+    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+
+
+@pytest.mark.asyncio
+async def test_envoy_sigterm_keeps_websocket_flowing_during_drain(
+    docker_setup, restore_proxy
+):
+    """An established WebSocket session keeps echoing through the drain.
+
+    Upgraded connections can't be nudged closed at a response boundary the
+    way plain HTTP can, so the drain must simply leave them open until the
+    client closes (or the budget expires). Echo frames for ~6s after
+    SIGTERM, close from the client side, then expect a prompt clean exit.
+    """
+    from websockets.asyncio.client import connect as ws_connect
+
+    proxy = _proxy_container()
+    assert _container_state(proxy) == "running"
+
+    stop: subprocess.Popen | None = None
+    async with ws_connect(
+        "ws://localhost:8888/echo",
+        additional_headers={"Authorization": _auth_header()},
+    ) as ws:
+        # Established, working session first.
+        await ws.send("pre-drain")
+        assert await asyncio.wait_for(ws.recv(), timeout=5) == "pre-drain"
+
+        stop_started = time.monotonic()
+        stop = subprocess.Popen(
+            ["docker", "stop", "-t", "90", proxy],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            # Frames must keep round-tripping during the drain window.
+            frame = 0
+            while time.monotonic() - stop_started < 6:
+                frame += 1
+                await ws.send(f"drain-{frame}")
+                echoed = await asyncio.wait_for(ws.recv(), timeout=5)
+                assert echoed == f"drain-{frame}", (
+                    f"echo diverged {time.monotonic() - stop_started:.1f}s "
+                    "after SIGTERM"
+                )
+                await asyncio.sleep(0.5)
+            assert frame >= 8, f"only {frame} echoes during the drain window"
+        finally:
+            pass  # context manager sends the client-side close
+
+    assert stop is not None
+    stop.wait(timeout=120)
+    stop_elapsed = time.monotonic() - stop_started
+    assert stop.returncode == 0
+    assert stop_elapsed < 45, f"drain held Envoy for {stop_elapsed:.1f}s"
+    assert (
+        _exit_code(proxy) == "0"
+    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+
+
+def test_envoy_sigterm_quiescent_exits_fast_and_clean(docker_setup, restore_proxy):
+    """With no traffic, SIGTERM exits promptly and cleanly (no SIGKILL).
+
+    Guards the drain handler against 'always sleep the full window'
+    regressions: zero downstream connections should short-circuit the wait.
+    """
+    proxy = _proxy_container()
+    assert _container_state(proxy) == "running"
+
+    start = time.monotonic()
+    result = _docker("stop", "-t", "90", proxy, timeout=100)
+    elapsed = time.monotonic() - start
+
+    assert result.returncode == 0, result.stderr
+    assert elapsed < 20, f"quiescent drain took {elapsed:.1f}s"
+    assert (
+        _exit_code(proxy) == "0"
+    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"

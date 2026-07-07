@@ -30,7 +30,9 @@ ENV ENVOY_LOG_LEVEL=info \
     TARGET_HOST_USE_TLS=true \
     PORTUNUS_HEADER_PREFIX=portunus \
     PORTUNUS_HOST=127.0.0.1 \
-    PORTUNUS_GRPC_PORT=9000
+    PORTUNUS_GRPC_PORT=9000 \
+    ADMIN_PORT=9901 \
+    DRAIN_TIME_S=60
 
 COPY entrypoint.sh /envoy/entrypoint.sh
 RUN chmod +x /envoy/entrypoint.sh
