@@ -75,3 +75,7 @@ norecursedirs = [
     ".*",
     ".venv",
 ]
+markers = [
+    "slow: marks tests as slow (requiring Docker, network, etc.)",
+    "disruption: destructive e2e tests that kill/restart containers (run serially)",
+]

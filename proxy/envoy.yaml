@@ -1,3 +1,13 @@
+# Loopback-only admin listener. entrypoint.sh drives the SIGTERM drain
+# sequence through it (/healthcheck/fail, /drain_listeners, /stats,
+# /quitquitquit). Keep it bound to 127.0.0.1 — /config_dump exposes
+# substituted secrets, so it must never be reachable off-task.
+admin:
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: ${ADMIN_PORT}
+
 static_resources:
   listeners:
   - name: listener_0
