@@ -19,6 +19,8 @@ It consists of two main components:
   - The filter swaps the original authorization payload for the real API key before allowing the request to proceed
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
   - As the above is happening, Envoy also sends request and response data to the Portunus `/log/..` endpoints for storage
+    - **Full request and response bodies are captured by design** (for auditing and downstream analysis) — treat the Kinesis streams and their storage destination as containing everything your clients send and receive
+    - Credential-carrying headers are excluded from header logging: the proxy's configured `API_KEY_HEADER` plus a fixed denylist (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `api-key`, `x-goog-api-key`, `xi-api-key`, `x-hume-api-key`, `x-amz-security-token`; see `proxy/lib/proxy_utils/utils.lua`). Credentials sent in any *other* non-standard header will be logged, so keep client credentials in standard headers
 
 Supporting AWS services:
 

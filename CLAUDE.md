@@ -47,6 +47,7 @@ This repo implements a secure API key proxy system with two main components:
 ### Logging Flow
 1. Request logging:
    - Proxy captures request headers and body before forwarding
+   - Credential-carrying headers are excluded from header logging: the configured `API_KEY_HEADER` plus the fixed denylist in `proxy/lib/proxy_utils/utils.lua` (`is_sensitive_header`). Bodies are captured in full by design
    - Makes async call to `/log` with metadata and type "request_headers", "request_body", or "request_trailers"
    - Payload is validated against appropriate Pydantic models (defined in `models.py`)
    - Binary data is base64-encoded by Lua before being sent to Portunus

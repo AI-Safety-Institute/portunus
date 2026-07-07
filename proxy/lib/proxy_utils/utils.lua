@@ -2,6 +2,36 @@
 
 local utils = {}
 
+-- Headers that must never be logged, regardless of which provider the proxy
+-- is configured for. Clients sometimes send credentials in a different header
+-- than the one this proxy replaces (config.api_key_header), e.g. an
+-- `authorization` bearer token through a proxy configured for `x-api-key`.
+-- Those would otherwise be logged verbatim to the audit trail.
+local SENSITIVE_HEADERS = {
+	["authorization"] = true,
+	["proxy-authorization"] = true,
+	["cookie"] = true,
+	["set-cookie"] = true,
+	["x-api-key"] = true, -- Anthropic
+	["api-key"] = true, -- Azure OpenAI
+	["x-goog-api-key"] = true, -- Google
+	["xi-api-key"] = true, -- ElevenLabs
+	["x-hume-api-key"] = true, -- Hume
+	["x-amz-security-token"] = true, -- AWS session token (SigV4 requests)
+}
+
+--- Checks whether a header must be excluded from logging
+-- @param name Header name (matched case-insensitively)
+-- @param api_key_header The proxy's configured API key header (optional)
+-- @return true if the header carries credentials and must not be logged
+function utils.is_sensitive_header(name, api_key_header)
+	local lower = string.lower(name)
+	if SENSITIVE_HEADERS[lower] then
+		return true
+	end
+	return api_key_header ~= nil and lower == string.lower(api_key_header)
+end
+
 --- Converts a Lua table of key-value pairs to a table with base64-encoded values
 -- @param handle The Envoy request or response handle
 -- @param headers The headers table to convert
