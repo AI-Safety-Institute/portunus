@@ -36,9 +36,9 @@ from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.publish_service import PublishService
 from portunus.services.service_auth import (
+    ensure_shared_secret_configured,
     require_shared_secret,
     shared_secret_valid,
-    warn_if_unauthenticated,
 )
 from portunus.services.signing_service import (
     SignableRequest,
@@ -62,7 +62,7 @@ auth_service = AuthService(cache_service=cache_service)
 xray_service = XRayService()
 
 common_router = APIRouter()
-# Service endpoints require the proxy's shared secret when one is configured.
+# Service endpoints require the proxy's shared secret.
 # The WebSocket relay lives on a separate router because the HTTP dependency
 # can't run on upgrade requests; it performs the same check explicitly.
 portunus_router = APIRouter(dependencies=[Depends(require_shared_secret)])
@@ -468,7 +468,7 @@ async def ws_relay(websocket: WebSocket, path: str):
 
     Authenticates the upgrade request, connects to the upstream WebSocket,
     and relays messages bidirectionally with per-message Kinesis logging.
-    Rejects with 4001 if the proxy shared secret is configured but missing,
+    Rejects with 4001 if the proxy shared secret is missing or invalid,
     or 1013 (Try Again Later) if the connection limit is reached.
     """
     if not shared_secret_valid(websocket.headers):
@@ -589,7 +589,7 @@ async def lifespan(app: FastAPI):
     Starts the WS log queue on startup, drains active WS connections
     and cleans up Redis on shutdown.
     """
-    warn_if_unauthenticated()
+    ensure_shared_secret_configured()
     await start_log_queue(num_workers=config.relay.max_connections)
     yield
 

@@ -135,7 +135,7 @@ services:
       LOG_LEVEL: info
       LISTEN_PORT: 8080
       # Shared secret required on service endpoints; must match the proxy's
-      # PORTUNUS_API_KEY. Unset to disable service auth (network-layer only).
+      # PORTUNUS_API_KEY. Required — the service fails at startup if unset.
       PORTUNUS_API_KEY: local-dev-shared-secret
       REDIS_HOST: redis
       REDIS_PORT: 6379

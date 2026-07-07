@@ -41,9 +41,10 @@ def secret_configured(monkeypatch):
 
 
 class TestSharedSecretValid:
-    def test_no_secret_configured_allows_all(self, monkeypatch):
+    def test_no_secret_configured_denies_all(self, monkeypatch):
         monkeypatch.setattr(config.service_auth, "shared_secret", None)
-        assert shared_secret_valid({}) is True
+        assert shared_secret_valid({}) is False
+        assert shared_secret_valid({HEADER: "anything"}) is False
 
     def test_matching_secret(self, secret_configured):
         assert shared_secret_valid({HEADER: SECRET}) is True
@@ -91,10 +92,22 @@ class TestHttpEndpoints:
         response = client.get("/ping")
         assert response.status_code == 200
 
-    def test_no_secret_configured_allows_unauthenticated(self, client, monkeypatch):
+    def test_no_secret_configured_denies_requests(self, client, monkeypatch):
         monkeypatch.setattr(config.service_auth, "shared_secret", None)
-        response = client.post("/cache/flush")
-        assert response.status_code == 200
+        response = client.post("/cache/flush", headers={HEADER: "anything"})
+        assert response.status_code == 401
+
+
+class TestStartup:
+    def test_startup_fails_without_secret(self, monkeypatch):
+        monkeypatch.setattr(config.service_auth, "shared_secret", None)
+        with pytest.raises(RuntimeError, match="PORTUNUS_API_KEY must be set"):
+            with TestClient(app_module.portunus):
+                pass
+
+    def test_startup_succeeds_with_secret(self, secret_configured):
+        with TestClient(app_module.portunus):
+            pass
 
 
 class TestWebSocketRelay:

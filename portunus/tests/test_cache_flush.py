@@ -9,7 +9,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from portunus.app import portunus
+from portunus.config import config
 from portunus.services.cache_service import CacheService
+
+# Service endpoints require the shared secret (set in conftest.py)
+SERVICE_AUTH_HEADERS = {config.service_auth.header: config.service_auth.shared_secret}
 
 
 class FakeStateService:
@@ -65,7 +69,7 @@ class TestCacheFlush:
         assert await fake_redis.dbsize() == 2
 
         http = await client_with_cache(FakeStateService(fake_redis))
-        resp = await http.post("/cache/flush")
+        resp = await http.post("/cache/flush", headers=SERVICE_AUTH_HEADERS)
 
         assert resp.status_code == 200
         body = resp.json()
@@ -76,7 +80,7 @@ class TestCacheFlush:
     @pytest.mark.asyncio
     async def test_flush_redis_unavailable(self, client_with_cache, mock_xray):
         http = await client_with_cache(FakeStateService(None))
-        resp = await http.post("/cache/flush")
+        resp = await http.post("/cache/flush", headers=SERVICE_AUTH_HEADERS)
 
         assert resp.status_code == 503
         assert "unavailable" in resp.json()["message"].lower()
@@ -86,7 +90,7 @@ class TestCacheFlush:
         fake_redis.flushdb = AsyncMock(side_effect=ConnectionError("connection reset"))
 
         http = await client_with_cache(FakeStateService(fake_redis))
-        resp = await http.post("/cache/flush")
+        resp = await http.post("/cache/flush", headers=SERVICE_AUTH_HEADERS)
 
         assert resp.status_code == 500
         assert "failed" in resp.json()["message"].lower()
@@ -98,7 +102,7 @@ class TestCacheFlush:
         fake_redis.flushdb = AsyncMock(side_effect=ConnectionError("boom"))
 
         http = await client_with_cache(FakeStateService(fake_redis))
-        resp = await http.post("/cache/flush")
+        resp = await http.post("/cache/flush", headers=SERVICE_AUTH_HEADERS)
 
         assert resp.status_code == 500
         assert resp.json()["debug_id"] == "test-trace-id"

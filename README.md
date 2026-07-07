@@ -144,7 +144,7 @@ flowchart TB
 | Variable | Description | Default |
 |---|---|---|
 | `AWS_REGION` | AWS region for all service clients | *(required)* |
-| `PORTUNUS_API_KEY` | Shared secret sent by the proxy and required by Portunus on its service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay). Set the same value on both containers. **If unset, these endpoints are unauthenticated and must be protected at the network layer.** | - |
+| `PORTUNUS_API_KEY` | Shared secret sent by the proxy and required by Portunus on its service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay). Set the same value on both containers. **Required — Portunus refuses to start without it.** | *(required)* |
 | `PORTUNUS_API_KEY_HEADER` | Header carrying the shared secret | `x-api-key` |
 | `API_KEY_HEADER` | Header name for the API key | `authorization` |
 | `API_KEY_PREFIX` | Prefix for the API key value | `Bearer ` |

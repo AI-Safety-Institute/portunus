@@ -152,13 +152,13 @@ class ServiceAuthConfig(BaseModel):
     """Service-to-service authentication settings.
 
     The Envoy proxy sends a shared secret with every call it makes to
-    Portunus (/authorise, /log/*, WebSocket upgrades). When `shared_secret`
-    is set, Portunus rejects requests to its service endpoints unless they
-    carry the matching header. When unset, the endpoints are unauthenticated
-    and must be protected at the network layer instead.
+    Portunus (/authorise, /log/*, WebSocket upgrades). Portunus rejects
+    requests to its service endpoints unless they carry the matching header.
+    The secret is required: the app refuses to start without one (enforced
+    at startup rather than here so that importing config never fails).
 
     Attributes:
-        shared_secret: Shared secret expected from the proxy (optional)
+        shared_secret: Shared secret expected from the proxy
         header: Header name carrying the shared secret
     """
 
@@ -328,9 +328,8 @@ def get_config() -> PortunusConfig:
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
     )
 
-    # Empty string is treated as unset so that deployments passing
-    # PORTUNUS_API_KEY="" (e.g. the proxy entrypoint default) disable auth
-    # explicitly rather than requiring an empty header match.
+    # Empty string is treated as unset (rejected at app startup) rather
+    # than allowing an empty shared secret to match.
     service_auth = ServiceAuthConfig(
         shared_secret=os.environ.get("PORTUNUS_API_KEY") or None,
         header=os.environ.get("PORTUNUS_API_KEY_HEADER", "x-api-key"),

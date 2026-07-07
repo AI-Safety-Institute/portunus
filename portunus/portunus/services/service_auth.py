@@ -3,12 +3,12 @@ Service-to-service authentication for Portunus endpoints.
 
 The Envoy proxy attaches a shared secret header (``PORTUNUS_API_KEY`` in the
 ``PORTUNUS_API_KEY_HEADER`` header, default ``x-api-key``) to every call it
-makes to Portunus. When Portunus is configured with the same secret, the
-service endpoints (/authorise, /log/*, /cache/flush and WebSocket upgrades)
-reject callers that don't present it.
+makes to Portunus. Portunus requires the same secret to be configured and
+rejects callers of the service endpoints (/authorise, /log/*, /cache/flush
+and WebSocket upgrades) that don't present it.
 
-When no secret is configured, the check is disabled and access control falls
-back to the network layer. A warning is logged at startup in that case.
+The secret is mandatory: startup fails if it is unset, and requests are
+denied if validation is somehow reached without one configured.
 """
 
 import logging
@@ -29,12 +29,14 @@ def shared_secret_valid(headers: Mapping[str, str]) -> bool:
         headers: Case-insensitive request headers (Starlette Headers).
 
     Returns:
-        True if no shared secret is configured, or if the configured header
-        matches the configured secret (constant-time comparison).
+        True if the configured header matches the configured secret
+        (constant-time comparison). False if no secret is configured —
+        the service refuses to start in that state, so this is a
+        defence-in-depth fallback.
     """
     expected = config.service_auth.shared_secret
     if not expected:
-        return True
+        return False
     provided = headers.get(config.service_auth.header) or ""
     return secrets.compare_digest(provided.encode(), expected.encode())
 
@@ -43,8 +45,7 @@ async def require_shared_secret(request: Request) -> None:
     """FastAPI dependency enforcing the shared secret on HTTP endpoints.
 
     Raises:
-        HTTPException: 401 if a shared secret is configured and the request
-            does not present it.
+        HTTPException: 401 if the request does not present the shared secret.
     """
     if not shared_secret_valid(request.headers):
         logger.warning(
@@ -56,11 +57,15 @@ async def require_shared_secret(request: Request) -> None:
         )
 
 
-def warn_if_unauthenticated() -> None:
-    """Log a startup warning when service endpoints are unauthenticated."""
+def ensure_shared_secret_configured() -> None:
+    """Fail startup unless the proxy shared secret is configured.
+
+    Raises:
+        RuntimeError: If PORTUNUS_API_KEY is unset or empty.
+    """
     if not config.service_auth.shared_secret:
-        logger.warning(
-            "PORTUNUS_API_KEY is not set: service endpoints (/authorise, "
-            "/log/*, /cache/flush, WebSocket relay) accept unauthenticated "
-            "requests. Access must be restricted at the network layer."
+        raise RuntimeError(
+            "PORTUNUS_API_KEY must be set: the service endpoints (/authorise, "
+            "/log/*, /cache/flush, WebSocket relay) require the proxy's shared "
+            "secret. Set the same value on the proxy and Portunus containers."
         )

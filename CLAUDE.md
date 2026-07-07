@@ -75,7 +75,7 @@ The proxy is designed to handle streaming responses efficiently:
 ## Configuration
 
 ### Environment Variables
-- `PORTUNUS_API_KEY`: Shared secret the proxy sends to Portunus on every service call; when set on Portunus, `/authorise`, `/log/*`, `/cache/flush` and the WebSocket relay reject requests without it (401 / WS close 4001). Unset disables the check (network-layer protection only; a startup warning is logged)
+- `PORTUNUS_API_KEY`: Shared secret the proxy sends to Portunus on every service call; `/authorise`, `/log/*`, `/cache/flush` and the WebSocket relay reject requests without it (401 / WS close 4001). Required — Portunus fails at startup if unset
 - `PORTUNUS_API_KEY_HEADER`: Header carrying the shared secret (default: "x-api-key")
 - `API_KEY_HEADER`: Header name to use for API key (default: "authorization")
 - `API_KEY_PREFIX`: Prefix for API key (default: "Bearer ")
