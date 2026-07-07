@@ -1,5 +1,5 @@
 # Start from the Envoy Alpine Linux image
-FROM envoyproxy/envoy:v1.31.0@sha256:2bf7f042e3960e3904864cb09c174498e20a06859a5c394b7e3a6528a649b1da
+FROM envoyproxy/envoy:v1.36.0@sha256:d62f60a74cd9631b28bb3f538788ccff201b226975179de4265b0d75fc347e90
 
 # Update the package lists
 RUN apt update
