@@ -1,4 +1,4 @@
-FROM python:3.12-alpine as builder
+FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df as builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apk add gcc python3-dev libc-dev build-base linux-headers
@@ -14,7 +14,7 @@ RUN touch README.md
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
-FROM python:3.12-alpine as runtime
+FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df as runtime
 
 RUN mkdir -p /app && chown -R 1000:1000 /app
 USER 1000:1000

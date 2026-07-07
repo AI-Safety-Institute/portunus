@@ -1,6 +1,6 @@
 # Dockerfile for running proxy-utils tests
 # Use the same base image as production to ensure compatibility
-FROM envoyproxy/envoy:v1.31.0
+FROM envoyproxy/envoy:v1.31.0@sha256:2bf7f042e3960e3904864cb09c174498e20a06859a5c394b7e3a6528a649b1da
 
 # Install luarocks and busted (test framework)
 RUN apt update && apt install -y luarocks

@@ -1,0 +1,24 @@
+# Keep GitHub Actions, Docker base images, and Python dependencies patched.
+# Actions are pinned to commit SHAs and images to digests; Dependabot bumps
+# the pins (and their version comments) automatically.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directories:
+      - "/portunus"
+      - "/proxy"
+      - "/proxy/lib"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "uv"
+    directories:
+      - "/"
+      - "/portunus"
+    schedule:
+      interval: "weekly"
