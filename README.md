@@ -137,6 +137,17 @@ flowchart TB
     class Target externalLayer
 ```
 
+## Security Model
+
+Portunus's service endpoints (`/authorise`, `/log/{request_id}/...`, `/cache/flush`, and the WebSocket relay) **do not authenticate their callers**. Anything that can reach them directly can flush the auth cache (forcing all clients to re-authenticate) or inject records into the Kinesis audit trail under any request ID. Only `/ping` is intended to be reachable without protection (health checks).
+
+The Envoy proxy already sends a shared secret with every call it makes to Portunus: `PORTUNUS_API_KEY`, carried in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`). Portunus itself does not validate it, so your deployment **must** enforce access in front of the service:
+
+- **Validate the shared-secret header before requests reach Portunus.** The reference deployment at AISI runs an authenticating reverse-proxy sidecar (nginx) in the Portunus service task: it rejects any request that doesn't carry the expected `x-api-key` value and forwards the rest (including WebSocket upgrades) to the app. Only the sidecar's port is exposed to the load balancer.
+- **And/or restrict network reachability** so that only the Envoy proxies (and trusted operational tooling, e.g. whatever calls `/cache/flush`) can reach the Portunus service at all.
+
+Do not expose Portunus directly to clients or the public internet.
+
 ## Configuration
 
 ### Environment Variables
@@ -144,6 +155,8 @@ flowchart TB
 | Variable | Description | Default |
 |---|---|---|
 | `AWS_REGION` | AWS region for all service clients | *(required)* |
+| `PORTUNUS_API_KEY` | Shared secret the proxy attaches to every Portunus service call, in the `PORTUNUS_API_KEY_HEADER` header. Portunus does not validate it — see [Security Model](#security-model) | - |
+| `PORTUNUS_API_KEY_HEADER` | Header carrying the shared secret | `x-api-key` |
 | `API_KEY_HEADER` | Header name for the API key | `authorization` |
 | `API_KEY_PREFIX` | Prefix for the API key value | `Bearer ` |
 | `PORTUNUS_HEADER_PREFIX` | Prefix for proxy response headers (`x-{prefix}-*`) | `portunus` |
