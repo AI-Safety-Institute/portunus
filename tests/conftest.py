@@ -254,10 +254,6 @@ def clean_audit_pipeline(docker_setup):
     yield
 
 
-# Backwards-compat alias — older tests still reference ``clean_kinesis_streams``.
-clean_kinesis_streams = clean_audit_pipeline
-
-
 @pytest.fixture(scope="session")
 def docker_setup(request, compose_file):
     """Set up and tear down Docker containers for tests.
@@ -296,9 +292,9 @@ def docker_setup(request, compose_file):
 
     # docker compose's ``--wait`` returns once container healthchecks
     # pass, but LocalStack's healthcheck only waits for its API to
-    # answer — not for ``ready.d/`` init scripts (KMS key,
-    # Kinesis streams, S3 bucket) to finish running. Tests that touch
-    # those resources race the init scripts otherwise (Kinesis
+    # answer — not for ``ready.d/`` init scripts (KMS key, Firehose
+    # streams, S3 bucket) to finish running. Tests that touch those
+    # resources race the init scripts otherwise (Firehose
     # ResourceNotFoundException, KMS alias missing).
     _wait_for_localstack_init_complete(timeout=60)
 

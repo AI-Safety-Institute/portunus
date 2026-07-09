@@ -59,43 +59,26 @@ class SigningOverloadedError(Exception):
     """
 
 
-# Fallback sizing, used until fix-core lands the matching config fields
-# (``config.signing.*`` — see _signing_settings). Keep the two in sync.
-_DEFAULT_KMS_EXECUTOR_WORKERS = 16
-_DEFAULT_MAX_CONCURRENT_SIGNS = 32
-_DEFAULT_SIGN_ACQUIRE_TIMEOUT_S = 2.0
-
-
 def _signing_settings() -> tuple[int, int, float]:
     """Resolve (executor_workers, max_concurrent, acquire_timeout_s).
 
-    Reads ``config.signing`` when present. The ``getattr`` indirection keeps
-    this module working (with the defaults above) until the config fields —
-    owned by ``config.py`` — are added:
-
-    - ``config.signing.kms_executor_workers`` (SIGNING_KMS_EXECUTOR_WORKERS)
-    - ``config.signing.max_concurrent`` (SIGNING_MAX_CONCURRENT)
-    - ``config.signing.acquire_timeout_s`` (SIGNING_ACQUIRE_TIMEOUT_S)
+    A single seam over ``config.signing`` so tests can patch the sizing
+    in one place.
     """
-    signing_cfg = getattr(config, "signing", None)
-    workers = int(
-        getattr(signing_cfg, "kms_executor_workers", _DEFAULT_KMS_EXECUTOR_WORKERS)
+    signing_cfg = config.signing
+    return (
+        signing_cfg.kms_executor_workers,
+        signing_cfg.max_concurrent,
+        signing_cfg.acquire_timeout_s,
     )
-    max_concurrent = int(
-        getattr(signing_cfg, "max_concurrent", _DEFAULT_MAX_CONCURRENT_SIGNS)
-    )
-    acquire_timeout = float(
-        getattr(signing_cfg, "acquire_timeout_s", _DEFAULT_SIGN_ACQUIRE_TIMEOUT_S)
-    )
-    return workers, max_concurrent, acquire_timeout
 
 
 # Dedicated executor for KMS.Sign so signing throughput is bounded by an
 # explicit knob, not the process-default ``asyncio.to_thread`` pool
 # (~min(32, cpu+4) threads shared with every other to_thread user): with a
-# slow KMS tail, signing bursts used to queue behind that tiny shared pool
-# and stack latency toward the 15s ext_authz signing timeout (customer
-# 504s). Threads are process-wide; the semaphore below is per event loop.
+# slow KMS tail, signing bursts queue behind that tiny shared pool and
+# stack latency toward the 15s ext_authz signing timeout (customer 504s).
+# Threads are process-wide; the semaphore below is per event loop.
 _kms_executor: Optional[ThreadPoolExecutor] = None
 _signing_semaphores: (
     "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]"
@@ -150,7 +133,7 @@ async def sign_request_async(
        :class:`SigningOverloadedError` (fail closed) instead of piling up —
        each waiter pins its buffered request body (32 MiB Envoy buffer +
        the CheckRequest copy here), so unbounded waiting is a memory
-       exhaustion vector (mem-V2).
+       exhaustion vector.
     2. A dedicated ``ThreadPoolExecutor`` for the blocking KMS round-trip,
        so signing throughput is sized explicitly rather than by the shared
        process-default pool.

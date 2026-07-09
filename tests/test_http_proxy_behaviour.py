@@ -58,7 +58,7 @@ class ExpectedResponse:
     # have been called — assert via the absence of the echo marker.
     reached_upstream: bool = True
     # Optional: number of metadata records the scenario expects to land
-    # in the LocalStack Kinesis metadata stream. None = skip the telemetry
+    # in the LocalStack metadata stream. None = skip the telemetry
     # assertion for this scenario (use for cases where the recorded
     # behaviour isn't pinned yet). 0 = explicitly assert NO record.
     expected_metadata_records: Optional[int] = None
@@ -467,7 +467,7 @@ def test_request_response(
 
 # ---------------------------------------------------------------------------
 # Telemetry arm — shares the same corpus, asserts on the number of metadata
-# records that land in LocalStack Kinesis. Scenarios without an
+# records that land in LocalStack S3. Scenarios without an
 # ``expected_metadata_records`` value are skipped by the parametrise filter.
 # ---------------------------------------------------------------------------
 

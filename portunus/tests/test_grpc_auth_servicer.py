@@ -790,7 +790,7 @@ async def test_signing_pass_fails_closed_if_auth_no_longer_has_signing_key():
     non-signing tenant forged ``x-portunus-signing-required: true`` to trick
     the composite filter into dispatching the signing pass. Either way the
     signing pass must fail closed (500) and — critically — must NOT invoke
-    KMS.Sign, so a forged flag can never extract a signature. (Review M-1.)
+    KMS.Sign, so a forged flag can never extract a signature.
     """
     auth = FakeAuthService(
         result=AuthResult(
@@ -937,7 +937,7 @@ async def test_signing_pass_sheds_with_503_when_signing_capacity_exhausted():
     """``SigningOverloadedError`` from the bounded signer is shed with a 503.
 
     The signing call site routes through ``sign_request_async`` (dedicated
-    KMS executor + concurrency semaphore, mem-V2); when the cap stays
+    KMS executor + concurrency semaphore); when the cap stays
     saturated past the acquire timeout the request must be denied promptly
     (each waiter pins its buffered body, up to 32 MiB) — fail closed with
     503, not queued and not a generic 500.

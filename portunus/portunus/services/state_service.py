@@ -71,12 +71,12 @@ class PooledBotoSession:
     Drop-in for call sites that do
     ``async with session.create_client(...) as client:`` per request (STS in
     ``AuthService.get_aws_identity``, Secrets Manager in
-    ``SecretsService.fetch_secret``). Each ``create_client`` used to build a
-    fresh aiohttp connection pool + TLS context (~200ms cold), paid twice per
-    auth cache-miss — a latency spike on cache-miss storms (deploy /
-    TTL-expiry waves). With this adapter the underlying client is created
-    once per (service, credential set) and reused, mirroring the Firehose
-    singleton in :class:`StateService`.
+    ``SecretsService.fetch_secret``). A plain session's ``create_client``
+    builds a fresh aiohttp connection pool + TLS context (~200ms cold) on
+    every call, paid twice per auth cache-miss — a latency spike on
+    cache-miss storms (deploy / TTL-expiry waves). With this adapter the
+    underlying client is created once per (service, credential set) and
+    reused, mirroring the Firehose singleton in :class:`StateService`.
     """
 
     def __init__(self, state_service: "StateService") -> None:

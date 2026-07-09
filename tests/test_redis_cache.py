@@ -226,18 +226,3 @@ async def test_cache_and_retrieve_with_signing_key(docker_setup, request):
     assert cached.signing_key.kms_key_arn == signing_key.kms_key_arn
     assert cached.principal_info.account_id == principal_info.account_id
     assert cached.principal_info.principal == principal_info.principal
-
-
-@pytest.mark.asyncio
-async def test_cache_api_key_redis_error():
-    """Cache-key generation is deterministic without a live Redis.
-
-    NOTE: despite the name this exercises no Redis error path — it is
-    effectively redundant with ``test_generate_cache_key``. Flagged for the
-    cleanup pass as a deletion/rename candidate; kept green in the meantime
-    with a self-consistency check that isn't coupled to the hash construction.
-    """
-    payload = "test-payload"
-    assert _cache_service.generate_cache_key(
-        payload
-    ) == _cache_service.generate_cache_key(payload)

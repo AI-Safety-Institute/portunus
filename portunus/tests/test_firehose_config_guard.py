@@ -1,21 +1,13 @@
-"""Tests for the gRPC startup Firehose audit-config fail-fast guard (F2).
+"""Tests for the gRPC startup Firehose audit-config fail-fast guard.
 
-Covers re-review blocker #7. The first review's F2 fix (#22, commit
-``0c9ff50``) added a FastAPI ``lifespan`` boot-guard that refused to start when
-any required Firehose delivery stream was unset, so a task still carrying the
-pre-migration ``KINESIS_*`` env vars (leaving every ``FIREHOSE_*`` unset) could
-not serve while silently dropping 100% of audit records.
-
-#19 deletes ``app.py`` and serves over gRPC; its ``start_grpc_server`` guarded
-only the channel-identity ``proxy_api_key`` and set health=SERVING
-unconditionally, while ``PublishService.build_*`` still returns ``None`` (warning
-only) when a stream is unset — reopening the silent-audit-loss hole for gRPC.
-
-These tests assert the guard is ported into the gRPC startup path with the same
-semantics as #22:
+``PublishService.build_*`` returns ``None`` (warning only) when its stream is
+unset, so a task with the ``FIREHOSE_*`` env vars missing (e.g. one still
+carrying the pre-migration ``KINESIS_*`` names) would serve traffic while
+silently dropping 100% of audit records. The guard must instead refuse to
+start:
 
 1. ``FirehoseConfig.missing_required_streams()`` reports the unset required
-   streams (the exact seven #22 required; ``ws_summary`` deliberately excluded).
+   streams (``ws_summary`` deliberately excluded).
 2. A missing required stream fails fast — ``start_grpc_server`` raises
    ``RuntimeError`` before binding a port, so a misconfigured task never serves.
 3. A fully-configured sink starts normally (a runtime is returned).
@@ -30,7 +22,7 @@ import pytest
 from portunus.config import FirehoseConfig, GrpcConfig
 from portunus.grpc.server import start_grpc_server
 
-# The seven required streams as the FIREHOSE_* env-var names #22 required.
+# The seven required streams, as their FIREHOSE_* env-var names.
 _ALL_ENV_VARS = {
     "FIREHOSE_METADATA_STREAM",
     "FIREHOSE_REQUEST_HEADERS_STREAM",
@@ -94,7 +86,7 @@ class TestMissingRequiredStreams:
         assert "FIREHOSE_METADATA_STREAM" in firehose.missing_required_streams()
 
     def test_ws_summary_is_not_required(self):
-        """``ws_summary_stream_name`` is deliberately excluded (matches #22).
+        """``ws_summary_stream_name`` is deliberately not required.
 
         WS frame payloads still flow through the (required) request/response
         body streams, so an unset summary stream loses only connection-level
@@ -110,7 +102,7 @@ class TestStartupFailFast:
 
     @pytest.mark.asyncio
     async def test_all_streams_unset_refuses_to_start(self):
-        """The F2 scenario: every FIREHOSE_* unset -> startup raises.
+        """Every FIREHOSE_* unset -> startup raises.
 
         The check fires before the server binds a port, so a blue task whose
         audit sink is misconfigured never reaches a serving state.
@@ -164,11 +156,12 @@ class TestStartupFailFast:
 
     @pytest.mark.asyncio
     async def test_disabled_server_skips_firehose_guard(self):
-        """``enabled=False`` returns None without tripping the audit guard.
+        """``enabled=False`` returns None without tripping any startup guard.
 
         A disabled server isn't serving, so there is no audit to drop; the
-        guard must not fire even with every stream unset (mirrors how the
-        proxy-key guard is gated behind ``enabled``).
+        guard must not fire even with every stream unset. The default
+        ``proxy_api_key=""`` also makes this cover the proxy-key guard being
+        gated behind ``enabled``.
         """
         config = GrpcConfig(enabled=False)
         assert (

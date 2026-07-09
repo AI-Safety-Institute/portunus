@@ -600,17 +600,16 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             # Sentinel body record (empty body, ``dropped=True``, same
             # chunk_id) so downstream ETL sees an explicit gap marker rather
             # than a silent chunk_id discontinuity. Submitted BLOCKING (with
-            # a timeout): the droppable path rejects at the exact condition
-            # the sentinel exists to signal (qsize >= body_capacity), so a
-            # droppable sentinel almost never landed under real saturation —
-            # 99 drops / 0 markers in S3 in the drop-path load test. The
-            # blocking path uses the reserved metadata headroom, so the tiny
-            # sentinel survives body saturation; the timeout bounds the wait
-            # so a wedged sink can't stall the ext_proc stream. If even this
-            # times out (true full-queue saturation), the queue counts it on
-            # ``sentinel_dropped_total`` — NOT ``dropped_total``, which
-            # would double-count one logical lost chunk — and the chunk_id
-            # gap + counters + this log line remain the fallback signal.
+            # a timeout), not droppable: the droppable path rejects at the
+            # exact condition the sentinel exists to signal (qsize >=
+            # body_capacity), whereas the blocking path uses the reserved
+            # metadata headroom, so the tiny sentinel survives body
+            # saturation. The timeout bounds the wait so a wedged sink can't
+            # stall the ext_proc stream; if even this times out, the queue
+            # counts it on ``sentinel_dropped_total`` — NOT ``dropped_total``,
+            # which would double-count one logical lost chunk — and the
+            # chunk_id gap + counters + this log line remain the fallback
+            # signal.
             await self._queue.submit_blocking(
                 PublishTask(
                     build=lambda chunk_id=chunk_id: build_method(  # type: ignore[misc]
@@ -765,12 +764,10 @@ def _header_value(h) -> str:
 
 
 # Credential-carrying headers that must NEVER reach a captured audit record,
-# whatever the deployment config. This is PR #32's security-reviewed denylist
-# (the reference set — regression-tested as a superset check): note that
-# ``authorization`` is a hardcoded literal here, NOT derived from
-# ``config.api_key_header``, so it stays redacted even when a deployment
-# configures a different API-key header (the #19 rewrite regressed exactly
-# that, plus the four provider-specific key headers below).
+# whatever the deployment config (security-reviewed reference set —
+# regression-tested as a superset check). ``authorization`` is a hardcoded
+# literal here, NOT derived from ``config.api_key_header``, so it stays
+# redacted even when a deployment configures a different API-key header.
 _REDACTED_HEADERS: frozenset[str] = frozenset(
     {
         "authorization",
@@ -792,9 +789,8 @@ _REDACTED_HEADERS: frozenset[str] = frozenset(
 # analytics-relevant are archived. A denylist alone leaks by omission — every
 # newly onboarded provider's credential header is captured until someone
 # remembers to extend the list — so the allowlist is the primary filter and
-# the denylist above is the belt-and-braces backstop (and the regression
-# anchor against #32's reviewed set). Bodies are full-capture by design;
-# this applies to headers only.
+# the denylist above is the belt-and-braces backstop. Bodies are
+# full-capture by design; this applies to headers only.
 _CAPTURED_HEADER_ALLOWLIST: frozenset[str] = frozenset(
     {
         # HTTP/2 pseudo-headers (method/path/status are what the ETL reads).

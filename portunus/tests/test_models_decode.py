@@ -26,13 +26,10 @@ try:
     import brotli
 
     HAS_BROTLI = True
-except ImportError:  # pragma: no cover - depends on env; dep add pending
+except ImportError:  # pragma: no cover — Glue-like env without brotli
     HAS_BROTLI = False
 
-requires_brotli = pytest.mark.skipif(
-    not HAS_BROTLI,
-    reason="brotli not installed (Brotli>=1.1.0 dep add pending via FIX-COORDINATION)",
-)
+requires_brotli = pytest.mark.skipif(not HAS_BROTLI, reason="brotli not installed")
 
 
 def _b64(data: bytes) -> str:
@@ -350,10 +347,11 @@ def test_non_eventstream_content_types_use_utf8_path(content_type):
 #
 # botocore's EventStreamBuffer ends iteration with a bare StopIteration the
 # moment the remaining bytes are too few for the next complete frame -- the
-# same way a clean end of stream ends. A truncated trailing frame therefore
-# used to look like success (failed=False) and silently drop the token-bearing
-# tail: Anthropic-on-Bedrock puts usage.output_tokens in the near-final
-# message_delta, so a cut-off stream undercounts tokens with no error signal.
+# same way a clean end of stream ends. Without the residual-bytes guard, a
+# truncated trailing frame looks like success (failed=False) and silently
+# drops the token-bearing tail: Anthropic-on-Bedrock puts usage.output_tokens
+# in the near-final message_delta, so a cut-off stream undercounts tokens
+# with no error signal.
 
 # Two-frame Bedrock stream whose final frame carries usage.output_tokens.
 _TEXT_DELTA = {
@@ -426,12 +424,12 @@ def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
 
 # --- JoinedLogRecord callers must thread content_type into the decoder ---
 #
-# The C1 regression: models.py was rewritten with a 2-arg _decompress_b64_body
-# and callers that never passed content_type, so Bedrock eventstream bodies
-# fell through to .decode("utf-8") — decode_failure=True for 100% of Bedrock
-# streaming traffic (or silent garbage when framing bytes were valid UTF-8).
-# These tests exercise the real caller methods end-to-end so a future rewrite
-# that drops the threading turns CI red.
+# Regression guard: a caller that never passes content_type sends Bedrock
+# eventstream bodies down the plain .decode("utf-8") path —
+# decode_failure=True for 100% of Bedrock streaming traffic (or silent
+# garbage when framing bytes happen to be valid UTF-8). These tests exercise
+# the real caller methods end-to-end so a rewrite that drops the threading
+# turns CI red.
 
 
 def _make_joined_record(**overrides) -> JoinedLogRecord:

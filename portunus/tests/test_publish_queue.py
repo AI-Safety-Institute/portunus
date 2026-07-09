@@ -204,11 +204,11 @@ async def test_sender_partial_failures_count_toward_failed_total() -> None:
 async def test_stop_with_queue_full_cancels_workers_without_raising(caplog) -> None:
     """Shutdown under back-pressure must not let QueueFull escape.
 
-    The pre-fix shape used ``put_nowait(None)`` to inject worker
-    sentinels, which raises ``QueueFull`` exactly when audit pressure
-    is highest — at shutdown, with a saturated queue. That exception
-    would unwind out of ``stop()`` and skip the rest of
-    ``stop_grpc_server`` (publish drain, Firehose client close).
+    Injecting worker sentinels with ``put_nowait(None)`` raises
+    ``QueueFull`` exactly when audit pressure is highest — at shutdown,
+    with a saturated queue — and the exception would unwind out of
+    ``stop()`` and skip the rest of ``stop_grpc_server`` (publish drain,
+    Firehose client close).
 
     Workers are blocked on ``slow_task`` here so the queue stays full
     for the duration of the test, forcing ``put`` to hit the
@@ -362,7 +362,7 @@ async def test_saturation_drops_bodies_keeps_metadata_and_drains_sentinels() -> 
 
 
 # ---------------------------------------------------------------------------
-# Byte bound (mem-V1): queued payload bytes are capped regardless of count
+# Byte bound: queued payload bytes are capped regardless of record count
 # ---------------------------------------------------------------------------
 
 
@@ -445,8 +445,8 @@ async def test_byte_budget_is_released_after_flush_not_at_dequeue() -> None:
 
 
 # ---------------------------------------------------------------------------
-# submitted_total + reconciliation (A7): drain loss is quantifiable,
-# in-flight batches included
+# submitted_total + reconciliation: drain loss is quantifiable, in-flight
+# batches included
 # ---------------------------------------------------------------------------
 
 
@@ -463,11 +463,11 @@ def _reconciled(queue: BoundedPublishQueue) -> bool:
 
 @pytest.mark.asyncio
 async def test_wedged_sender_drain_counts_in_flight_batch_as_cancelled() -> None:
-    """The audit-lane repro: 10 records submitted, ALL pulled into one.
+    """10 records submitted, ALL pulled into one in-flight batch, sender wedged.
 
-    in-flight batch (qsize()==0), sender wedged. Pre-fix ``stop`` counted
-    ``qsize()`` → reported 0/1 lost while 10 records vanished. The in-flight
-    batch must be counted as cancelled and the reconciliation must hold.
+    A ``qsize()``-based loss count reports 0 lost here (qsize()==0) while 10
+    records vanish. The in-flight batch must be counted as cancelled and the
+    reconciliation must hold.
     """
     sleeping = asyncio.Event()
 
@@ -557,8 +557,8 @@ async def test_droppable_rejects_count_toward_submitted_total() -> None:
 async def test_build_returning_none_counts_skipped_unconfigured() -> None:
     """An unconfigured stream (e.g. FIREHOSE_WS_SUMMARY_STREAM unset) is a.
 
-    counted skip, not a silent one — pre-fix build→None vanished without
-    touching any counter (audit LOW #4).
+    counted skip, not a silent one — a build()→None that touches no counter
+    would break the reconciliation invariant.
     """
     queue = _queue(maxsize=10, num_workers=1)
     for _ in range(3):

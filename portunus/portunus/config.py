@@ -128,13 +128,11 @@ class FirehoseConfig(BaseModel):
         pre-migration ``KINESIS_*`` env vars, leaving ``FIREHOSE_*`` unset)
         never serves.
 
-        The required set is exactly the seven streams the original FastAPI
-        boot-guard required (#22, commit ``0c9ff50``).
-        ``ws_summary_stream_name`` is deliberately excluded: it is a
-        per-connection roll-up new to the gRPC/ext_proc path, and the
-        underlying WebSocket frame payloads are still captured via the
-        (required) request/response body streams, so an unset summary stream
-        loses only connection-level stats, not the audit trail itself.
+        ``ws_summary_stream_name`` is deliberately excluded from the required
+        set: it is a per-connection roll-up, and the underlying WebSocket
+        frame payloads are still captured via the (required) request/response
+        body streams, so an unset summary stream loses only connection-level
+        stats, not the audit trail itself.
 
         Returns:
             The names of the ``FIREHOSE_*`` env vars whose stream is unset
@@ -330,10 +328,9 @@ class GrpcConfig(BaseModel):
 class SigningConfig(BaseModel):
     """HTTP message-signing (KMS) throughput and memory bounds.
 
-    Requested by the signing/auth lane (see shared/FIX-COORDINATION.md):
-    ``signing_service`` reads these via ``config.signing`` (with matching
-    fallback defaults) to size the dedicated KMS.Sign executor and cap
-    concurrent buffered signing requests (mem-V2).
+    ``signing_service`` reads these via ``config.signing`` to size the
+    dedicated KMS.Sign executor and cap concurrent buffered signing
+    requests (each waiter pins a buffered request body in memory).
 
     Attributes:
         kms_executor_workers: Thread count of the dedicated KMS.Sign executor
