@@ -86,9 +86,12 @@ def test_corrupt_gzip_marks_failure():
 
 
 def test_gzip_with_corrupt_deflate_stream_marks_failure():
-    """A valid gzip header wrapping corrupt deflate data raises zlib.error
-    (not BadGzipFile/OSError) and must map to a decode failure rather than
-    escaping to the caller."""
+    """Gzip body with a corrupt deflate stream maps to a decode failure.
+
+    A valid gzip header wrapping corrupt deflate data raises zlib.error
+    (not BadGzipFile/OSError) and must map to (None, failed=True) rather
+    than escaping to the caller.
+    """
     valid = gzip.compress(b'{"hello": "world"}')
     corrupted = valid[:10] + b"\xff" * 20  # keep 10-byte gzip header, trash the stream
     decoded, failed = _decompress_b64_body(_b64(corrupted), "gzip")
