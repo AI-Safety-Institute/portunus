@@ -31,7 +31,7 @@ from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
-from portunus.services.signing_service import sign_request
+from portunus.services.signing_service import reset_signing_runtime, sign_request
 
 logger = logging.getLogger("api.grpc")
 
@@ -43,6 +43,23 @@ _MAX_GRPC_MSG_BYTES = 64 * 1024 * 1024
 # an *empty* key; a 1-char placeholder ("x", a stray space) passes that check
 # while giving no real channel-identity protection — refuse it too.
 _MIN_PROXY_KEY_BYTES = 16
+
+# gRPC health-service names — the liveness/readiness split.
+#
+# ``""`` (the overall/default service) is LIVENESS: SERVING as soon as the
+# listener binds, NOT_SERVING only at drain start. The ECS container probe
+# (``grpc_health_probe``, default service "") reads it, so a Redis outage
+# never recycles a task — and the ECS container-dependency start (Envoy
+# dependsOn Portunus HEALTHY) is Redis-independent.
+#
+# ``"readiness"`` is READINESS: driven by the dependency (Redis) monitor
+# with a consecutive-failure debounce. The ALB /healthz (Envoy active gRPC
+# health check with service_name="readiness") reads it, so a Redis-down
+# task leaves rotation without being killed. Keep this string in sync with
+# proxy/envoy.yaml's grpc_health_check.service_name (see
+# shared/FIX-COORDINATION.md).
+LIVENESS_SERVICE_NAME = ""
+READINESS_SERVICE_NAME = "readiness"
 
 
 class _DependencyHealth(Protocol):
@@ -71,22 +88,31 @@ async def _dependency_health_loop(
     *,
     interval_seconds: float,
     timeout_seconds: float,
+    failure_threshold: int,
 ) -> None:
-    """Drive the gRPC health status from the auth path's dependencies.
+    """Drive the ``readiness`` gRPC health service from Redis health.
 
     A Portunus whose event loop is alive but whose Redis is unreachable
-    times out every ext_authz ``Check`` → fail-closed deny — yet the plain
-    health servicer keeps answering SERVING, so the ECS ``grpc_health_probe``
-    (and anything else watching gRPC health) never notices a task that is
-    403ing 100% of its traffic. Ping Redis on an interval and flip the
-    overall ("") status to NOT_SERVING while the dependency is down,
-    SERVING again once it recovers. ``stop_grpc_server`` cancels this task
-    *before* flipping NOT_SERVING for the drain, so the monitor can never
-    resurrect a draining task's status.
+    times out every ext_authz ``Check`` → fail-closed deny. The monitor
+    pings Redis and drives the **readiness** service so the ALB /healthz
+    pulls the task from rotation — while LIVENESS (``""``) is deliberately
+    left alone: on a *correlated* Redis outage, flipping ``""`` would make
+    ECS recycle the entire fleet at once and (with Envoy dependsOn
+    Portunus-HEALTHY) deadlock replacements behind the same dead Redis.
+    Redis-down must mean "out of rotation", never "kill the task".
+
+    Debounce: readiness flips NOT_SERVING only after ``failure_threshold``
+    CONSECUTIVE probe failures (a single slow ping must not pull the task),
+    and flips back SERVING on the FIRST success. The first probe runs
+    immediately (readiness starts NOT_SERVING until proven), so a healthy
+    boot is ready within one probe round-trip.
+
+    ``stop_grpc_server`` cancels this task *before* flipping the drain's
+    NOT_SERVING, so the monitor can never resurrect a draining task.
     """
-    healthy = True
+    ready: Optional[bool] = None  # unknown until the first probe completes
+    consecutive_failures = 0
     while True:
-        await asyncio.sleep(interval_seconds)
         ok = False
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -96,21 +122,35 @@ async def _dependency_health_loop(
         except Exception as e:
             logger.warning("Dependency health check raised: %s", type(e).__name__)
             ok = False
-        if ok and not healthy:
-            healthy = True
-            await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-            logger.info(
-                "Dependency health recovered; gRPC health restored to SERVING"
-            )
-        elif not ok and healthy:
-            healthy = False
-            await health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
-            logger.error(
-                "Dependency health check failed (Redis unreachable): flipping "
-                "gRPC health to NOT_SERVING — this task would fail-closed "
-                "deny every Check while appearing alive",
-                extra={"event": "dependency_health_not_serving"},
-            )
+
+        if ok:
+            consecutive_failures = 0
+            if ready is not True:
+                ready = True
+                await health_servicer.set(
+                    READINESS_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING
+                )
+                logger.info(
+                    "Dependency health OK; readiness SERVING (back in rotation)"
+                )
+        else:
+            consecutive_failures += 1
+            if ready is not False and consecutive_failures >= failure_threshold:
+                ready = False
+                await health_servicer.set(
+                    READINESS_SERVICE_NAME,
+                    health_pb2.HealthCheckResponse.NOT_SERVING,
+                )
+                logger.error(
+                    "Dependency health check failed %d consecutive times "
+                    "(Redis unreachable): readiness NOT_SERVING — this task "
+                    "would fail-closed deny every Check, so it leaves ALB "
+                    "rotation (liveness unaffected; the task is NOT recycled)",
+                    consecutive_failures,
+                    extra={"event": "dependency_health_not_serving"},
+                )
+
+        await asyncio.sleep(interval_seconds)
 
 
 async def start_grpc_server(
@@ -246,15 +286,20 @@ async def start_grpc_server(
     server.add_insecure_port(listen_addr)
     await server.start()
 
-    # Mark serving only after the listener is up, so a probe can't see
-    # SERVING before the port accepts connections.
-    await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    # Mark liveness SERVING only after the listener is up, so a probe can't
+    # see SERVING before the port accepts connections. Liveness stays
+    # SERVING until drain start — the Redis monitor never touches it, so a
+    # dependency outage can never make ECS recycle the task.
+    await health_servicer.set(
+        LIVENESS_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING
+    )
 
-    # Surface dependency (Redis) health into the gRPC health status: a task
-    # that is SERVING but would fail-closed deny every Check (Redis down)
-    # must fail its probe rather than 403 traffic invisibly. Contract for
-    # the deploy side: gRPC health "" == SERVING iff the listener is up AND
-    # the last dependency probe succeeded.
+    # Surface dependency (Redis) health into the READINESS service (the ALB
+    # /healthz target): a task that is alive but would fail-closed deny
+    # every Check (Redis down) leaves rotation instead of 403ing traffic
+    # invisibly — and instead of being killed. Readiness starts NOT_SERVING
+    # and the monitor's immediate first probe proves it (one round-trip on a
+    # healthy boot).
     health_monitor: Optional[asyncio.Task] = None
     dependency = getattr(publish_service, "state_service", None)
     if (
@@ -262,20 +307,30 @@ async def start_grpc_server(
         and dependency is not None
         and hasattr(dependency, "health_check")
     ):
+        await health_servicer.set(
+            READINESS_SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING
+        )
         health_monitor = asyncio.create_task(
             _dependency_health_loop(
                 health_servicer,
                 dependency,
                 interval_seconds=config.health_check_interval_seconds,
                 timeout_seconds=config.health_check_timeout_seconds,
+                failure_threshold=config.health_check_failure_threshold,
             ),
             name="dependency-health-monitor",
         )
     else:
+        # No monitor to drive readiness — report SERVING unconditionally so
+        # a monitor-disabled deployment (tests, local dev) still passes the
+        # /healthz-gated probes.
+        await health_servicer.set(
+            READINESS_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING
+        )
         logger.warning(
             "Dependency health monitor disabled "
-            "(interval=%s, state_service available=%s) — gRPC health will "
-            "not reflect Redis outages",
+            "(interval=%s, state_service available=%s) — the readiness "
+            "health service will not reflect Redis outages",
             config.health_check_interval_seconds,
             dependency is not None,
         )
@@ -329,15 +384,22 @@ async def stop_grpc_server(
     )
 
     # Stop the dependency health monitor FIRST: it must not race the drain
-    # and flip the status back to SERVING after we mark NOT_SERVING below.
+    # and flip readiness back to SERVING after we mark NOT_SERVING below.
     if runtime.health_monitor is not None:
         runtime.health_monitor.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runtime.health_monitor
 
-    # Flip health to NOT_SERVING so an in-flight probe (ALB/ECS)
-    # sees the drain immediately and stops routing new connections here.
-    await runtime.health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+    # Flip BOTH health services to NOT_SERVING so an in-flight probe sees
+    # the drain immediately: readiness (ALB /healthz) stops routing new
+    # connections here, and liveness ("") reflects intentional shutdown —
+    # the one case where the task going away is the point.
+    await runtime.health_servicer.set(
+        READINESS_SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING
+    )
+    await runtime.health_servicer.set(
+        LIVENESS_SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING
+    )
 
     # Share a SINGLE drain budget across both stops. ``server.stop`` and
     # ``publish_queue.stop`` were previously each passed the full
@@ -382,6 +444,31 @@ async def stop_grpc_server(
                 "flush_budget_seconds": queue_drain_budget,
             },
         )
+
+    # Tear down the dedicated KMS signing executor inside what's left of the
+    # drain deadline. ``server.stop`` already ended all RPCs, so the executor
+    # is idle in the happy path and this returns immediately — but a hung
+    # KMS.Sign thread would make ``shutdown(wait=True)`` join forever, so it
+    # runs off-loop under the remaining budget. On timeout (or a budget
+    # already spent by the flush) fall back to a non-blocking shutdown
+    # (cancel_futures, no join) so a wedged KMS can never push process exit
+    # past the ECS stopTimeout.
+    teardown_budget = max(0.0, deadline - loop.time())
+    torn_down = False
+    if teardown_budget > 0:
+        try:
+            async with asyncio.timeout(teardown_budget):
+                await asyncio.to_thread(reset_signing_runtime, wait=True)
+            torn_down = True
+        except TimeoutError:
+            logger.warning(
+                "KMS signing executor did not shut down within the "
+                "remaining %.1fs drain budget; continuing exit without "
+                "joining its threads",
+                teardown_budget,
+            )
+    if not torn_down:
+        reset_signing_runtime(wait=False)
 
     try:
         await runtime.publish_service.state_service.close()

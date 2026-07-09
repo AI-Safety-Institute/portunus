@@ -256,7 +256,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                             secret_arn=secret_arn,
                         ),
                         label="metadata",
-                    )
+                    ),
+                    timeout=config.grpc.publish_blocking_timeout_seconds,
                 )
             state.audit_metadata_published = True
 
@@ -269,7 +270,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="request_headers",
-            )
+            ),
+            timeout=config.grpc.publish_blocking_timeout_seconds,
         )
 
     async def _on_request_trailers(
@@ -287,7 +289,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="request_trailers",
-            )
+            ),
+            timeout=config.grpc.publish_blocking_timeout_seconds,
         )
 
     async def _on_response_headers(
@@ -321,7 +324,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="response_headers",
-            )
+            ),
+            timeout=config.grpc.publish_blocking_timeout_seconds,
         )
 
     async def _on_response_trailers(
@@ -339,7 +343,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="response_trailers",
-            )
+            ),
+            timeout=config.grpc.publish_blocking_timeout_seconds,
         )
 
     async def _on_body_chunk(
@@ -661,7 +666,15 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         if droppable:
             self._queue.submit_droppable(task)
         else:
-            await self._queue.submit_blocking(task)
+            # Bounded: this runs in Process's ``finally`` at stream end —
+            # including during drain — so an unbounded put on a wedged sink
+            # would pin the stream (and the drain) forever. On timeout the
+            # summary is dropped and counted (per-frame records are already
+            # published independently).
+            await self._queue.submit_blocking(
+                task,
+                timeout=config.grpc.publish_blocking_timeout_seconds,
+            )
         state.summary_emitted = True
 
 
@@ -829,13 +842,21 @@ _CAPTURED_HEADER_ALLOWLIST: frozenset[str] = frozenset(
         "signature-input",
         # Provider metadata.
         "anthropic-version",
+        # Portunus's OWN control-plane headers, enumerated EXACTLY — a
+        # blanket ``x-portunus-`` prefix would let a client's forged
+        # x-portunus-anything header into the audit lake (only these two
+        # are legitimately observable at ext_proc: the load-test debug
+        # correlation id, and the signing flag ext_authz #1 sets).
+        "x-portunus-debug-id",
+        "x-portunus-signing-required",
     }
 )
 
 # Prefix-allowlisted header families (still subject to the denylist +
-# configured api_key_header backstop).
+# configured api_key_header backstop). Rate-limit telemetry only —
+# deliberately NO ``x-portunus-`` prefix here (see the enumerated entries
+# above): prefixes admit client-forged headers wholesale.
 _CAPTURED_HEADER_ALLOWED_PREFIXES: tuple[str, ...] = (
-    "x-portunus-",  # our own control-plane headers (debug-id, signing flag)
     "anthropic-ratelimit-",
     "x-ratelimit-",
 )

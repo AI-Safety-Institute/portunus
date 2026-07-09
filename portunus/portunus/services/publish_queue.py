@@ -283,9 +283,33 @@ class BoundedPublishQueue:
         # Reconcile: any accepted record not yet on a terminal counter was
         # lost — still queued at cancel time, in a batch the CancelledError
         # accounting couldn't see, or submitted after the workers exited.
+        # A NEGATIVE residue (accounted > submitted) can't be repaired the
+        # same way, but it is just as much a bug — a double-count would make
+        # every published/dropped figure untrustworthy — so alarm on it
+        # instead of silently swallowing it.
         unaccounted = self._submitted_total - self._accounted_total()
         if unaccounted > 0:
             self._cancelled_total += unaccounted
+        elif unaccounted < 0:
+            logger.error(
+                "Audit counter reconciliation failed: terminal counters "
+                "exceed submitted_total by %d (published=%d dropped=%d "
+                "build_failed=%d delivery_failed=%d skipped_unconfigured=%d "
+                "cancelled=%d vs submitted=%d) — a double-count bug; "
+                "publish/drop totals are not trustworthy",
+                -unaccounted,
+                self._published_total,
+                self._dropped_total,
+                self._build_failed_total,
+                self._delivery_failed_total,
+                self._skipped_unconfigured_total,
+                self._cancelled_total,
+                self._submitted_total,
+                extra={
+                    "event": "audit_counter_mismatch",
+                    "over_accounted": -unaccounted,
+                },
+            )
 
         cancelled = self._cancelled_total - cancelled_before
         if timed_out:

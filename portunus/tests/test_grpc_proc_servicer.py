@@ -1127,9 +1127,9 @@ async def test_ws_summary_uses_blocking_submit_on_normal_close():
     original_blocking = queue.submit_blocking
     original_droppable = queue.submit_droppable
 
-    async def _capture_blocking(task):
+    async def _capture_blocking(task, **kwargs):
         blocking_labels.append(task.label)
-        await original_blocking(task)
+        await original_blocking(task, **kwargs)
 
     def _capture_droppable(task):
         droppable_labels.append(task.label)
@@ -1395,6 +1395,13 @@ def test_unknown_headers_are_dropped_by_the_capture_allowlist():
                 "content-type": "application/json",
                 ":method": "POST",
                 "x-portunus-debug-id": "DEBUG-1",
+                "x-portunus-signing-required": "true",
+                # A client-forged x-portunus-* header must NOT ride an
+                # x-portunus- prefix rule into the audit lake — only the
+                # two enumerated Portunus control-plane headers above are
+                # captured.
+                "x-portunus-forged-role": "admin",
+                "x-portunus-api-key": "sk-smuggled",
                 "anthropic-ratelimit-tokens-remaining": "1000",
             }
         )
@@ -1403,11 +1410,15 @@ def test_unknown_headers_are_dropped_by_the_capture_allowlist():
     assert "x-newprovider-key" not in captured
     assert "x-foo" not in captured
     assert "openai-organization" not in captured
-    # Allowlisted analytics headers survive (exact names and prefixes).
+    assert "x-portunus-forged-role" not in captured
+    assert "x-portunus-api-key" not in captured
+    # Allowlisted analytics headers survive (exact names and prefixes —
+    # the x-portunus entries are ENUMERATED, not a prefix rule).
     assert set(captured) == {
         "content-type",
         ":method",
         "x-portunus-debug-id",
+        "x-portunus-signing-required",
         "anthropic-ratelimit-tokens-remaining",
     }
 
@@ -1553,3 +1564,78 @@ async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
         assert record.truncated_client_frames == 0
     finally:
         await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_blocking_submits_time_out_instead_of_stalling_process(monkeypatch):
+    """A wedged sink must not pin the Process coroutine on a header submit.
+
+    With the queue completely full and no workers draining, the
+    header/metadata/trailer/summary submits are bounded by
+    ``publish_blocking_timeout_seconds`` — the stream completes promptly
+    and the timed-out records are counted as dropped (observable loss)
+    rather than wedging the stream (and, at stream end, the drain).
+    """
+    monkeypatch.setattr(
+        portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05
+    )
+    monkeypatch.setattr(portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.02)
+    servicer, _publish, queue = _make_servicer(queue_maxsize=1)
+    # Fill the queue completely; workers deliberately not started.
+    assert (
+        await queue.submit_blocking(
+            PublishTask(build=lambda: ("body", b"{}\n"), label="filler")
+        )
+        is True
+    )
+    assert queue.qsize() == 1
+
+    stream = _stream_from(
+        [
+            _http_headers_message(headers={}, is_request=True, request_id="wedged"),
+            _http_headers_message(headers={}, is_request=False),
+        ]
+    )
+
+    loop = asyncio.get_event_loop()
+    t0 = loop.time()
+    # The whole stream (2 blocked header submits) must complete in ~2
+    # timeouts, not hang forever awaiting queue space.
+    async with asyncio.timeout(2.0):
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+    elapsed = loop.time() - t0
+
+    assert elapsed < 1.0
+    # Both header records were dropped-with-timeout and counted.
+    assert queue.dropped_total == 2
+
+
+@pytest.mark.asyncio
+async def test_ws_summary_submit_times_out_on_wedged_queue(monkeypatch):
+    """The WS-summary submit in Process's ``finally`` is bounded too.
+
+    That submit runs at stream end — including during drain — so an
+    unbounded put on a wedged sink would pin the drain forever.
+    """
+    monkeypatch.setattr(
+        portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05
+    )
+    servicer, _publish, queue = _make_servicer(queue_maxsize=1)
+    state = _StreamState(
+        stream_id="ws-wedged",
+        request_id="ws-wedged",
+        mode=StreamMode.WS_UPGRADE,
+    )
+    assert (
+        await queue.submit_blocking(
+            PublishTask(build=lambda: ("body", b"{}\n"), label="filler")
+        )
+        is True
+    )
+
+    async with asyncio.timeout(1.0):
+        await servicer._emit_ws_summary(state, droppable=False)
+
+    assert state.summary_emitted is True
+    assert queue.dropped_total == 1  # the summary was shed, counted, logged

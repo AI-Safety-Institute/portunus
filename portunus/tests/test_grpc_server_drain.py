@@ -17,6 +17,7 @@ Two properties are pinned here:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Optional
 
 import pytest
@@ -276,3 +277,81 @@ async def test_flush_reserve_larger_than_grace_is_clamped():
     assert server.grace_seen == pytest.approx(0.0)
     assert queue.drain_timeout_seen is not None
     assert 0.0 < queue.drain_timeout_seen <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_drain_tears_down_kms_executor_within_deadline(monkeypatch):
+    """The drain shuts the dedicated KMS executor down (wait=True) off-loop.
+
+    ``server.stop`` has already ended all RPCs, so in the happy path the
+    executor is idle and the join returns immediately — but it must happen
+    inside the drain deadline so a leftover KMS thread can't outlive the
+    grace window.
+    """
+    calls: list[dict] = []
+
+    def _spy_reset(*, wait: bool = False) -> None:
+        calls.append({"wait": wait})
+
+    import portunus.grpc.server as grpc_server_module
+
+    monkeypatch.setattr(grpc_server_module, "reset_signing_runtime", _spy_reset)
+
+    server = _FakeServer(stop_duration=0.0)
+    queue = _RecordingQueue(cancelled=0)
+    await stop_grpc_server(
+        _runtime(server=server, queue=queue),
+        grace_seconds=1,
+        flush_reserve_seconds=0.2,
+    )
+
+    assert calls == [{"wait": True}]
+
+
+@pytest.mark.asyncio
+async def test_hung_kms_teardown_cannot_push_exit_past_the_drain_deadline(
+    monkeypatch,
+):
+    """A wedged KMS.Sign thread makes ``shutdown(wait=True)`` join forever.
+
+    The teardown runs under the REMAINING drain budget; on timeout the
+    drain falls back to a non-blocking shutdown (no join) and proceeds —
+    a hung KMS can never push process exit past the ECS stopTimeout.
+    """
+    calls: list[dict] = []
+
+    def _hung_reset(*, wait: bool = False) -> None:
+        calls.append({"wait": wait})
+        if wait:
+            time.sleep(1.2)  # far past the remaining budget
+
+    import portunus.grpc.server as grpc_server_module
+
+    monkeypatch.setattr(grpc_server_module, "reset_signing_runtime", _hung_reset)
+
+    grace = 1
+
+    class _SlowQueue(_RecordingQueue):
+        """Consumes most of the deadline so the teardown budget is small."""
+
+        async def stop(self, *, drain_timeout: float) -> int:
+            await asyncio.sleep(min(0.8, drain_timeout))
+            return await super().stop(drain_timeout=drain_timeout)
+
+    server = _FakeServer(stop_duration=0.0)
+    queue = _SlowQueue(cancelled=0)
+
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await stop_grpc_server(
+        _runtime(server=server, queue=queue),
+        grace_seconds=grace,
+        flush_reserve_seconds=0.9,
+    )
+    elapsed = loop.time() - t0
+
+    # The blocking attempt timed out and the non-blocking fallback ran.
+    assert calls[0] == {"wait": True}
+    assert calls[-1] == {"wait": False}
+    # Exit was not held hostage by the hung join (1.2s sleep).
+    assert elapsed <= grace + 0.5, f"drain overran the deadline: {elapsed:.2f}s"
