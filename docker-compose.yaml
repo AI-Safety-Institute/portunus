@@ -15,11 +15,17 @@ services:
       app_network:
     healthcheck:
       # Portunus has no HTTP surface (FastAPI was removed; it serves only
-      # gRPC on :9000). Envoy still answers ``/ping`` on its listener (8888)
-      # with the auth/proc filters disabled per-route, so that's the smoke
-      # signal that the proxy task is up. Portunus' own liveness is the gRPC
-      # health service, probed by ECS via grpc_health_probe in prod.
-      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/ping | grep -qE '^(200)$'"]
+      # gRPC on :9000). Two probes, matching prod semantics:
+      #   /ping    — Envoy-liveness direct_response (auth/proc filters
+      #              disabled per-route); 200 as long as Envoy lives.
+      #   /healthz — the health_check filter gated on Envoy's ACTIVE gRPC
+      #              health check of Portunus (grpc.health.v1.Health "").
+      #              This is the ALB health-check target in prod; probing
+      #              it here validates the whole chain (Envoy hc filter →
+      #              active gRPC check → Portunus health servicer), so the
+      #              compose stack only reports healthy when Portunus is
+      #              actually SERVING — not merely when Envoy is up.
+      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/ping | grep -qE '^(200)$' && curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/healthz | grep -qE '^(200)$'"]
       interval: 15s
       timeout: 2s
       retries: 5

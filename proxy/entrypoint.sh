@@ -105,12 +105,31 @@ envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
 # Closure and reconnect via SDK — a clean 1001 close frame would need a
 # WASM filter; tracked as follow-up).
 #
-# ECS task stop is: ALB target deregistration (deregistration_delay, 10s)
-# → SIGTERM → stopTimeout → SIGKILL. DRAIN_TIME_S must stay comfortably
-# under stopTimeout (120s in the api-key-proxy CDK proxy stack, the
-# Fargate maximum) or Envoy is SIGKILL'd mid-drain. Streams longer than
-# the budget still get cut at the deadline — the drain bounds the damage,
-# it can't hold the task open indefinitely.
+# ECS task stop is: ALB target deregistration → wait deregistration_delay
+# → SIGTERM → stopTimeout → SIGKILL. Two platform values bracket this
+# drain, and BOTH must be sized for it or it silently does nothing:
+#
+#   * deregistration_delay (ALB target group) — the ALB severs remaining
+#     in-flight connections to the target when the delay elapses, and ECS
+#     only sends SIGTERM after it. platform-lib-cdk currently hardcodes
+#     10s ("faster deregistration"), so in prod every stream older than
+#     ~10s is cut by the ALB BEFORE this drain even starts; the drain
+#     then sees near-zero active work and exits promptly, looking clean
+#     while customers were cut upstream of Envoy. The delay must be
+#     raised to ≥ DRAIN_TIME_S for the proxy target groups (specced in
+#     the akp/platform-lib-cdk change set; see
+#     docs/cutover-landing-order.md). docker-compose drain tests cannot
+#     see this dependency — there is no ALB in compose.
+#   * stopTimeout (ECS container) — DRAIN_TIME_S must stay comfortably
+#     under it or Envoy is SIGKILL'd (137) mid-drain. The blue fleet
+#     (akp #136) sets 120s (the Fargate max) against the default
+#     DRAIN_TIME_S=60. NOTE the legacy fleet's stopTimeout is still 30s:
+#     shipping this entrypoint there (#35) without raising it SIGKILLs
+#     the drain at ~28s — the stopTimeout bump must travel with the
+#     legacy-ref bump.
+#
+# Streams longer than the budget still get cut at the deadline — the
+# drain bounds the damage, it can't hold the task open indefinitely.
 #
 # The admin listener is loopback-only (${ADMIN_PORT}, default 9901):
 # nothing off-task can reach it.
@@ -141,6 +160,7 @@ active_work() {
   wget -q -O - "${ADMIN}/stats?filter=downstream_cx_active|upstream_rq_active" 2>/dev/null \
     | awk -F': ' '
         $1 ~ /^http\.admin\./ { next }
+        $1 ~ /^cluster\.portunus_health_cluster\./ { next }
         $1 ~ /^http\..*\.downstream_cx_active$/ { s += $2 }
         $1 ~ /^cluster\..*\.upstream_rq_active$/ { s += $2 }
         END { printf "%d", s+0 }'
@@ -160,6 +180,19 @@ drain_and_quit() {
   echo "[entrypoint] drain done (active work: ${cx:-0}); stopping Envoy" >&2
   admin_post "/quitquitquit" || kill -TERM "$ENVOY_PID" 2>/dev/null
 }
+
+# Envoy version tripwire. #34/#35 exist because 1.31 SIGSEGVs on shutdown
+# under an in-flight AsyncClient stream (drain linger + lost audit tail),
+# and 1.31 boots this config cleanly — so a careless resolution of the
+# #31↔#34 Dockerfile FROM-line conflict would ship the bad version with
+# every health check green. The build asserts this too (proxy/Dockerfile);
+# this runtime copy catches an image swapped at the task-definition level.
+EXPECTED_ENVOY_MINOR="${EXPECTED_ENVOY_MINOR:-1.36}"
+if ! envoy --version | grep -q "/${EXPECTED_ENVOY_MINOR}\."; then
+  echo "[entrypoint] FATAL: running Envoy is not v${EXPECTED_ENVOY_MINOR}.x:" >&2
+  envoy --version >&2
+  exit 1
+fi
 
 envoy -c /envoy/envoy_subst.yaml \
   --log-level "${ENVOY_LOG_LEVEL:-info}" \

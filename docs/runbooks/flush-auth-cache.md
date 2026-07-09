@@ -30,6 +30,25 @@ flush once the TTL lapses.
 > Secrets Manager on its next request, briefly raising latency and AWS API load
 > on the hot path. Use it deliberately, not as routine hygiene.
 
+## ⚠️ Blast radius: `FLUSHDB` is cross-fleet during the cutover window
+
+For as long as the **legacy (REST) fleet and the blue (gRPC sidecar) fleet
+coexist** (from akp #136 until the akp #159 teardown), both fleets share the
+same ElastiCache **database**. Their cache *keys* are disjoint (legacy keys on
+`sha256(payload)`, blue on `sha256(target_host:payload)`), so the fleets never
+read each other's entries — but `FLUSHDB` does not respect key schemes: **a
+"blue" flush also cold-starts the legacy fleet's auth cache** (and vice versa),
+producing an STS + Secrets Manager re-auth burst across *all* providers on
+*both* fleets at once.
+
+That is usually acceptable for the scenarios above (key compromise wants
+everything gone anyway), but during a cutover incident, remember a flush hits
+the fleet you are rolling *back to* as well. If a scoped flush becomes a
+recurring need, the right fix is per-fleet cache namespacing (separate logical
+Redis DB index or a key prefix + `SCAN`-based deletion) — tracked as a
+follow-up; do not improvise a `KEYS`-pattern delete against the production
+cache on the hot path.
+
 ## Prerequisites
 
 - **ECS Exec enabled** on the Portunus service (`enableExecuteCommand: true`).
