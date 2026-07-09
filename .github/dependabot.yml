@@ -1,12 +1,19 @@
 # Keep GitHub Actions, Docker base images, and Python dependencies patched.
 # Actions are pinned to commit SHAs and images to digests; Dependabot bumps
 # the pins (and their version comments) automatically.
+#
+# The 7-day cooldown means releases are only proposed once they've been
+# public for a week, reducing exposure to compromised releases that are
+# typically yanked within days (matching the UV_EXCLUDE_NEWER=7d posture
+# used elsewhere at AISI).
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "docker"
     directories:
@@ -15,6 +22,8 @@ updates:
       - "/proxy/lib"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "uv"
     directories:
@@ -22,3 +31,5 @@ updates:
       - "/portunus"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
