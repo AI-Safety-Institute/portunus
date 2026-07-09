@@ -300,6 +300,41 @@ class GrpcConfig(BaseModel):
     )
 
 
+class SigningConfig(BaseModel):
+    """HTTP message-signing (KMS) throughput and memory bounds.
+
+    Requested by the signing/auth lane (see shared/FIX-COORDINATION.md):
+    ``signing_service`` reads these via ``config.signing`` (with matching
+    fallback defaults) to size the dedicated KMS.Sign executor and cap
+    concurrent buffered signing requests (mem-V2).
+
+    Attributes:
+        kms_executor_workers: Thread count of the dedicated KMS.Sign executor
+        max_concurrent: Cap on concurrent signing requests (semaphore)
+        acquire_timeout_s: How long a signing request waits for a slot before
+            being shed (fail-closed)
+    """
+
+    kms_executor_workers: int = Field(
+        default=16,
+        description="Thread count of the dedicated KMS.Sign executor",
+        ge=1,
+    )
+    max_concurrent: int = Field(
+        default=32,
+        description="Cap on concurrent signing requests (semaphore)",
+        ge=1,
+    )
+    acquire_timeout_s: float = Field(
+        default=2.0,
+        description=(
+            "How long a signing request waits for a semaphore slot before "
+            "being shed (fail-closed deny)"
+        ),
+        gt=0.0,
+    )
+
+
 class PortunusConfig(BaseModel):
     """Top-level Portunus configuration."""
 
@@ -319,6 +354,10 @@ class PortunusConfig(BaseModel):
     grpc: GrpcConfig = Field(
         default_factory=GrpcConfig,
         description="gRPC server configuration",
+    )
+    signing: SigningConfig = Field(
+        default_factory=SigningConfig,
+        description="KMS signing throughput / concurrency bounds",
     )
     log_level: str = Field(
         default="INFO",
@@ -444,6 +483,14 @@ def get_config() -> PortunusConfig:
         ),
     )
 
+    signing = SigningConfig(
+        kms_executor_workers=int(
+            os.environ.get("SIGNING_KMS_EXECUTOR_WORKERS", "16")
+        ),
+        max_concurrent=int(os.environ.get("SIGNING_MAX_CONCURRENT", "32")),
+        acquire_timeout_s=float(os.environ.get("SIGNING_ACQUIRE_TIMEOUT_S", "2.0")),
+    )
+
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -453,6 +500,7 @@ def get_config() -> PortunusConfig:
         aws=aws,
         firehose=firehose,
         grpc=grpc,
+        signing=signing,
     )
 
 
