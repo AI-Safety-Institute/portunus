@@ -143,7 +143,7 @@ Portunus's service endpoints (`/authorise`, `/log/{request_id}/...`, `/cache/flu
 
 The Envoy proxy already sends a shared secret with every call it makes to Portunus: `PORTUNUS_API_KEY`, carried in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`). Portunus itself does not validate it, so your deployment **must** enforce access in front of the service:
 
-- **Validate the shared-secret header before requests reach Portunus.** The reference deployment at AISI runs an authenticating reverse-proxy sidecar (nginx) in the Portunus service task: it rejects any request that doesn't carry the expected `x-api-key` value and forwards the rest (including WebSocket upgrades) to the app. Only the sidecar's port is exposed to the load balancer.
+- **Validate the shared-secret header before requests reach Portunus.** We recommend an authenticating reverse-proxy sidecar (e.g. nginx) in front of the service: reject any request that doesn't carry the expected `x-api-key` value and forward the rest (including WebSocket upgrades) to the app, exposing only the sidecar's port.
 - **And/or restrict network reachability** so that only the Envoy proxies (and trusted operational tooling, e.g. whatever calls `/cache/flush`) can reach the Portunus service at all.
 
 Do not expose Portunus directly to clients or the public internet.
