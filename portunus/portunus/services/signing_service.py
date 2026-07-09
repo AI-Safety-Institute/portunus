@@ -1,9 +1,13 @@
+import asyncio
 import base64
+import functools
 import hashlib
 import logging
+import weakref
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Callable, Literal, Optional, TypedDict
 
 import boto3
 from botocore.exceptions import ClientError
@@ -43,6 +47,136 @@ SignatureHeaders = TypedDict(
         "Signature": str,
     },
 )
+
+
+class SigningOverloadedError(Exception):
+    """Raised when the signing concurrency cap stayed saturated too long.
+
+    Callers should fail closed (deny the request — ideally 503) rather than
+    queue further: each waiting signing request pins its buffered body (up
+    to 32 MiB, Envoy ``with_request_body``) in memory, so shedding promptly
+    is what keeps a signing burst from exhausting memory.
+    """
+
+
+# Fallback sizing, used until fix-core lands the matching config fields
+# (``config.signing.*`` — see _signing_settings). Keep the two in sync.
+_DEFAULT_KMS_EXECUTOR_WORKERS = 16
+_DEFAULT_MAX_CONCURRENT_SIGNS = 32
+_DEFAULT_SIGN_ACQUIRE_TIMEOUT_S = 2.0
+
+
+def _signing_settings() -> tuple[int, int, float]:
+    """Resolve (executor_workers, max_concurrent, acquire_timeout_s).
+
+    Reads ``config.signing`` when present. The ``getattr`` indirection keeps
+    this module working (with the defaults above) until the config fields —
+    owned by ``config.py`` — are added:
+
+    - ``config.signing.kms_executor_workers`` (SIGNING_KMS_EXECUTOR_WORKERS)
+    - ``config.signing.max_concurrent`` (SIGNING_MAX_CONCURRENT)
+    - ``config.signing.acquire_timeout_s`` (SIGNING_ACQUIRE_TIMEOUT_S)
+    """
+    signing_cfg = getattr(config, "signing", None)
+    workers = int(
+        getattr(signing_cfg, "kms_executor_workers", _DEFAULT_KMS_EXECUTOR_WORKERS)
+    )
+    max_concurrent = int(
+        getattr(signing_cfg, "max_concurrent", _DEFAULT_MAX_CONCURRENT_SIGNS)
+    )
+    acquire_timeout = float(
+        getattr(signing_cfg, "acquire_timeout_s", _DEFAULT_SIGN_ACQUIRE_TIMEOUT_S)
+    )
+    return workers, max_concurrent, acquire_timeout
+
+
+# Dedicated executor for KMS.Sign so signing throughput is bounded by an
+# explicit knob, not the process-default ``asyncio.to_thread`` pool
+# (~min(32, cpu+4) threads shared with every other to_thread user): with a
+# slow KMS tail, signing bursts used to queue behind that tiny shared pool
+# and stack latency toward the 15s ext_authz signing timeout (customer
+# 504s). Threads are process-wide; the semaphore below is per event loop.
+_kms_executor: Optional[ThreadPoolExecutor] = None
+_signing_semaphores: (
+    "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]"
+) = weakref.WeakKeyDictionary()
+
+
+def _get_kms_executor() -> ThreadPoolExecutor:
+    global _kms_executor
+    if _kms_executor is None:
+        workers, _, _ = _signing_settings()
+        _kms_executor = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="kms-sign"
+        )
+    return _kms_executor
+
+
+def _get_signing_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _signing_semaphores.get(loop)
+    if semaphore is None:
+        _, max_concurrent, _ = _signing_settings()
+        semaphore = asyncio.Semaphore(max_concurrent)
+        _signing_semaphores[loop] = semaphore
+    return semaphore
+
+
+def reset_signing_runtime(*, wait: bool = False) -> None:
+    """Tear down the KMS executor + semaphores (shutdown / test isolation)."""
+    global _kms_executor
+    if _kms_executor is not None:
+        _kms_executor.shutdown(wait=wait, cancel_futures=True)
+        _kms_executor = None
+    _signing_semaphores.clear()
+
+
+async def sign_request_async(
+    req: "SignableRequest",
+    signing_key: SigningKey,
+    api_key: str,
+    user_credentials: AwsCredentials,
+    *,
+    sign_fn: Optional[Callable[..., SignatureHeaders]] = None,
+) -> SignatureHeaders:
+    """Bounded, off-loop signing: the async entrypoint for the signing pass.
+
+    Wraps a synchronous signer (:func:`sign_request` by default; servicer
+    tests inject fakes via ``sign_fn``) with the two bounds a signing burst
+    needs:
+
+    1. A per-event-loop semaphore capping concurrent signing requests.
+       Waiters that can't acquire within the timeout are shed with
+       :class:`SigningOverloadedError` (fail closed) instead of piling up —
+       each waiter pins its buffered request body (32 MiB Envoy buffer +
+       the CheckRequest copy here), so unbounded waiting is a memory
+       exhaustion vector (mem-V2).
+    2. A dedicated ``ThreadPoolExecutor`` for the blocking KMS round-trip,
+       so signing throughput is sized explicitly rather than by the shared
+       process-default pool.
+
+    Raises:
+        SigningOverloadedError: concurrency cap saturated for longer than
+            the acquire timeout; the caller must deny the request.
+    """
+    signer = sign_fn if sign_fn is not None else sign_request
+    _, _, acquire_timeout = _signing_settings()
+    semaphore = _get_signing_semaphore()
+    try:
+        async with asyncio.timeout(acquire_timeout):
+            await semaphore.acquire()
+    except TimeoutError:
+        raise SigningOverloadedError(
+            "Signing concurrency cap saturated; shedding request"
+        ) from None
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _get_kms_executor(),
+            functools.partial(signer, req, signing_key, api_key, user_credentials),
+        )
+    finally:
+        semaphore.release()
 
 
 def _get_region_from_arn(arn: str) -> str:

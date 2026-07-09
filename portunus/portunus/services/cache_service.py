@@ -18,6 +18,32 @@ from portunus.services.state_service import StateService
 logger = logging.getLogger("api.access")
 
 
+def normalise_target_host(host: Optional[str]) -> Optional[str]:
+    """Canonicalise a target host for keying and host-restriction checks.
+
+    DNS names are case-insensitive and ``:443`` is the implicit HTTPS
+    default (every proxied provider is HTTPS-only), so ``API.Host:443`` and
+    ``api.host`` are the same endpoint and should share one cache entry and
+    pass the same host-restriction check. Only ``:443`` is stripped — any
+    other explicit port is preserved as a distinct endpoint.
+
+    Used by BOTH :meth:`CacheService.generate_cache_key` and
+    ``auth_service.validate_and_extract_api_key`` so the cache can never
+    admit a host variant the validator would reject (they must stay in
+    lockstep — normalising only the cache key would let a cache hit bypass
+    a stricter miss-path check).
+
+    ``None`` (and ``""``) pass through unchanged so "no host" keeps its
+    meaning.
+    """
+    if not host:
+        return host
+    normalised = host.strip().lower()
+    if normalised.endswith(":443"):
+        normalised = normalised[: -len(":443")]
+    return normalised
+
+
 class CacheService:
     """
     Service for caching and retrieving authentication responses.
@@ -45,9 +71,23 @@ class CacheService:
         cache-miss. Without ``target_host`` in the key, a bearer authorised
         for provider A could re-use a cached api_key when sent through a
         proxy fronting provider B — silently bypassing host enforcement.
+
+        The two components are hashed independently before the outer hash
+        (rather than joined with a delimiter) so no (host, payload) pair can
+        collide with another by shifting bytes across an unescaped separator
+        — e.g. ``("a:b", "c")`` vs ``("a", "b:c")`` under the previous
+        ``f"{host}:{payload}"`` scheme. The host is normalised (lower-case,
+        default ``:443`` stripped) so equivalent hosts share one entry; the
+        same normalisation is applied to the miss-path host-restriction
+        check in ``validate_and_extract_api_key``, keeping the fail-closed
+        recheck consistent with the key.
         """
-        composite = f"{target_host or ''}:{payload}"
-        return hashlib.sha256(composite.encode("utf-8")).hexdigest()
+        host_component = normalise_target_host(target_host) or ""
+        composite = (
+            hashlib.sha256(host_component.encode("utf-8")).digest()
+            + hashlib.sha256(payload.encode("utf-8")).digest()
+        )
+        return hashlib.sha256(composite).hexdigest()
 
     async def get_cached_auth_result(
         self, payload: str, target_host: Optional[str] = None

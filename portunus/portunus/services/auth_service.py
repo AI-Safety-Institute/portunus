@@ -27,8 +27,9 @@ from portunus.models import (
     SigningKey,
 )
 from portunus.services.arn_service import parse_identity_from_arn
-from portunus.services.cache_service import CacheService
+from portunus.services.cache_service import CacheService, normalise_target_host
 from portunus.services.secrets_service import SecretsService
+from portunus.services.state_service import StateService
 
 logger = logging.getLogger("api.access")
 
@@ -40,7 +41,13 @@ def validate_and_extract_api_key(
 
     Plaintext secrets pass through with no validation. JSON secrets that
     declare a ``host`` field are gated: the proxy-supplied ``target_host``
-    must match exactly, otherwise raises :class:`AuthenticationError`.
+    must match the secret's host, otherwise raises
+    :class:`AuthenticationError`. Both sides are canonicalised with
+    :func:`normalise_target_host` (lower-case, default ``:443`` stripped)
+    before comparison — the SAME normalisation
+    ``CacheService.generate_cache_key`` applies, so the set of hosts a
+    cache hit admits is exactly the set this fail-closed miss-path check
+    accepts. Any non-equivalent host still fails closed.
 
     Returns ``(api_key, signing_key)`` — ``signing_key`` is set only for
     request-signing tenants.
@@ -52,7 +59,7 @@ def validate_and_extract_api_key(
             raise AuthenticationError(
                 "API key has host restriction but target host unknown"
             )
-        if target_host != secret.host:
+        if normalise_target_host(target_host) != normalise_target_host(secret.host):
             logger.warning(f"Host mismatch: proxy={target_host}, secret={secret.host}")
             raise AuthenticationError("API key is not valid for target host")
         logger.info(f"Target host validation passed for {target_host}")
@@ -79,9 +86,26 @@ class AuthService:
         secrets_service: Optional[SecretsService] = None,
         cache_service: Optional[CacheService] = None,
     ):
-        """Initialize the AuthService."""
-        self.secrets_service = secrets_service or SecretsService()
+        """Initialize the AuthService.
+
+        When no ``secrets_service`` is injected and the cache service is
+        backed by a real :class:`StateService`, the default
+        :class:`SecretsService` (and this service's own STS calls, which
+        share its ``boto_session``) use the StateService's pooled boto
+        session: AWS clients are then created once per (service, credential
+        set) and reused, instead of paying a fresh aiohttp pool + TLS
+        handshake (~200ms cold, twice) on every auth cache-miss.
+        """
         self.cache_service = cache_service or CacheService()
+        if secrets_service is None:
+            state_service = getattr(self.cache_service, "state_service", None)
+            if isinstance(state_service, StateService):
+                secrets_service = SecretsService(
+                    boto_session=state_service.pooled_boto_session()
+                )
+            else:
+                secrets_service = SecretsService()
+        self.secrets_service = secrets_service
         self.boto_session = self.secrets_service.boto_session
 
     async def get_aws_identity(
