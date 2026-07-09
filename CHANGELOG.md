@@ -34,10 +34,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (`EXPECTED_ENVOY_MINOR`, default `1.36`), so a careless resolution of
   the #31↔#34 `FROM`-line conflict back to the shutdown-SIGSEGV-prone
   1.31 fails loudly instead of shipping.
-- `docs/cutover-landing-order.md` — consolidated landing order,
-  pre-cutover checklist (akp #154 sentinel dependency + tripwire,
-  `deregistration_delay`, `container_dependencies`), honest WS
-  close-code semantics, and the real rollback procedure.
+- `docs/cutover-landing-order.md` — the authoritative landing order,
+  per-environment pre-flip checklist (ETL `num_chunks=0` sentinel —
+  merged via akp #164/#166 — plus the akp #177 topology gate:
+  `deregistration_delay`, `container_dependencies`, `/healthz`),
+  per-provider bake plan, honest WS close-code semantics, and the real
+  rollback procedure.
 
 ### Security
 - Supply-chain pinning re-applied to the rewritten Dockerfiles (#31
