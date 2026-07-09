@@ -113,6 +113,11 @@ class _StreamState:
     # the truncated counters / WSSummaryRecord rather than replaying a
     # corrupt prefix.
     pre_101_poisoned: bool = False
+    # Set when a direction's frame parser desynced mid-session (malformed
+    # frame or deflate-cap abort). The per-direction truncated counter is
+    # bumped once at desync time so the WSSummaryRecord reflects that the
+    # remainder of that direction went unobserved.
+    parser_desynced: bool = False
     response_headers_seen: bool = False
     summary_emitted: bool = False
     audit_metadata_published: bool = False
@@ -204,7 +209,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             await self._on_request_headers(state, request, timestamp)
             yield _empty_headers_response(request_side=True)
         elif request.HasField("request_body"):
-            self._on_body_chunk(
+            await self._on_body_chunk(
                 state,
                 request.request_body,
                 direction=Direction.REQUEST,
@@ -217,7 +222,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             await self._on_response_headers(state, request.response_headers, timestamp)
             yield _empty_headers_response(request_side=False)
         elif request.HasField("response_body"):
-            self._on_body_chunk(
+            await self._on_body_chunk(
                 state,
                 request.response_body,
                 direction=Direction.RESPONSE,
@@ -306,7 +311,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             state.upstream_extensions = ext
             state.observer = build_observer(response_extensions_header=ext)
             state.response_headers_seen = True
-            self._replay_pre_101(state, timestamp)
+            await self._replay_pre_101(state, timestamp)
 
         await self._queue.submit_blocking(
             PublishTask(
@@ -337,7 +342,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             )
         )
 
-    def _on_body_chunk(
+    async def _on_body_chunk(
         self,
         state: _StreamState,
         msg: proc_pb2.HttpBody,
@@ -354,11 +359,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             if not state.response_headers_seen:
                 self._buffer_pre_101(state, direction, msg.body)
                 return
-            if state.observer is not None:
-                for frame in state.observer.observe(
-                    direction=direction, chunk=msg.body
-                ):
-                    self._submit_frame(state, frame, timestamp)
+            await self._observe_ws_chunk(state, direction, msg.body, timestamp)
             return
 
         # One ext_proc HttpBody message may split into several Firehose-sized
@@ -372,7 +373,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         last_index = len(body_chunks) - 1
         for index, body_chunk in enumerate(body_chunks):
             chunk_id = self._next_chunk_id(state, direction)
-            self._submit_body_record(
+            await self._submit_body_record(
                 state=state,
                 direction=direction,
                 body_bytes=body_chunk,
@@ -380,6 +381,42 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 chunk_id=chunk_id,
                 label=f"{direction.value}_body",
                 final_chunk=msg.end_of_stream and index == last_index,
+            )
+
+    async def _observe_ws_chunk(
+        self,
+        state: _StreamState,
+        direction: Direction,
+        chunk: bytes,
+        timestamp: str,
+    ) -> None:
+        """Feed one WS byte chunk through the observer; account parse failures.
+
+        A parse error (malformed frame, deflate zip-bomb cap) desyncs the
+        wsproto parser and blinds the rest of that direction. Bump the
+        per-direction truncated counter ONCE at the transition so the
+        WSSummaryRecord reflects the loss — matching how the pre-101 poison
+        path already accounts its gap — instead of reporting clean counts
+        for a session that silently stopped being observed.
+        """
+        observer = state.observer
+        if observer is None:
+            return
+        already_desynced = observer.desynced(direction)
+        for frame in observer.observe(direction=direction, chunk=chunk):
+            await self._submit_frame(state, frame, timestamp)
+        if not already_desynced and observer.desynced(direction):
+            if direction == Direction.REQUEST:
+                state.truncated_client_frames += 1
+            else:
+                state.truncated_server_frames += 1
+            state.parser_desynced = True
+            logger.warning(
+                "WS frame parser desynced on stream %s (%s direction); "
+                "remaining frames in this direction are unobservable — "
+                "counted as truncated in the WS summary",
+                state.stream_id,
+                direction.value,
             )
 
     def _buffer_pre_101(
@@ -421,7 +458,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         state.pre_101_buffer.append((direction, chunk))
         state.pre_101_bytes += len(chunk)
 
-    def _replay_pre_101(self, state: _StreamState, timestamp: str) -> None:
+    async def _replay_pre_101(self, state: _StreamState, timestamp: str) -> None:
         """Feed buffered pre-101 bytes through the just-built observer."""
         if state.pre_101_poisoned:
             # Buffer was cleared at poison time; nothing safe to replay.
@@ -431,12 +468,11 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             state.pre_101_bytes = 0
             return
         for direction, chunk in state.pre_101_buffer:
-            for frame in state.observer.observe(direction=direction, chunk=chunk):
-                self._submit_frame(state, frame, timestamp)
+            await self._observe_ws_chunk(state, direction, chunk, timestamp)
         state.pre_101_buffer.clear()
         state.pre_101_bytes = 0
 
-    def _submit_frame(
+    async def _submit_frame(
         self,
         state: _StreamState,
         frame: ObservedFrame,
@@ -466,7 +502,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         drop_recorded = False
         for body_chunk in chunk_body_data(frame.payload) or [b""]:
             chunk_id = self._next_chunk_id(state, frame.direction)
-            accepted = self._submit_body_record(
+            accepted = await self._submit_body_record(
                 state=state,
                 direction=frame.direction,
                 body_bytes=body_chunk,
@@ -503,7 +539,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         state.response_frame_index += 1
         return frame_index
 
-    def _submit_body_record(
+    async def _submit_body_record(
         self,
         *,
         state: _StreamState,
@@ -542,6 +578,9 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     frame_index=frame_index,
                 ),
                 label=label,
+                # The closure retains the raw chunk until the worker flushes
+                # it — charge it against the queue's byte budget.
+                size_bytes=len(body_bytes),
             )
         )
         if not accepted:
@@ -554,13 +593,20 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 len(body_bytes),
             )
             # Sentinel body record (empty body, ``dropped=True``, same
-            # chunk_id) so downstream ETL sees an explicit gap marker
-            # rather than a silent chunk_id discontinuity. Also droppable:
-            # the sentinel is tiny so under normal back-pressure it lands
-            # where the full record didn't. If even the sentinel drops
-            # (true queue saturation), the chunk_id gap + queue counters
-            # + this log line remain as the fallback signal.
-            self._queue.submit_droppable(
+            # chunk_id) so downstream ETL sees an explicit gap marker rather
+            # than a silent chunk_id discontinuity. Submitted BLOCKING (with
+            # a timeout): the droppable path rejects at the exact condition
+            # the sentinel exists to signal (qsize >= body_capacity), so a
+            # droppable sentinel almost never landed under real saturation —
+            # 99 drops / 0 markers in S3 in the drop-path load test. The
+            # blocking path uses the reserved metadata headroom, so the tiny
+            # sentinel survives body saturation; the timeout bounds the wait
+            # so a wedged sink can't stall the ext_proc stream. If even this
+            # times out (true full-queue saturation), the queue counts it on
+            # ``sentinel_dropped_total`` — NOT ``dropped_total``, which
+            # would double-count one logical lost chunk — and the chunk_id
+            # gap + counters + this log line remain the fallback signal.
+            await self._queue.submit_blocking(
                 PublishTask(
                     build=lambda chunk_id=chunk_id: build_method(  # type: ignore[misc]
                         request_id=state.request_id,
@@ -573,7 +619,9 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                         frame_index=frame_index,
                     ),
                     label=f"{label}_drop_sentinel",
-                )
+                ),
+                timeout=config.grpc.drop_sentinel_timeout_seconds,
+                sentinel=True,
             )
         return accepted
 
@@ -703,28 +751,120 @@ def _header_value(h) -> str:
     return _header_value_bytes(h).decode("utf-8", errors="replace")
 
 
+# Credential-carrying headers that must NEVER reach a captured audit record,
+# whatever the deployment config. This is PR #32's security-reviewed denylist
+# (the reference set — regression-tested as a superset check): note that
+# ``authorization`` is a hardcoded literal here, NOT derived from
+# ``config.api_key_header``, so it stays redacted even when a deployment
+# configures a different API-key header (the #19 rewrite regressed exactly
+# that, plus the four provider-specific key headers below).
 _REDACTED_HEADERS: frozenset[str] = frozenset(
     {
-        config.api_key_header.lower(),
-        "x-api-key",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",  # Anthropic
+        "api-key",  # Azure OpenAI
+        "x-goog-api-key",  # Google
+        "xi-api-key",  # ElevenLabs
+        "x-hume-api-key",  # Hume
         # Session credentials and second-factor bearer tokens — clients
         # can ship these alongside the api-key header.
         "cookie",
         "set-cookie",
-        "proxy-authorization",
         "x-amz-security-token",
     }
 )
+
+# Allowlist for captured ``raw_headers``: only headers known to be safe AND
+# analytics-relevant are archived. A denylist alone leaks by omission — every
+# newly onboarded provider's credential header is captured until someone
+# remembers to extend the list — so the allowlist is the primary filter and
+# the denylist above is the belt-and-braces backstop (and the regression
+# anchor against #32's reviewed set). Bodies are full-capture by design;
+# this applies to headers only.
+_CAPTURED_HEADER_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # HTTP/2 pseudo-headers (method/path/status are what the ETL reads).
+        ":method",
+        ":path",
+        ":authority",
+        ":scheme",
+        ":status",
+        # Standard analytics-relevant request/response headers — the fields
+        # RequestHeadersRecord / ResponseHeadersRecord consumers decode.
+        "host",
+        "content-type",
+        "content-length",
+        "content-encoding",
+        "transfer-encoding",
+        "accept",
+        "accept-encoding",
+        "user-agent",
+        "server",
+        "date",
+        "via",
+        "vary",
+        "cache-control",
+        "retry-after",
+        # Correlation / request ids.
+        "x-request-id",
+        "request-id",
+        "x-amzn-requestid",
+        "x-amzn-trace-id",
+        "cf-ray",
+        # WebSocket upgrade mechanics (``sec-websocket-extensions`` is also
+        # read back by _on_response_headers to build the frame observer).
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-accept",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-protocol",
+        # HTTP message-signature artefacts. These are Portunus's OWN signing
+        # outputs (ext_authz strips client-forged copies before ext_proc
+        # observes), captured for signing-path auditability.
+        "content-digest",
+        "signature",
+        "signature-input",
+        # Provider metadata.
+        "anthropic-version",
+    }
+)
+
+# Prefix-allowlisted header families (still subject to the denylist +
+# configured api_key_header backstop).
+_CAPTURED_HEADER_ALLOWED_PREFIXES: tuple[str, ...] = (
+    "x-portunus-",  # our own control-plane headers (debug-id, signing flag)
+    "anthropic-ratelimit-",
+    "x-ratelimit-",
+)
+
+
+def _is_captured_header(name: str) -> bool:
+    """Whether a (lowercased) header name may appear in captured raw_headers.
+
+    Reads ``config.api_key_header`` at call time (not import time) so the
+    configured key header is redacted whatever it is set to — and so tests
+    can exercise arbitrary ``API_KEY_HEADER`` values.
+    """
+    if name in _REDACTED_HEADERS or name == config.api_key_header.lower():
+        return False
+    return name in _CAPTURED_HEADER_ALLOWLIST or name.startswith(
+        _CAPTURED_HEADER_ALLOWED_PREFIXES
+    )
 
 
 def _headers_to_dict(http_headers: base_pb2.HeaderMap) -> dict[str, str]:
     """Flatten Envoy's HeaderMap into a case-folded dict of base64 values.
 
-    Drops headers in :data:`_REDACTED_HEADERS` (the configured API-key
-    header plus ``x-api-key``) — ext_proc observes headers *after*
+    Captures only headers admitted by :func:`_is_captured_header`: the
+    known-safe allowlist, minus the :data:`_REDACTED_HEADERS` denylist and
+    the configured ``api_key_header`` — ext_proc observes headers *after*
     ext_authz has rewritten them to the real upstream provider key, so
-    publishing them verbatim would archive customer secrets to Firehose.
-    Matches the legacy Lua filter's exclusion on ``api_key_header``.
+    publishing credentials verbatim would archive customer secrets to
+    Firehose. An unknown header (e.g. a newly onboarded provider's bespoke
+    key header) is therefore dropped by default rather than leaked.
 
     Base64 operates on raw bytes (not UTF-8-decoded text) so non-UTF-8
     values survive the wire round-trip losslessly. Glue ETL calls
@@ -733,7 +873,7 @@ def _headers_to_dict(http_headers: base_pb2.HeaderMap) -> dict[str, str]:
     return {
         h.key.lower(): base64.b64encode(_header_value_bytes(h)).decode("ascii")
         for h in http_headers.headers
-        if h.key.lower() not in _REDACTED_HEADERS
+        if _is_captured_header(h.key.lower())
     }
 
 

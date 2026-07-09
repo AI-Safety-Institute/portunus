@@ -220,6 +220,70 @@ class GrpcConfig(BaseModel):
         description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
     )
+    drain_flush_reserve_seconds: float = Field(
+        default=5.0,
+        description=(
+            "Slice of the SIGTERM grace reserved for flushing the publish "
+            "queue after the gRPC stream drain. Envoy holds ext_proc streams "
+            "open for its own (longer) drain, so ``server.stop`` consumes "
+            "its whole budget on every busy stop; without a reserve the "
+            "queue would get a 0-second flush window and cancel every "
+            "buffered audit record even with a healthy sink."
+        ),
+        ge=0.0,
+    )
+    publish_queue_maxsize: int = Field(
+        default=10_000,
+        description="Publish queue record-count capacity (bodies + metadata)",
+        ge=1,
+    )
+    publish_queue_body_capacity: int = Field(
+        default=9_000,
+        description=(
+            "Record-count soft cap for droppable body submits; the headroom "
+            "up to ``publish_queue_maxsize`` is reserved for blocking "
+            "header/metadata/sentinel submits."
+        ),
+        ge=0,
+    )
+    publish_queue_max_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        description=(
+            "Byte budget for raw body payloads retained by queued (and "
+            "in-flight) publish tasks. Body submits drop once the budget is "
+            "hit, whatever the record count — the record-count cap alone "
+            "allows ~6.4 GiB of retained chunks (10k × ~750 KB), which "
+            "drives the process into its cgroup OOM kill. Size this with "
+            "headroom: building a record adds ~33% (base64) transiently."
+        ),
+        ge=1,
+    )
+    drop_sentinel_timeout_seconds: float = Field(
+        default=1.0,
+        description=(
+            "How long the body-drop sentinel submit may wait for queue "
+            "headroom. The sentinel uses the blocking (reserved-headroom) "
+            "path so it survives the very saturation it reports; the "
+            "timeout bounds the wait so a wedged sink cannot stall the "
+            "ext_proc stream indefinitely."
+        ),
+        ge=0.0,
+    )
+    health_check_interval_seconds: float = Field(
+        default=10.0,
+        description=(
+            "Interval for the dependency (Redis) health probe that drives "
+            "the gRPC health status. 0 disables the monitor. A Portunus "
+            "that is SERVING but would deny every Check (Redis down) must "
+            "fail its health probe rather than 403 traffic indefinitely."
+        ),
+        ge=0.0,
+    )
+    health_check_timeout_seconds: float = Field(
+        default=2.0,
+        description="Per-probe timeout for the dependency health check",
+        gt=0.0,
+    )
     proxy_api_key: str = Field(
         default="",
         description=(
@@ -352,6 +416,27 @@ def get_config() -> PortunusConfig:
         ),
         graceful_shutdown_seconds=int(
             os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
+        ),
+        drain_flush_reserve_seconds=float(
+            os.environ.get("GRPC_DRAIN_FLUSH_RESERVE_SECONDS", "5.0")
+        ),
+        publish_queue_maxsize=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_MAXSIZE", "10000")
+        ),
+        publish_queue_body_capacity=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_BODY_CAPACITY", "9000")
+        ),
+        publish_queue_max_bytes=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_MAX_BYTES", str(256 * 1024 * 1024))
+        ),
+        drop_sentinel_timeout_seconds=float(
+            os.environ.get("GRPC_DROP_SENTINEL_TIMEOUT_SECONDS", "1.0")
+        ),
+        health_check_interval_seconds=float(
+            os.environ.get("GRPC_HEALTH_CHECK_INTERVAL_SECONDS", "10.0")
+        ),
+        health_check_timeout_seconds=float(
+            os.environ.get("GRPC_HEALTH_CHECK_TIMEOUT_SECONDS", "2.0")
         ),
         proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
         proxy_api_key_optional=(
