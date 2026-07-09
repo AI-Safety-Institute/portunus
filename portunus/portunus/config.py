@@ -259,23 +259,40 @@ class GrpcConfig(BaseModel):
         ge=1,
     )
     drop_sentinel_timeout_seconds: float = Field(
-        default=1.0,
+        default=0.25,
         description=(
             "How long the body-drop sentinel submit may wait for queue "
             "headroom. The sentinel uses the blocking (reserved-headroom) "
             "path so it survives the very saturation it reports; the "
             "timeout bounds the wait so a wedged sink cannot stall the "
-            "ext_proc stream indefinitely."
+            "ext_proc Process coroutine for long (this wait happens inline "
+            "on the stream's read loop, once per dropped chunk — keep it "
+            "short)."
         ),
         ge=0.0,
+    )
+    publish_blocking_timeout_seconds: float = Field(
+        default=5.0,
+        description=(
+            "Bound on every blocking publish submit issued from the "
+            "ext_proc stream path (headers, trailers, metadata, WS "
+            "summary). With a wedged sink the queue never drains; an "
+            "unbounded submit would pin the Process coroutine (and the "
+            "drain's WS-summary flush) forever. On timeout the record is "
+            "dropped and counted (dropped_total + warning) — observable "
+            "loss instead of a wedged stream/drain."
+        ),
+        gt=0.0,
     )
     health_check_interval_seconds: float = Field(
         default=10.0,
         description=(
             "Interval for the dependency (Redis) health probe that drives "
-            "the gRPC health status. 0 disables the monitor. A Portunus "
-            "that is SERVING but would deny every Check (Redis down) must "
-            "fail its health probe rather than 403 traffic indefinitely."
+            "the 'readiness' gRPC health service. 0 disables the monitor "
+            "(readiness then reports SERVING unconditionally). A Portunus "
+            "that is alive but would deny every Check (Redis down) must "
+            "leave ALB rotation via readiness — while its liveness stays "
+            "SERVING so ECS does not recycle the task."
         ),
         ge=0.0,
     )
@@ -283,6 +300,16 @@ class GrpcConfig(BaseModel):
         default=2.0,
         description="Per-probe timeout for the dependency health check",
         gt=0.0,
+    )
+    health_check_failure_threshold: int = Field(
+        default=3,
+        description=(
+            "Consecutive dependency-probe failures before the 'readiness' "
+            "health service flips NOT_SERVING (debounce — a single slow "
+            "Redis ping must not pull the task from rotation). Recovery is "
+            "immediate on the first successful probe."
+        ),
+        ge=1,
     )
     proxy_api_key: str = Field(
         default="",
@@ -469,13 +496,19 @@ def get_config() -> PortunusConfig:
             os.environ.get("GRPC_PUBLISH_QUEUE_MAX_BYTES", str(256 * 1024 * 1024))
         ),
         drop_sentinel_timeout_seconds=float(
-            os.environ.get("GRPC_DROP_SENTINEL_TIMEOUT_SECONDS", "1.0")
+            os.environ.get("GRPC_DROP_SENTINEL_TIMEOUT_SECONDS", "0.25")
+        ),
+        publish_blocking_timeout_seconds=float(
+            os.environ.get("GRPC_PUBLISH_BLOCKING_TIMEOUT_SECONDS", "5.0")
         ),
         health_check_interval_seconds=float(
             os.environ.get("GRPC_HEALTH_CHECK_INTERVAL_SECONDS", "10.0")
         ),
         health_check_timeout_seconds=float(
             os.environ.get("GRPC_HEALTH_CHECK_TIMEOUT_SECONDS", "2.0")
+        ),
+        health_check_failure_threshold=int(
+            os.environ.get("GRPC_HEALTH_CHECK_FAILURE_THRESHOLD", "3")
         ),
         proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
         proxy_api_key_optional=(

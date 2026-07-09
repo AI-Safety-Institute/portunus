@@ -609,3 +609,32 @@ async def test_sentinel_submit_timeout_counts_sentinel_dropped_not_dropped() -> 
     assert queue.sentinel_dropped_total == 1
     assert queue.dropped_total == 0
     assert queue.submitted_total == 1  # the timed-out sentinel is not a record
+
+
+@pytest.mark.asyncio
+async def test_reconcile_alarms_when_accounted_exceeds_submitted(caplog) -> None:
+    """Over-accounting (accounted > submitted) is alarmed, not swallowed.
+
+    The positive direction (unaccounted records) is repaired into
+    ``cancelled_total``; the negative direction means a double-count bug —
+    every published/dropped figure becomes untrustworthy — so ``stop()``
+    must emit a metric-filterable ERROR instead of silently returning 0.
+    """
+    queue = _queue(maxsize=10, num_workers=1)
+    assert queue.submit_droppable(_noop_task()) is True
+    # Simulate a double-count defect: dropped bumped for a record that was
+    # also accepted (and will be published).
+    queue._dropped_total += 2  # noqa: SLF001 — fault injection
+
+    await queue.start()
+    with caplog.at_level("ERROR"):
+        cancelled = await queue.stop(drain_timeout=2.0)
+
+    assert cancelled == 0  # nothing really lost; nothing "repaired"
+    mismatch = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) == "audit_counter_mismatch"
+    ]
+    assert mismatch, "expected the audit_counter_mismatch ERROR"
+    assert getattr(mismatch[-1], "over_accounted", None) == 2
