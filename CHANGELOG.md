@@ -8,14 +8,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - `/healthz` Envoy endpoint for the ALB health check, served by the
   `envoy.filters.http.health_check` filter and gated on an **active gRPC
-  health check** of Portunus (`grpc.health.v1.Health`, overall `""`
-  service) via a dedicated `portunus_health_cluster`. Unlike `/ping`
-  (Envoy-liveness direct_response, unchanged), `/healthz` goes 503 when
-  Portunus is dead, unreachable, reporting NOT_SERVING (including
-  dependency/Redis self-check failures), or draining — so the ALB pulls
-  a broken task in seconds instead of 403ing its traffic share until the
-  ~105s ECS container probe fires. The akp ALB target-group health check
-  must move from `/ping` to `/healthz` (see `shared/akp-changes.md`).
+  health check** of Portunus's **`"readiness"`** health service
+  (`grpc.health.v1.Health`) via a dedicated `portunus_health_cluster`.
+  Unlike `/ping` (Envoy-liveness direct_response, unchanged), `/healthz`
+  goes 503 when Portunus is dead, unreachable, reporting readiness
+  NOT_SERVING (dependency/Redis self-check failures, debounced), or
+  draining — so the ALB pulls a broken task in seconds instead of 403ing
+  its traffic share until the ~105s ECS container probe fires.
+  **Liveness/readiness split**: the overall `""` service is liveness only
+  (listener up, not draining; Redis-independent) and remains the ECS
+  `grpc_health_probe` target — a correlated Redis outage pulls tasks from
+  ALB rotation but never ECS-recycles the fleet, and the akp #177
+  Envoy→Portunus container dependency can't deadlock on Redis. The akp
+  ALB target-group health check must move from `/ping` to `/healthz`
+  (see `shared/akp-changes.md` / akp #177).
 - Dedicated `portunus_extproc_cluster` for the ext_proc (audit) filter.
   ext_authz and ext_proc previously shared `portunus_grpc_cluster` and
   its circuit-breaker budget (`max_requests: 2048`), so a wedged audit

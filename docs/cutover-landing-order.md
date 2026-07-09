@@ -56,11 +56,26 @@ runbook MUST include an explicit "verify akp #154 is deployed to this
 environment" step, and a first-hour canary alarm on body-record ingest rate
 per cut-over provider (>X% drop vs pre-flip baseline).
 
-### Platform changes that must land before the bake
+### Platform changes that must land before the bake — akp #177 is the gate
 
-See `shared/akp-changes.md` (akp/platform-lib-cdk change spec) for the precise
-changes. Summary — without these the drain and detection work in this repo is
-inert in prod:
+The platform-side fixes exist ONLY in the **DRAFT akp PR #177**
+(`AI-Safety-Institute/api-key-proxy#177`, branch
+`danl/portunus-proxy-ops-hardening`, based on #136's branch). Until #177 is
+**merged and deployed** to an environment, none of the drain/detection work in
+this repo functions there — the 10s deregistration delay still cuts every
+stream, containers still stop simultaneously, and the ALB still health-checks
+`/ping` (Envoy liveness only).
+
+> **HARD LANDING GATE: do not set `CUTOVER` for ANY provider in an
+> environment until akp #177 is merged (or folded into #136) and deployed to
+> that environment.** Preferred: fold #177's commits into #136 itself so the
+> blue fleet cannot exist without them — a #136-without-#177 deploy is exactly
+> the topology every reproduced C3 failure ran against. Add "verify #177
+> content deployed (task def has Envoy→Portunus DependsOn + target group has
+> `deregistration_delay=120` + health check path `/healthz`)" to the flip
+> runbook alongside the #154 check in §2.
+
+See `shared/akp-changes.md` for the precise change spec. Summary:
 
 - **ALB `deregistration_delay` ≥ `DRAIN_TIME_S`** (60–120s) on the proxy
   target groups. platform-lib-cdk hardcodes 10s and ECS deregisters *before*
@@ -70,10 +85,16 @@ inert in prod:
   ECS stops Envoy *first* and Portunus only after Envoy exits. Without it both
   get SIGTERM simultaneously: Portunus exits at grace (~30s) while Envoy drains
   to 60s → the drained tail is proxied *unobserved* (silent audit gap) and
-  mid-drain requests 403.
+  mid-drain requests 403. Safe to depend on because the ECS liveness probe
+  targets the Redis-independent `""` health service (below).
 - **ALB health check → `/healthz`** (not `/ping`): `/healthz` is gated on
-  Portunus's actual gRPC health, so a dead — or SERVING-but-denying
-  (Redis-down) — Portunus is pulled from rotation in seconds.
+  Portunus's **`"readiness"`** gRPC health service (Redis-derived, debounced),
+  so a dead — or SERVING-but-denying (Redis-down) — Portunus is pulled from
+  ALB rotation in seconds. **Liveness/readiness are split deliberately**: the
+  ECS container probe (`grpc_health_probe`, service `""`) checks liveness
+  only (listener up, not draining, Redis-independent), so a correlated Redis
+  outage takes the fleet out of rotation but does NOT ECS-recycle it — which
+  would otherwise deadlock against the container dependency above.
 - **Publish-queue flush-reserve + byte-bounding, redaction-denylist
   restoration** (portunus-side, this repo) and a **task-stop disruption test**
   asserting Portunus-first stop order and the observed WS close code.
