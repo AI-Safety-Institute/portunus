@@ -51,6 +51,8 @@ from portunus.services.auth_service import AuthService
 from portunus.services.signing_service import (
     SignableRequest,
     SignatureHeaders,
+    SigningOverloadedError,
+    sign_request_async,
 )
 
 logger = logging.getLogger("api.access")
@@ -256,15 +258,18 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                     request, headers, content_digest, target_host
                 )
                 # ``sign_request`` is sync boto3 (KMS.Sign is a blocking
-                # HTTPS round-trip). Offload to a worker thread so the
-                # event loop stays free for other ext_authz / ext_proc
-                # streams while KMS round-trips (~50ms p50, &gt;1s tail).
-                signature_headers = await asyncio.to_thread(
-                    self._sign,
+                # HTTPS round-trip). ``sign_request_async`` offloads it to a
+                # dedicated, sized KMS executor (so signing throughput isn't
+                # capped by the shared default pool) behind a concurrency
+                # semaphore (so a signing burst can't pile up buffered 32 MiB
+                # bodies and exhaust memory — mem-V2). ``sign_fn`` keeps the
+                # sync-signer injection seam for test fakes.
+                signature_headers = await sign_request_async(
                     signable,
                     auth_result.signing_key,
                     auth_result.api_key,
                     payload.credentials,
+                    sign_fn=self._sign,
                 )
             except (ValidationError, ValueError) as e:
                 # ValueError: target_host missing (fail-closed, never sign a
@@ -302,6 +307,17 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         except FetchSecretError as e:
             return _denied(
                 code=e.http_status_code, body=e.message, request_id=request_id
+            )
+        except SigningOverloadedError:
+            # Concurrency cap saturated past the acquire timeout — shed fail
+            # closed (503) rather than pile up buffered bodies (mem-V2).
+            logger.warning(
+                "Signing capacity exhausted; shedding (request_id=%s)", request_id
+            )
+            return _denied(
+                code=503,
+                body="Signing capacity exhausted",
+                request_id=request_id,
             )
         except Exception as e:
             logger.error(

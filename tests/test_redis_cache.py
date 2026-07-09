@@ -1,6 +1,5 @@
 """Tests for the Redis API authentication response caching functionality."""
 
-import hashlib
 import os
 import sys
 import uuid
@@ -102,38 +101,35 @@ async def get_test_redis_client():
 
 @pytest.mark.asyncio
 async def test_generate_cache_key():
-    """Test cache key generation.
+    """Cache-key contract (host+payload hashed independently, host normalised).
 
-    Keys are SHA-256 of ``f"{target_host or ''}:{payload}"``; the
-    ``target_host`` prefix prevents a bearer authorised for provider A
-    from re-using a cached upstream api_key on provider B.
+    Asserts the properties that matter for correctness/security rather than
+    re-deriving the internal hash: determinism, host- and payload-sensitivity
+    (so a bearer authorised for provider A can't re-use a cached api_key on
+    provider B), and host normalisation (equivalent hosts share one entry).
+    The exact construction is unit-tested in portunus/tests/test_cache_key.py.
     """
     payload = "test-payload"
     target_host = "api.example.com"
 
-    # No target_host — composite is ``:{payload}``.
-    expected_key = hashlib.sha256(f":{payload}".encode("utf-8")).hexdigest()
-    generated_key = _cache_service.generate_cache_key(payload)
-    assert generated_key == expected_key, "Cache key generation failed"
+    # Deterministic + Redis-safe (64-char sha256 hex).
+    key_no_host = _cache_service.generate_cache_key(payload)
+    assert key_no_host == _cache_service.generate_cache_key(payload)
+    assert len(key_no_host) == 64 and all(c in "0123456789abcdef" for c in key_no_host)
 
-    # With target_host — composite is ``{host}:{payload}``.
-    expected_key = hashlib.sha256(
-        f"{target_host}:{payload}".encode("utf-8")
-    ).hexdigest()
-    generated_key = _cache_service.generate_cache_key(payload, target_host)
-    assert generated_key == expected_key, "Cache key generation failed with host"
+    # Host-sensitivity: same payload, different/absent host → different keys.
+    key_host = _cache_service.generate_cache_key(payload, target_host)
+    key_other = _cache_service.generate_cache_key(payload, "api.other.com")
+    assert key_host != key_no_host, "cache key did not vary by presence of host"
+    assert key_host != key_other, "cache key did not vary by target_host"
 
-    # Same payload, different host → different key.
-    other_host_key = _cache_service.generate_cache_key(payload, "api.other.com")
-    assert generated_key != other_host_key, "Cache key did not vary by target_host"
+    # Payload-sensitivity.
+    assert _cache_service.generate_cache_key("other", target_host) != key_host
 
-    # JSON-like payload.
-    json_payload = '{"credentials": {"access_key": "AKIA123", "secret_key": "SECRET"}, "secret_arn": "arn:aws:..."}'  # noqa: E501
-    expected_key = hashlib.sha256(f":{json_payload}".encode("utf-8")).hexdigest()
-    generated_key = _cache_service.generate_cache_key(json_payload)
+    # Host normalisation: case + default :443 are equivalent (share one entry).
     assert (
-        generated_key == expected_key
-    ), "Cache key generation failed for complex payload"
+        _cache_service.generate_cache_key(payload, "API.Example.com:443") == key_host
+    ), "host normalisation (case/default-port) not applied to the cache key"
 
 
 @pytest.mark.asyncio
@@ -234,11 +230,14 @@ async def test_cache_and_retrieve_with_signing_key(docker_setup, request):
 
 @pytest.mark.asyncio
 async def test_cache_api_key_redis_error():
-    """Test error handling when Redis fails."""
-    # Verify the key-generation logic without needing Redis. Keys are
-    # SHA-256 of ``f"{target_host or ''}:{payload}"`` — with no host
-    # passed in here, the composite is ``:{payload}``.
+    """Cache-key generation is deterministic without a live Redis.
+
+    NOTE: despite the name this exercises no Redis error path — it is
+    effectively redundant with ``test_generate_cache_key``. Flagged for the
+    cleanup pass as a deletion/rename candidate; kept green in the meantime
+    with a self-consistency check that isn't coupled to the hash construction.
+    """
     payload = "test-payload"
-    cache_key = _cache_service.generate_cache_key(payload)
-    expected_key = hashlib.sha256(f":{payload}".encode("utf-8")).hexdigest()
-    assert cache_key == expected_key, "Cache key generation failed in error test"
+    assert _cache_service.generate_cache_key(
+        payload
+    ) == _cache_service.generate_cache_key(payload)
