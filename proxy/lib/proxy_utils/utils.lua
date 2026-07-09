@@ -20,16 +20,27 @@ local SENSITIVE_HEADERS = {
 	["x-amz-security-token"] = true, -- AWS session token (SigV4 requests)
 }
 
+--- Builds the set of headers to exclude from logging
+-- @param extra_headers Optional array of additional header names to exclude
+--        (e.g. the proxy's configured api_key_header)
+-- @return Set of lowercase header names, keyed by name
+function utils.sensitive_headers(extra_headers)
+	local headers = {}
+	for name in pairs(SENSITIVE_HEADERS) do
+		headers[name] = true
+	end
+	for _, name in ipairs(extra_headers or {}) do
+		headers[string.lower(name)] = true
+	end
+	return headers
+end
+
 --- Checks whether a header must be excluded from logging
 -- @param name Header name (matched case-insensitively)
--- @param api_key_header The proxy's configured API key header (optional)
+-- @param sensitive_headers Set built by utils.sensitive_headers()
 -- @return true if the header carries credentials and must not be logged
-function utils.is_sensitive_header(name, api_key_header)
-	local lower = string.lower(name)
-	if SENSITIVE_HEADERS[lower] then
-		return true
-	end
-	return api_key_header ~= nil and lower == string.lower(api_key_header)
+function utils.is_sensitive_header(name, sensitive_headers)
+	return sensitive_headers[string.lower(name)] == true
 end
 
 --- Converts a Lua table of key-value pairs to a table with base64-encoded values

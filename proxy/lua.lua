@@ -67,6 +67,10 @@ end
 -- Instantiate Portunus client with configuration
 local portunus = proxy_utils.portunus.new(config)
 
+-- Headers excluded from request/response header logging: the fixed
+-- credential denylist plus this proxy's configured api_key_header
+local sensitive_log_headers = utils.sensitive_headers({ config.api_key_header })
+
 function envoy_on_request(request_handle)
 	-- Main function that processes incoming requests
 	-- 1. Handles /ping health check requests
@@ -195,10 +199,9 @@ function envoy_on_request(request_handle)
 		portunus:log_request_body(request_handle, auth_response.request_id, full_request_body)
 
 		-- Log request headers, excluding credential-carrying headers
-		-- (the configured api_key_header plus a fixed denylist)
 		local request_headers = {}
 		for k, v in pairs(request_handle:headers()) do
-			if not utils.is_sensitive_header(k, config.api_key_header) then
+			if not utils.is_sensitive_header(k, sensitive_log_headers) then
 				request_headers[k] = v
 			end
 		end
@@ -267,7 +270,7 @@ function envoy_on_response(response_handle)
 		-- Log response headers, excluding credential-carrying headers
 		local response_headers = {}
 		for k, v in pairs(response_handle:headers() or {}) do
-			if not utils.is_sensitive_header(k, config.api_key_header) then
+			if not utils.is_sensitive_header(k, sensitive_log_headers) then
 				response_headers[k] = v
 			end
 		end
