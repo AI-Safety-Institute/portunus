@@ -35,7 +35,7 @@ from portunus.grpc.proc_servicer import (
     _headers_to_dict,
     _StreamState,
 )
-from portunus.services.publish_queue import BoundedPublishQueue
+from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 
 # ---------------------------------------------------------------------------
 # Fake publish service — records what was published so assertions can read
@@ -229,7 +229,7 @@ async def test_http_request_headers_are_published_with_their_headers_intact():
         stream = _stream_from(
             [
                 _http_headers_message(
-                    headers={"x-foo": "bar"},
+                    headers={"user-agent": "curl/8.5"},
                     is_request=True,
                     request_id="req-123",
                 )
@@ -245,8 +245,8 @@ async def test_http_request_headers_are_published_with_their_headers_intact():
         assert request_headers[0].request_id == "req-123"
         # Wire format is base64-encoded for aisitok compatibility — see
         # _headers_to_dict in proc_servicer.
-        encoded = request_headers[0].payload["headers"]["x-foo"]
-        assert base64.b64decode(encoded).decode() == "bar"
+        encoded = request_headers[0].payload["headers"]["user-agent"]
+        assert base64.b64decode(encoded).decode() == "curl/8.5"
     finally:
         await queue.stop()
 
@@ -265,7 +265,7 @@ async def test_headers_are_read_from_raw_value_field_when_value_is_empty():
     try:
         header_list = [
             base_pb2.HeaderValue(key="x-request-id", raw_value=b"req-from-raw"),
-            base_pb2.HeaderValue(key="x-foo", raw_value=b"bar"),
+            base_pb2.HeaderValue(key="user-agent", raw_value=b"curl/8.5"),
         ]
         headers_msg = proc_pb2.HttpHeaders(
             headers=base_pb2.HeaderMap(headers=header_list),
@@ -280,8 +280,8 @@ async def test_headers_are_read_from_raw_value_field_when_value_is_empty():
         published = publish.of_kind("request_headers")
         assert len(published) == 1
         assert published[0].request_id == "req-from-raw"
-        encoded = published[0].payload["headers"]["x-foo"]
-        assert base64.b64decode(encoded).decode() == "bar"
+        encoded = published[0].payload["headers"]["user-agent"]
+        assert base64.b64decode(encoded).decode() == "curl/8.5"
     finally:
         await queue.stop()
 
@@ -307,10 +307,14 @@ async def test_credential_headers_are_redacted_from_published_request_headers():
                     headers={
                         "authorization": "Bearer sk-ant-real-provider-key",
                         "x-api-key": "sk-real",
+                        "api-key": "azure-sk",
+                        "x-goog-api-key": "google-sk",
+                        "xi-api-key": "eleven-sk",
+                        "x-hume-api-key": "hume-sk",
                         "cookie": "session=secret-session",
                         "proxy-authorization": "Basic dXNlcjpwYXNz",
                         "x-amz-security-token": "FQoGZX...EXAMPLE",
-                        "x-foo": "bar",
+                        "user-agent": "curl/8.5",
                     },
                     is_request=True,
                     request_id="req-redact",
@@ -327,12 +331,16 @@ async def test_credential_headers_are_redacted_from_published_request_headers():
         published = request_headers[0].payload["headers"]
         assert "authorization" not in published
         assert "x-api-key" not in published
+        assert "api-key" not in published
+        assert "x-goog-api-key" not in published
+        assert "xi-api-key" not in published
+        assert "x-hume-api-key" not in published
         assert "cookie" not in published
         assert "proxy-authorization" not in published
         assert "x-amz-security-token" not in published
-        # Non-sensitive headers are preserved.
-        encoded = published["x-foo"]
-        assert base64.b64decode(encoded).decode() == "bar"
+        # Non-sensitive, allowlisted headers are preserved.
+        encoded = published["user-agent"]
+        assert base64.b64decode(encoded).decode() == "curl/8.5"
     finally:
         await queue.stop()
 
@@ -357,10 +365,12 @@ async def test_credential_headers_are_redacted_from_published_response_headers()
                         "set-cookie": "session=secret-session; HttpOnly",
                         "authorization": "Bearer leftover",
                         "x-api-key": "sk-leak",
+                        "api-key": "azure-echo",
+                        "x-goog-api-key": "google-echo",
                         "cookie": "tracker=xyz",
                         "proxy-authorization": "Basic dXNlcjpwYXNz",
                         "x-amz-security-token": "FQoGZX...EXAMPLE",
-                        "x-foo": "bar",
+                        "server": "istio-envoy",
                     },
                     is_request=False,
                 ),
@@ -377,11 +387,13 @@ async def test_credential_headers_are_redacted_from_published_response_headers()
         assert "set-cookie" not in published
         assert "authorization" not in published
         assert "x-api-key" not in published
+        assert "api-key" not in published
+        assert "x-goog-api-key" not in published
         assert "cookie" not in published
         assert "proxy-authorization" not in published
         assert "x-amz-security-token" not in published
-        encoded = published["x-foo"]
-        assert base64.b64decode(encoded).decode() == "bar"
+        encoded = published["server"]
+        assert base64.b64decode(encoded).decode() == "istio-envoy"
     finally:
         await queue.stop()
 
@@ -447,7 +459,8 @@ def test_pre_101_buffer_overflow_poisons_stream_instead_of_truncating(caplog):
     assert any("poisoning stream" in record.getMessage() for record in caplog.records)
 
 
-def test_pre_101_poisoned_stream_skips_replay_and_observation():
+@pytest.mark.asyncio
+async def test_pre_101_poisoned_stream_skips_replay_and_observation():
     """Once poisoned, replay is a no-op and further pre-101 chunks are ignored."""
     servicer, _publish, _queue = _make_servicer()
     state = _StreamState(
@@ -459,7 +472,7 @@ def test_pre_101_poisoned_stream_skips_replay_and_observation():
     assert state.pre_101_poisoned is True
 
     # Replay must not raise or emit anything (buffer already cleared).
-    servicer._replay_pre_101(state, "2026-01-01T00:00:00Z")
+    await servicer._replay_pre_101(state, "2026-01-01T00:00:00Z")
     # A subsequent under-cap chunk must still be ignored (no re-buffering).
     servicer._buffer_pre_101(state, Direction.REQUEST, b"small")
     assert state.pre_101_buffer == []
@@ -472,7 +485,7 @@ def test_pre_101_poisoned_stream_skips_replay_and_observation():
 
 
 @pytest.mark.asyncio
-async def test_body_chunks_are_dropped_when_publish_queue_is_full():
+async def test_body_chunks_are_dropped_when_publish_queue_is_full(monkeypatch):
     """With per-chunk publishing, body submits use ``put_nowait`` and.
 
     drop when capacity is exceeded — exactly so a slow Firehose can't
@@ -483,6 +496,11 @@ async def test_body_chunks_are_dropped_when_publish_queue_is_full():
     ProcessingResponse (Envoy ignores them); only the request_headers
     event does. Drops continue to happen on the publish queue.
     """
+    # Keep the drop-sentinel blocking submits from stalling the test on the
+    # deliberately saturated queue.
+    monkeypatch.setattr(
+        portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.02
+    )
     servicer, _publish, queue = _make_servicer(queue_maxsize=2)
     # Workers deliberately not started so the queue stays full.
 
@@ -946,11 +964,12 @@ def test_header_value_bytes_preserves_non_utf8_bytes_through_to_publish(caplog):
     consumers can recover the original payload exactly.
     """
     raw = bytes(range(256))  # every byte 0x00..0xff
-    h = base_pb2.HeaderValue(key="x-binary", raw_value=raw)
+    # Use an allowlisted header name so it survives _headers_to_dict.
+    h = base_pb2.HeaderValue(key="sec-websocket-key", raw_value=raw)
     assert _header_value_bytes(h) == raw
 
     header_map = base_pb2.HeaderMap(headers=[h])
-    encoded = _headers_to_dict(header_map)["x-binary"]
+    encoded = _headers_to_dict(header_map)["sec-websocket-key"]
     assert base64.b64decode(encoded) == raw
 
 
@@ -1284,5 +1303,253 @@ async def test_ws_upgrade_request_headers_carry_x_portunus_debug_id():
         raw = published[0].payload["headers"]
         assert _decoded_header(raw, "x-portunus-debug-id") == "DEBUG-C"
         assert _decoded_header(raw, "upgrade") == "websocket"
+    finally:
+        await queue.stop()
+
+
+# ---------------------------------------------------------------------------
+# Redaction regression (PR #32 reviewed set) + capture allowlist
+# ---------------------------------------------------------------------------
+
+_PR32_DENYLIST = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "x-goog-api-key",
+    "xi-api-key",
+    "x-hume-api-key",
+    "x-amz-security-token",
+}
+
+
+def _header_map(headers: dict[str, str]) -> base_pb2.HeaderMap:
+    return base_pb2.HeaderMap(
+        headers=[base_pb2.HeaderValue(key=k, value=v) for k, v in headers.items()]
+    )
+
+
+@pytest.mark.parametrize(
+    "api_key_header",
+    ["authorization", "x-api-key", "x-custom-tenant-key", "API-KEY"],
+)
+def test_pr32_denylist_headers_never_captured_under_any_api_key_header(
+    monkeypatch, api_key_header
+):
+    """Regression for the #19 redaction narrowing (security HIGH / C4).
+
+    PR #32's security-reviewed denylist redacted ``api-key`` (Azure),
+    ``x-goog-api-key`` (Google), ``xi-api-key`` (ElevenLabs),
+    ``x-hume-api-key`` (Hume) and a *hardcoded* ``authorization`` literal.
+    The #19 rewrite dropped the four provider headers entirely and made
+    ``authorization`` redacted only when it happened to equal the configured
+    ``API_KEY_HEADER``. Pin: the full #32 set is redacted under ANY
+    ``API_KEY_HEADER`` value, and the configured header itself is redacted
+    whatever it is set to.
+    """
+    monkeypatch.setattr(portunus_config, "api_key_header", api_key_header)
+
+    captured = _headers_to_dict(
+        _header_map(
+            {
+                "authorization": "Bearer sk-REALSECRET",
+                "proxy-authorization": "Basic dXNlcjpwYXNz",
+                "cookie": "session=s",
+                "set-cookie": "session=s; HttpOnly",
+                "x-api-key": "sk-anthropic",
+                "api-key": "azure-sk",
+                "x-goog-api-key": "google-sk",
+                "xi-api-key": "eleven-sk",
+                "x-hume-api-key": "hume-sk",
+                "x-amz-security-token": "FQoGZX...EXAMPLE",
+                api_key_header.lower(): "the-configured-key-location",
+                "user-agent": "curl/8.5",
+            }
+        )
+    )
+
+    leaked = _PR32_DENYLIST & set(captured)
+    assert not leaked, f"credential headers leaked to capture: {leaked}"
+    assert api_key_header.lower() not in captured
+    # The capture still works for safe headers.
+    assert "user-agent" in captured
+
+
+def test_unknown_headers_are_dropped_by_the_capture_allowlist():
+    """Capture is allowlist-based: a header we haven't classified is NOT.
+
+    archived. This is the structural fix for the denylist-by-omission leak —
+    a newly onboarded provider's bespoke credential header (e.g.
+
+    ``x-newprovider-key``) can never leak just because nobody added it to a
+    blocklist.
+    """
+    captured = _headers_to_dict(
+        _header_map(
+            {
+                "x-newprovider-key": "sk-brand-new-provider",
+                "x-foo": "bar",
+                "openai-organization": "org-123",
+                "content-type": "application/json",
+                ":method": "POST",
+                "x-portunus-debug-id": "DEBUG-1",
+                "anthropic-ratelimit-tokens-remaining": "1000",
+            }
+        )
+    )
+
+    assert "x-newprovider-key" not in captured
+    assert "x-foo" not in captured
+    assert "openai-organization" not in captured
+    # Allowlisted analytics headers survive (exact names and prefixes).
+    assert set(captured) == {
+        "content-type",
+        ":method",
+        "x-portunus-debug-id",
+        "anthropic-ratelimit-tokens-remaining",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Drop sentinel: survives body saturation via the blocking headroom, and
+# one logical lost chunk counts exactly once on dropped_total
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_drop_sentinel_survives_body_saturation_and_lands_in_publish():
+    """Under body saturation the ``dropped=True`` marker must still enqueue.
+
+    Pre-fix the sentinel was submitted on the same ``submit_droppable`` path
+    at the very instant ``qsize >= body_capacity`` — so under the exact
+    condition it exists to signal, it was dropped too (99 drop warnings, 0
+    markers in S3 in the load test). Now it rides ``submit_blocking`` into
+    the reserved headroom.
+    """
+    servicer, publish, queue = _make_servicer(queue_maxsize=12)
+    # Default body_capacity is 90% of maxsize = 10. Saturate the body tier,
+    # leaving the blocking headroom (2 slots) free.
+    for _ in range(10):
+        assert queue.submit_droppable(
+            PublishTask(build=lambda: ("body", b"{}\n"), label="filler")
+        )
+    assert queue.qsize() == 10
+
+    stream = _stream_from(
+        [
+            _http_headers_message(
+                headers={}, is_request=True, request_id="sat-sentinel"
+            ),
+            _http_body_message(body=b"lost-chunk", is_request=False),
+        ]
+    )
+    dropped_before = queue.dropped_total
+    async for _ in servicer.Process(stream, _ctx_with_key()):
+        pass
+
+    # The real chunk was dropped (queue at body capacity)...
+    assert queue.dropped_total == dropped_before + 1
+    # ...but exactly once for the logical chunk: the sentinel is accounted
+    # separately and must NOT double-count.
+    assert queue.sentinel_dropped_total == 0
+    # The sentinel landed in the blocking headroom above body_capacity.
+    assert queue.qsize() == 12  # 10 fillers + headers record + sentinel
+
+    # Drain and confirm the marker reaches the publish layer.
+    await queue.start()
+    await _drain_queue(queue, timeout=2.0)
+    await queue.stop()
+    sentinels = [
+        b for b in publish.of_kind("response_body") if b.payload.get("dropped")
+    ]
+    assert len(sentinels) == 1
+    assert sentinels[0].payload["body_bytes"] == b""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_timeout_under_true_saturation_counts_sentinel_dropped(
+    monkeypatch,
+):
+    """If even the blocking sentinel can't land (queue completely full), the.
+
+    loss is counted on ``sentinel_dropped_total`` — never a second increment
+    of ``dropped_total`` for the same logical chunk.
+    """
+    monkeypatch.setattr(portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.05)
+    servicer, _publish, queue = _make_servicer(queue_maxsize=2)
+    # Fill the queue completely (headers record takes one slot; fill the rest).
+    stream = _stream_from(
+        [
+            _http_headers_message(headers={}, is_request=True, request_id="full"),
+            _http_body_message(body=b"chunk-a", is_request=False),
+            _http_body_message(body=b"chunk-b", is_request=False),
+        ]
+    )
+    async for _ in servicer.Process(stream, _ctx_with_key()):
+        pass
+
+    # headers → slot 1 (blocking). chunk-a: body_capacity=1, qsize already 1
+    # → dropped; its sentinel lands in slot 2 (blocking headroom). chunk-b:
+    # dropped; its sentinel finds the queue full and times out.
+    assert queue.dropped_total == 2  # exactly one per logical lost chunk
+    assert queue.sentinel_dropped_total == 1
+
+
+# ---------------------------------------------------------------------------
+# WS parse-error / deflate-cap: desync is accounted, not silent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
+    """A malformed WS frame desyncs the parser for that direction. Pre-fix the.
+
+    observer logged and went silent — the WSSummaryRecord then reported clean
+    counts while the rest of the session went unobserved (audit MEDIUM). Now
+    the transition bumps the per-direction truncated counter once, so the
+    summary reflects the observation gap.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        # 0x8F = FIN + unknown opcode 0xF → wsproto ParseFailed.
+        malformed = bytes([0x8F, 0x02]) + b"xx"
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-desync",
+                ),
+                _http_headers_message(headers={}, is_request=False),
+                _http_body_message(body=_ws_frame(b"before"), is_request=False),
+                _http_body_message(body=malformed, is_request=False),
+                # After desync nothing in this direction is observable; this
+                # frame must neither crash nor emit records.
+                _http_body_message(body=_ws_frame(b"after"), is_request=False),
+            ]
+        )
+
+        async for _ in servicer.Process(stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        # The frame before the poison was observed; the one after was not.
+        payloads = [
+            b.payload.get("body_bytes") for b in publish.of_kind("response_body")
+        ]
+        assert b"before" in payloads
+        assert b"after" not in payloads
+
+        summaries = publish.of_kind("ws_summary")
+        assert len(summaries) == 1
+        record = summaries[0].payload["record"]
+        # The desync is visible downstream: exactly one truncation marker for
+        # the blinded direction (not one per subsequent frame).
+        assert record.truncated_server_frames == 1
+        assert record.truncated_client_frames == 0
     finally:
         await queue.stop()

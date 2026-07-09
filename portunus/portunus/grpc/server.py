@@ -13,10 +13,11 @@ directly).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Protocol
 
 import grpc
 from envoy.service.auth.v3 import external_auth_pb2_grpc
@@ -38,6 +39,17 @@ logger = logging.getLogger("api.grpc")
 # carries headers and protobuf framing, so the gRPC receive limit needs headroom.
 _MAX_GRPC_MSG_BYTES = 64 * 1024 * 1024
 
+# Minimum length for a configured proxy key. The boot guard already refuses
+# an *empty* key; a 1-char placeholder ("x", a stray space) passes that check
+# while giving no real channel-identity protection — refuse it too.
+_MIN_PROXY_KEY_BYTES = 16
+
+
+class _DependencyHealth(Protocol):
+    """The slice of StateService the health monitor needs."""
+
+    async def health_check(self) -> bool: ...
+
 
 @dataclass
 class GrpcRuntime:
@@ -48,6 +60,57 @@ class GrpcRuntime:
     publish_queue: BoundedPublishQueue
     publish_service: PublishService
     health_servicer: health.aio.HealthServicer
+    # Background task pinging Redis and flipping the gRPC health status —
+    # None when the monitor is disabled or no state service is available.
+    health_monitor: Optional[asyncio.Task] = field(default=None)
+
+
+async def _dependency_health_loop(
+    health_servicer: health.aio.HealthServicer,
+    dependency: _DependencyHealth,
+    *,
+    interval_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    """Drive the gRPC health status from the auth path's dependencies.
+
+    A Portunus whose event loop is alive but whose Redis is unreachable
+    times out every ext_authz ``Check`` → fail-closed deny — yet the plain
+    health servicer keeps answering SERVING, so the ECS ``grpc_health_probe``
+    (and anything else watching gRPC health) never notices a task that is
+    403ing 100% of its traffic. Ping Redis on an interval and flip the
+    overall ("") status to NOT_SERVING while the dependency is down,
+    SERVING again once it recovers. ``stop_grpc_server`` cancels this task
+    *before* flipping NOT_SERVING for the drain, so the monitor can never
+    resurrect a draining task's status.
+    """
+    healthy = True
+    while True:
+        await asyncio.sleep(interval_seconds)
+        ok = False
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                ok = await dependency.health_check()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Dependency health check raised: %s", type(e).__name__)
+            ok = False
+        if ok and not healthy:
+            healthy = True
+            await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+            logger.info(
+                "Dependency health recovered; gRPC health restored to SERVING"
+            )
+        elif not ok and healthy:
+            healthy = False
+            await health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+            logger.error(
+                "Dependency health check failed (Redis unreachable): flipping "
+                "gRPC health to NOT_SERVING — this task would fail-closed "
+                "deny every Check while appearing alive",
+                extra={"event": "dependency_health_not_serving"},
+            )
 
 
 async def start_grpc_server(
@@ -85,6 +148,21 @@ async def start_grpc_server(
             "GRPC_PROXY_API_KEY_OPTIONAL=true to acknowledge that the "
             "channel-identity gate is disabled (local dev / tests "
             "only)."
+        )
+
+    # A configured-but-trivial key (1-char placeholder, stray whitespace)
+    # passes the empty-key guard while providing no real gate. Require a
+    # minimum length so a fat-fingered deployment fails at boot, not in a
+    # security review.
+    if (
+        config.proxy_api_key
+        and len(config.proxy_api_key.encode("utf-8")) < _MIN_PROXY_KEY_BYTES
+    ):
+        raise RuntimeError(
+            f"GRPC_PROXY_API_KEY is only {len(config.proxy_api_key.encode('utf-8'))} "
+            f"bytes; refusing to start with a key shorter than "
+            f"{_MIN_PROXY_KEY_BYTES} bytes. A trivially short pre-shared key "
+            "gives a false sense of a channel-identity gate."
         )
 
     # Fail fast if the Firehose audit sink is misconfigured. Every audit
@@ -125,8 +203,14 @@ async def start_grpc_server(
     external_auth_pb2_grpc.add_AuthorizationServicer_to_server(auth_servicer, server)
 
     publish_queue = BoundedPublishQueue(
-        maxsize=10_000,
-        body_capacity=9_000,
+        maxsize=config.publish_queue_maxsize,
+        body_capacity=config.publish_queue_body_capacity,
+        # Byte budget alongside the record-count cap: each queued body task
+        # retains its raw chunk by closure, so 10k records × ~750 KB chunks
+        # is ~6.4 GiB retained — far past the container memory cap. The byte
+        # bound keeps worst-case retention inside the memory budget whatever
+        # the record count.
+        max_bytes=config.publish_queue_max_bytes,
         num_workers=max(4, config.max_concurrent_streams // 64),
         # Workers drain themselves in stream-grouped batches via Firehose
         # PutRecordBatch — opportunistic batching keeps records/s well under
@@ -166,6 +250,36 @@ async def start_grpc_server(
     # SERVING before the port accepts connections.
     await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
 
+    # Surface dependency (Redis) health into the gRPC health status: a task
+    # that is SERVING but would fail-closed deny every Check (Redis down)
+    # must fail its probe rather than 403 traffic invisibly. Contract for
+    # the deploy side: gRPC health "" == SERVING iff the listener is up AND
+    # the last dependency probe succeeded.
+    health_monitor: Optional[asyncio.Task] = None
+    dependency = getattr(publish_service, "state_service", None)
+    if (
+        config.health_check_interval_seconds > 0
+        and dependency is not None
+        and hasattr(dependency, "health_check")
+    ):
+        health_monitor = asyncio.create_task(
+            _dependency_health_loop(
+                health_servicer,
+                dependency,
+                interval_seconds=config.health_check_interval_seconds,
+                timeout_seconds=config.health_check_timeout_seconds,
+            ),
+            name="dependency-health-monitor",
+        )
+    else:
+        logger.warning(
+            "Dependency health monitor disabled "
+            "(interval=%s, state_service available=%s) — gRPC health will "
+            "not reflect Redis outages",
+            config.health_check_interval_seconds,
+            dependency is not None,
+        )
+
     logger.info(
         "gRPC server listening on %s (max_concurrent_streams=%d)",
         listen_addr,
@@ -177,12 +291,15 @@ async def start_grpc_server(
         publish_queue=publish_queue,
         publish_service=publish_service,
         health_servicer=health_servicer,
+        health_monitor=health_monitor,
     )
 
 
 async def stop_grpc_server(
     runtime: Optional[GrpcRuntime],
     grace_seconds: int,
+    *,
+    flush_reserve_seconds: float = 5.0,
 ) -> None:
     """Stop the gRPC server, drain the publish queue, close the AWS client.
 
@@ -192,16 +309,33 @@ async def stop_grpc_server(
     application-layer signal we can send into a WS tunnel from
     ``observability_mode: true``, so this is grace-then-cancel rather
     than coordinated drain.
+
+    ``flush_reserve_seconds`` carves a slice of the grace out for the
+    publish-queue flush *before* the stream drain runs. With any active
+    ext_proc stream at SIGTERM (i.e. every busy stop) Envoy holds the
+    stream open for its own, longer drain, so ``server.stop`` consumes its
+    entire budget; without the reserve the queue would get a 0-second
+    flush window and cancel every buffered audit record even with a
+    perfectly healthy sink. The total remains bounded by ``grace_seconds``.
     """
     if runtime is None:
         return
     logger.info(
-        "gRPC drain starting: %d active streams, %ds grace",
+        "gRPC drain starting: %d active streams, %ds grace "
+        "(%.1fs reserved for the audit flush)",
         runtime.proc_servicer.active_stream_count,
         grace_seconds,
+        min(flush_reserve_seconds, grace_seconds),
     )
 
-    # Flip health to NOT_SERVING first so an in-flight probe (ALB/ECS)
+    # Stop the dependency health monitor FIRST: it must not race the drain
+    # and flip the status back to SERVING after we mark NOT_SERVING below.
+    if runtime.health_monitor is not None:
+        runtime.health_monitor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runtime.health_monitor
+
+    # Flip health to NOT_SERVING so an in-flight probe (ALB/ECS)
     # sees the drain immediately and stops routing new connections here.
     await runtime.health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
 
@@ -210,18 +344,21 @@ async def stop_grpc_server(
     # ``grace_seconds`` and awaited sequentially, so a wedged sink + an
     # active stream could consume up to 2×grace before returning — an
     # overrun that risks a SIGKILL (137) if an operator raises grace
-    # toward the ECS ``stopTimeout``. Compute the deadline once and give
-    # the queue only the time the server drain didn't already use, so the
-    # total is bounded by ``grace_seconds``.
+    # toward the ECS ``stopTimeout``. Compute the deadline once; the server
+    # drain gets grace minus the flush reserve, and the queue gets whatever
+    # remains (>= the reserve when the stream drain used its full slice),
+    # so the total is bounded by ``grace_seconds`` and the flush is never
+    # starved to zero by Envoy-held streams.
     loop = asyncio.get_running_loop()
+    reserve = min(max(0.0, flush_reserve_seconds), float(grace_seconds))
     deadline = loop.time() + grace_seconds
 
-    await runtime.server.stop(grace=grace_seconds)
+    await runtime.server.stop(grace=max(0.0, grace_seconds - reserve))
 
     # The queue gets the remaining grace to flush to Firehose — records
     # already accepted should not be dropped on shutdown while grace
-    # remains. ``stop`` reports how many buffered records it had to cancel
-    # so the loss is observable.
+    # remains. ``stop`` reports how many accepted records it had to cancel
+    # (in-flight batches included) so the loss is observable.
     queue_drain_budget = max(0.0, deadline - loop.time())
     cancelled = await runtime.publish_queue.stop(drain_timeout=queue_drain_budget)
     if cancelled:
@@ -232,14 +369,17 @@ async def stop_grpc_server(
         # in-process counter for the same loss.
         logger.error(
             "AUDIT LOSS on drain: %d accepted audit records were never "
-            "flushed within the %ds grace window (sink wedged or too "
-            "slow); they are permanently lost",
+            "flushed within the %.1fs flush window of the %ds grace "
+            "(flush budget exhausted — sink wedged/slow, or too much "
+            "buffered for the window); they are permanently lost",
             cancelled,
+            queue_drain_budget,
             grace_seconds,
             extra={
                 "event": "audit_records_lost_on_drain",
                 "lost_audit_records": cancelled,
                 "grace_seconds": grace_seconds,
+                "flush_budget_seconds": queue_drain_budget,
             },
         )
 
@@ -249,12 +389,15 @@ async def stop_grpc_server(
         pass
 
     logger.info(
-        "gRPC drain complete: published=%d queue_dropped=%d "
-        "delivery_failed=%d build_failed=%d drain_cancelled=%d",
+        "gRPC drain complete: submitted=%d published=%d queue_dropped=%d "
+        "delivery_failed=%d build_failed=%d skipped_unconfigured=%d "
+        "drain_cancelled=%d",
+        runtime.publish_queue.submitted_total,
         runtime.publish_queue.published_total,
         runtime.publish_queue.dropped_total,
         runtime.publish_queue.delivery_failed_total,
         runtime.publish_queue.build_failed_total,
+        runtime.publish_queue.skipped_unconfigured_total,
         runtime.publish_queue.cancelled_total,
     )
 
@@ -306,7 +449,11 @@ async def run() -> None:
     await stop_event.wait()
     logger.info("Termination signal received; draining")
 
-    await stop_grpc_server(runtime, grace_seconds=config.grpc.graceful_shutdown_seconds)
+    await stop_grpc_server(
+        runtime,
+        grace_seconds=config.grpc.graceful_shutdown_seconds,
+        flush_reserve_seconds=config.grpc.drain_flush_reserve_seconds,
+    )
     await state_service.close_redis_client()
     logger.info("Portunus gRPC process shut down cleanly")
 

@@ -115,7 +115,7 @@ class TestStartupFailFast:
         The check fires before the server binds a port, so a blue task whose
         audit sink is misconfigured never reaches a serving state.
         """
-        config = GrpcConfig(enabled=True, proxy_api_key="a-key")
+        config = GrpcConfig(enabled=True, proxy_api_key="a-key-of-adequate-length")
         with pytest.raises(RuntimeError, match="Refusing to start"):
             await start_grpc_server(
                 config=config,
@@ -128,7 +128,7 @@ class TestStartupFailFast:
     async def test_single_missing_stream_names_the_env_var(self):
         """A single missing required stream raises and names its env var."""
         firehose = _all_streams_set().model_copy(update={"metadata_stream_name": None})
-        config = GrpcConfig(enabled=True, proxy_api_key="a-key")
+        config = GrpcConfig(enabled=True, proxy_api_key="a-key-of-adequate-length")
         with pytest.raises(RuntimeError, match="FIREHOSE_METADATA_STREAM"):
             await start_grpc_server(
                 config=config,
@@ -145,7 +145,7 @@ class TestStartupFailFast:
         """
         config = GrpcConfig(
             enabled=True,
-            proxy_api_key="a-key",
+            proxy_api_key="a-key-of-adequate-length",
             # Ephemeral port distinct from the other startup tests.
             port=50053,
         )

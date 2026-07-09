@@ -90,11 +90,33 @@ async def test_enabled_with_empty_key_and_optional_unset_raises_runtimeerror():
 
 
 @pytest.mark.asyncio
-async def test_enabled_with_non_empty_key_does_not_raise():
-    """A configured key satisfies the check; server attempts startup."""
+async def test_enabled_with_short_key_raises_runtimeerror():
+    """A configured-but-trivial key (< 16 bytes) fails the boot floor.
+
+    ``GRPC_PROXY_API_KEY="x"`` passes the empty-key guard while providing
+    no real channel-identity gate — a fat-fingered placeholder must fail
+    at boot, not in a security review.
+    """
     config = GrpcConfig(
         enabled=True,
         proxy_api_key="abc",
+        proxy_api_key_optional=False,
+    )
+    with pytest.raises(RuntimeError, match="16 bytes"):
+        await start_grpc_server(
+            config=config,
+            firehose=_configured_firehose(),
+            auth_service=_FakeAuthService(),  # type: ignore[arg-type]
+            publish_service=_FakePublishService(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_enabled_with_non_empty_key_does_not_raise():
+    """A configured key (>= the 16-byte floor) satisfies the check."""
+    config = GrpcConfig(
+        enabled=True,
+        proxy_api_key="a-real-proxy-key-with-length",
         proxy_api_key_optional=False,
         # Use an ephemeral port to avoid clashing with anything else
         # the test runner has bound. Range 30000+ is safely above the

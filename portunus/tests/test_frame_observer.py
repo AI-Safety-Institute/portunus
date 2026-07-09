@@ -81,3 +81,90 @@ def test_finalized_deflate_observer_accepts_compressed_frames():
     assert len(frames) == 1
     assert frames[0].opcode == "text"
     assert frames[0].payload == plaintext.encode("utf-8")
+
+
+def _ws_text_frame(payload: bytes) -> bytes:
+    """Single-fragment, unmasked WS text frame (server->client direction)."""
+    return bytes([0x81, len(payload)]) + payload
+
+
+def _masked_ws_text_frame(payload: bytes) -> bytes:
+    """Single-fragment, masked WS text frame (client->server direction).
+
+    The REQUEST-direction connection is ``ConnectionType.SERVER`` and
+    rejects unmasked client frames per RFC 6455.
+    """
+    mask = b"\x01\x02\x03\x04"
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return bytes([0x81, 0x80 | len(payload)]) + mask + masked
+
+
+def test_parse_error_desyncs_its_direction_only_and_flags_lost_frames():
+    """A malformed frame desyncs its direction; the loss is flagged, once.
+
+    wsproto swallows the ``ParseFailed`` internally and synthesizes a
+    CloseConnection event (without moving off the OPEN state — the
+    discriminator from a genuine wire close); after that it silently
+    discards every further byte in that direction. Pre-fix the caller had
+    no signal that observation had stopped, so the WS summary reported
+    clean counts for a blinded session (audit MEDIUM). The synthesized
+    close must NOT surface as an observed close frame — it never existed
+    on the wire.
+    """
+    observer = build_observer(response_extensions_header=None)
+
+    # 0x8F = FIN + reserved opcode 0xF → ParseFailed inside wsproto.
+    malformed = bytes([0x8F, 0x02]) + b"xx"
+    frames = list(observer.observe(direction=Direction.RESPONSE, chunk=malformed))
+    assert frames == []  # no fake close frame
+    assert observer.desynced(Direction.RESPONSE) is True
+    assert observer.desynced(Direction.REQUEST) is False
+
+    # The poisoned direction yields nothing ever again — and doesn't raise.
+    frames = list(
+        observer.observe(direction=Direction.RESPONSE, chunk=_ws_text_frame(b"hi"))
+    )
+    assert frames == []
+
+    # The healthy direction is unaffected.
+    frames = list(
+        observer.observe(
+            direction=Direction.REQUEST, chunk=_masked_ws_text_frame(b"ok")
+        )
+    )
+    assert [f.payload for f in frames] == [b"ok"]
+    assert observer.desynced(Direction.REQUEST) is False
+
+
+def test_genuine_close_frame_is_still_observed_not_treated_as_desync():
+    """A real wire close frame must still surface as a close ObservedFrame.
+
+    The parse-failure detection keys on wsproto yielding CloseConnection
+    while the state is still OPEN; a genuine close moves the state first,
+    so it must keep flowing through as an observed frame.
+    """
+    observer = build_observer(response_extensions_header=None)
+    # Unmasked close frame (server->client): FIN+opcode 0x8, 2-byte code
+    # 1000 (normal closure).
+    close_frame = bytes([0x88, 0x02]) + (1000).to_bytes(2, "big")
+
+    frames = list(observer.observe(direction=Direction.RESPONSE, chunk=close_frame))
+
+    assert [f.opcode for f in frames] == ["close"]
+    assert frames[0].close_code == 1000
+    assert observer.desynced(Direction.RESPONSE) is False
+
+
+def test_frames_parsed_before_the_poison_byte_are_still_yielded():
+    """A chunk carrying [valid frame][garbage] yields the valid frame.
+
+    Partial observation is better than dropping the whole chunk; the
+    desync is flagged in the same call.
+    """
+    observer = build_observer(response_extensions_header=None)
+    chunk = _ws_text_frame(b"good") + bytes([0x8F, 0x00])
+
+    frames = list(observer.observe(direction=Direction.RESPONSE, chunk=chunk))
+
+    assert [(f.opcode, f.payload) for f in frames] == [("text", b"good")]
+    assert observer.desynced(Direction.RESPONSE) is True

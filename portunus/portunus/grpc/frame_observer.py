@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterator, Optional
 
-from wsproto.connection import Connection, ConnectionType
+from wsproto.connection import Connection, ConnectionState, ConnectionType
 from wsproto.events import (
     BytesMessage,
     CloseConnection,
@@ -145,6 +145,32 @@ class FrameObserver:
     ) -> None:
         self._request = request_conn
         self._response = response_conn
+        # Once a direction's parser fails (malformed frame, deflate-cap
+        # CloseReason surfacing as ParseFailed), its wsproto state is
+        # desynced: nothing later in that direction can be parsed. The flag
+        # lets the caller record the loss ONCE (per-direction truncated
+        # counter on the WS summary) instead of the pre-fix behaviour of
+        # silently observing nothing for the rest of the session while the
+        # summary reported clean counts.
+        self._desynced: dict[Direction, bool] = {
+            Direction.REQUEST: False,
+            Direction.RESPONSE: False,
+        }
+
+    def desynced(self, direction: Direction) -> bool:
+        """True once ``direction``'s parser hit an error and stopped observing."""
+        return self._desynced[direction]
+
+    def _mark_desynced(self, direction: Direction, detail: str) -> None:
+        # wsproto error messages can echo offending frame bytes —
+        # log exception class names / short reasons only.
+        self._desynced[direction] = True
+        logger.warning(
+            "WS frame parser failed on %s direction (%s); remaining "
+            "bytes in this direction are unobservable",
+            direction.value,
+            detail,
+        )
 
     def observe(
         self,
@@ -152,22 +178,48 @@ class FrameObserver:
         direction: Direction,
         chunk: bytes,
     ) -> Iterator[ObservedFrame]:
-        """Feed a raw byte chunk in one direction and yield observed frames."""
+        """Feed a raw byte chunk in one direction and yield observed frames.
+
+        A parse error (or the deflate zip-bomb cap firing) stops observation
+        for that direction rather than killing the stream; frames decoded
+        before the poison byte are still yielded. Callers should check
+        :meth:`desynced` after the call to account the loss.
+        """
+        if self._desynced[direction]:
+            return
         conn = self._request if direction == Direction.REQUEST else self._response
         try:
             conn.receive_data(chunk)
         except Exception as e:
-            # wsproto error messages can echo offending frame bytes —
-            # log the exception class only. Stop observing this direction
-            # rather than killing the stream.
-            logger.warning(
-                "wsproto frame-parse error on %s direction: %s",
-                direction.value,
-                type(e).__name__,
-            )
+            self._mark_desynced(direction, type(e).__name__)
             return
 
-        for event in conn.events():
+        # ``conn.events()`` swallows ParseFailed (malformed frame or the
+        # deflate-cap CloseReason) and SYNTHESIZES a CloseConnection event —
+        # without transitioning the connection state, unlike a genuine wire
+        # close frame which moves it to REMOTE_CLOSING before yielding.
+        # A CloseConnection while the state is still OPEN is therefore a
+        # parse failure, not a peer close: mark the direction desynced and
+        # do NOT emit it as an observed close frame (it never existed on the
+        # wire — recording it would corrupt close_code/close-count audit).
+        # Other errors (and future wsproto changes) could still raise here,
+        # so the iterator is stepped manually and a mid-stream failure still
+        # yields the frames parsed before it.
+        events_iter = conn.events()
+        while True:
+            try:
+                event = next(events_iter)
+            except StopIteration:
+                return
+            except Exception as e:
+                self._mark_desynced(direction, type(e).__name__)
+                return
+            if (
+                isinstance(event, CloseConnection)
+                and conn.state is ConnectionState.OPEN
+            ):
+                self._mark_desynced(direction, "ParseFailed")
+                return
             yield from self._map_event(direction, event)
 
     @staticmethod

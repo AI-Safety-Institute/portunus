@@ -359,3 +359,253 @@ async def test_saturation_drops_bodies_keeps_metadata_and_drains_sentinels() -> 
     # Every accepted record flushed: 90 bodies + 10 metadata, none lost.
     assert published == {"body": 90, "headers": 10}
     assert queue.published_total == 100
+
+
+# ---------------------------------------------------------------------------
+# Byte bound (mem-V1): queued payload bytes are capped regardless of count
+# ---------------------------------------------------------------------------
+
+
+def _sized_task(size: int, label: str = "body") -> PublishTask:
+    return PublishTask(
+        build=lambda: ("body", b"{}\n"), label=label, size_bytes=size
+    )
+
+
+@pytest.mark.asyncio
+async def test_max_bytes_caps_queued_payload_regardless_of_record_count() -> None:
+    """The memory bound: bodies drop once the BYTE budget is hit, however few.
+
+    records are queued. The record-count cap alone lets 10k × ~750 KB chunks
+    (~6.4 GiB) accumulate — far past the container memory limit.
+    """
+    queue = _queue(
+        maxsize=1_000,
+        body_capacity=1_000,
+        num_workers=0,
+        max_bytes=10_000,
+    )
+
+    accepted = [queue.submit_droppable(_sized_task(500)) for _ in range(100)]
+
+    # Exactly the byte budget's worth was accepted (20 × 500 = 10 000)...
+    assert accepted.count(True) == 20
+    assert queue.queued_bytes == 10_000
+    # ...even though the record count (20) is nowhere near body_capacity.
+    assert queue.qsize() == 20
+    assert queue.dropped_total == 80
+    # And the budget can never be exceeded by any further submit.
+    assert queue.submit_droppable(_sized_task(1)) is False
+    assert queue.queued_bytes <= 10_000
+
+
+@pytest.mark.asyncio
+async def test_byte_budget_is_released_after_flush_not_at_dequeue() -> None:
+    """Bytes are charged while the task is queued OR in an in-flight batch —.
+
+    a wedged sender must keep the budget held (the closure still retains the
+    chunk), and a completed flush must release it.
+    """
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def _gated_sender(stream_name: str, records: list[bytes]) -> int:
+        entered.set()
+        await release.wait()
+        return 0
+
+    queue = _queue(
+        maxsize=100,
+        body_capacity=100,
+        num_workers=1,
+        batch_sender=_gated_sender,
+        max_bytes=1_000,
+    )
+    assert queue.submit_droppable(_sized_task(800)) is True
+    await queue.start()
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+    # The task is in an in-flight batch (qsize 0) but its bytes are still
+    # charged — a new 800-byte body must be REJECTED, or retained memory
+    # would exceed the budget while the sender is slow.
+    assert queue.qsize() == 0
+    assert queue.queued_bytes == 800
+    assert queue.submit_droppable(_sized_task(800)) is False
+
+    # Once the flush completes, the budget frees up.
+    release.set()
+    for _ in range(200):
+        if queue.queued_bytes == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert queue.queued_bytes == 0
+    assert queue.submit_droppable(_sized_task(800)) is True
+
+    await queue.stop(drain_timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# submitted_total + reconciliation (A7): drain loss is quantifiable,
+# in-flight batches included
+# ---------------------------------------------------------------------------
+
+
+def _reconciled(queue: BoundedPublishQueue) -> bool:
+    return queue.submitted_total == (
+        queue.published_total
+        + queue.dropped_total
+        + queue.build_failed_total
+        + queue.delivery_failed_total
+        + queue.skipped_unconfigured_total
+        + queue.cancelled_total
+    )
+
+
+@pytest.mark.asyncio
+async def test_wedged_sender_drain_counts_in_flight_batch_as_cancelled() -> None:
+    """The audit-lane repro: 10 records submitted, ALL pulled into one.
+
+    in-flight batch (qsize()==0), sender wedged. Pre-fix ``stop`` counted
+    ``qsize()`` → reported 0/1 lost while 10 records vanished. The in-flight
+    batch must be counted as cancelled and the reconciliation must hold.
+    """
+    sleeping = asyncio.Event()
+
+    async def _wedged_sender(stream_name: str, records: list[bytes]) -> int:
+        sleeping.set()
+        await asyncio.sleep(60)
+        return 0
+
+    # Large max_batch: the single worker greedily pulls ALL 10 records into
+    # one batch, leaving qsize()==0 — the exact blind spot of the old count.
+    queue = _queue(
+        maxsize=50,
+        body_capacity=50,
+        num_workers=1,
+        batch_sender=_wedged_sender,
+        max_batch=500,
+    )
+    for _ in range(10):
+        assert queue.submit_droppable(_noop_task()) is True
+    await queue.start()
+    await asyncio.wait_for(sleeping.wait(), timeout=1.0)
+    assert queue.qsize() == 0  # everything is in the in-flight batch
+
+    cancelled = await queue.stop(drain_timeout=0.1)
+
+    # The TRUE loss — all 10 in-flight records — is reported and counted.
+    assert cancelled == 10
+    assert queue.cancelled_total == 10
+    assert queue.published_total == 0
+    assert queue.submitted_total == 10
+    assert _reconciled(queue)
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_holds_across_publish_drop_skip_and_fail() -> None:
+    """Submitted == published + dropped + build_failed + delivery_failed +.
+
+    skipped_unconfigured + cancelled, exercised across every terminal path
+    in one run.
+    """
+
+    async def _sender(stream_name: str, records: list[bytes]) -> int:
+        # Fail one record per batch to exercise delivery_failed.
+        return 1
+
+    queue = _queue(
+        maxsize=100,
+        body_capacity=90,
+        num_workers=1,
+        batch_sender=_sender,
+    )
+    # 3 publishable records (one per batch will "fail" → mixed outcome).
+    for _ in range(3):
+        queue.submit_droppable(_noop_task())
+    # 2 whose stream isn't configured (build → None).
+    for _ in range(2):
+        queue.submit_droppable(PublishTask(build=lambda: None, label="ws_summary"))
+
+    # 1 whose build raises.
+    def _boom() -> None:
+        raise ValueError("bad record")
+
+    queue.submit_droppable(PublishTask(build=_boom, label="broken"))
+
+    await queue.start()
+    await queue.stop(drain_timeout=2.0)
+
+    assert queue.submitted_total == 6
+    assert queue.skipped_unconfigured_total == 2
+    assert queue.build_failed_total == 1
+    assert queue.published_total + queue.delivery_failed_total == 3
+    assert _reconciled(queue)
+
+
+@pytest.mark.asyncio
+async def test_droppable_rejects_count_toward_submitted_total() -> None:
+    """Drops are submit attempts: the invariant needs them on both sides."""
+    queue = _queue(maxsize=10, body_capacity=2, num_workers=0)
+    for _ in range(5):
+        queue.submit_droppable(_noop_task())
+    assert queue.submitted_total == 5
+    assert queue.dropped_total == 3
+    assert queue.qsize() == 2
+
+
+@pytest.mark.asyncio
+async def test_build_returning_none_counts_skipped_unconfigured() -> None:
+    """An unconfigured stream (e.g. FIREHOSE_WS_SUMMARY_STREAM unset) is a.
+
+    counted skip, not a silent one — pre-fix build→None vanished without
+    touching any counter (audit LOW #4).
+    """
+    queue = _queue(maxsize=10, num_workers=1)
+    for _ in range(3):
+        queue.submit_droppable(PublishTask(build=lambda: None, label="ws_summary"))
+    await queue.start()
+    cancelled = await queue.stop(drain_timeout=2.0)
+
+    assert cancelled == 0
+    assert queue.skipped_unconfigured_total == 3
+    assert queue.published_total == 0
+    assert _reconciled(queue)
+
+
+# ---------------------------------------------------------------------------
+# submit_blocking timeout + sentinel accounting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_submit_blocking_timeout_counts_one_drop() -> None:
+    """A bounded blocking submit that times out is observable loss."""
+    queue = _queue(maxsize=1, num_workers=0)
+    assert await queue.submit_blocking(_noop_task("first")) is True
+
+    accepted = await queue.submit_blocking(_noop_task("second"), timeout=0.05)
+
+    assert accepted is False
+    assert queue.dropped_total == 1
+    assert queue.sentinel_dropped_total == 0
+    assert queue.submitted_total == 2  # both attempts counted
+    assert queue.qsize() == 1  # the first record is still queued, untouched
+
+
+@pytest.mark.asyncio
+async def test_sentinel_submit_timeout_counts_sentinel_dropped_not_dropped() -> None:
+    """A drop sentinel that itself cannot land must NOT double-count.
+
+    ``dropped_total`` (the lost chunk was already counted there once).
+    """
+    queue = _queue(maxsize=1, num_workers=0)
+    assert await queue.submit_blocking(_noop_task("occupies-queue")) is True
+
+    accepted = await queue.submit_blocking(
+        _noop_task("drop_sentinel"), timeout=0.05, sentinel=True
+    )
+
+    assert accepted is False
+    assert queue.sentinel_dropped_total == 1
+    assert queue.dropped_total == 0
+    assert queue.submitted_total == 1  # the timed-out sentinel is not a record

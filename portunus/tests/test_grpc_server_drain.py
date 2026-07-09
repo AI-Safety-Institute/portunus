@@ -48,10 +48,12 @@ class _RecordingQueue:
     def __init__(self, *, cancelled: int = 0) -> None:
         self._cancelled = cancelled
         self.drain_timeout_seen: Optional[float] = None
+        self.submitted_total = 0
         self.published_total = 0
         self.dropped_total = 0
         self.delivery_failed_total = 0
         self.build_failed_total = 0
+        self.skipped_unconfigured_total = 0
         self.cancelled_total = 0
 
     async def stop(self, *, drain_timeout: float) -> int:
@@ -97,15 +99,20 @@ async def test_drain_gives_queue_only_the_remaining_grace_not_a_second_full_grac
     derives the queue budget from a single shared deadline.
     """
     grace = 1
+    reserve = 0.2
     server_stop = 0.3
     server = _FakeServer(stop_duration=server_stop)
     queue = _RecordingQueue(cancelled=0)
 
-    await stop_grpc_server(_runtime(server=server, queue=queue), grace_seconds=grace)
+    await stop_grpc_server(
+        _runtime(server=server, queue=queue),
+        grace_seconds=grace,
+        flush_reserve_seconds=reserve,
+    )
 
-    # server.stop still gets the full grace (it self-bounds, returning
-    # early if streams end).
-    assert server.grace_seen == grace
+    # server.stop gets the grace MINUS the flush reserve (it self-bounds,
+    # returning early if streams end).
+    assert server.grace_seen == pytest.approx(grace - reserve)
     # The queue got the REMAINING budget, not a second full grace.
     assert queue.drain_timeout_seen is not None
     assert queue.drain_timeout_seen < grace
@@ -153,7 +160,11 @@ async def test_drain_total_time_bounded_by_single_grace_with_wedged_sink():
 
     loop = asyncio.get_running_loop()
     t0 = loop.time()
-    await stop_grpc_server(_runtime(server=server, queue=queue), grace_seconds=grace)
+    await stop_grpc_server(
+        _runtime(server=server, queue=queue),
+        grace_seconds=grace,
+        flush_reserve_seconds=0.15 * grace,
+    )
     elapsed = loop.time() - t0
 
     # Post-fix ~1.0s; the pre-fix 2×grace path would be ~1.85s here.
@@ -197,3 +208,71 @@ async def test_drain_does_not_log_error_on_clean_drain(caplog):
         for r in caplog.records
         if getattr(r, "event", None) == "audit_records_lost_on_drain"
     ]
+
+
+class _EnvoyHeldStreamServer:
+    """``server.stop`` consumes its ENTIRE grace before returning.
+
+    Models the routine busy-stop case: any active ext_proc stream is held
+    open by Envoy for its own (longer) drain — grpc.aio can't end it early,
+    so ``stop`` only returns at grace expiry. Pre-fix this starved the
+    publish-queue flush to a 0.0s budget on every live-traffic stop.
+    """
+
+    def __init__(self) -> None:
+        self.grace_seen: Optional[float] = None
+
+    async def stop(self, grace: float) -> None:
+        self.grace_seen = grace
+        await asyncio.sleep(grace)
+
+
+@pytest.mark.asyncio
+async def test_flush_reserve_leaves_nonzero_queue_budget_when_streams_held_open():
+    """F7 zero-budget regression (C2): an active stream at stop must NOT.
+
+    starve the audit flush to 0 seconds.
+
+    With Envoy holding the stream open, ``server.stop`` uses everything it
+    is given. The flush reserve caps what the server drain may consume, so
+    the queue always receives ~reserve seconds — instead of the pre-fix
+    ``drain_timeout=0.0`` that cancelled every buffered record on every
+    busy deploy with a perfectly healthy sink.
+    """
+    grace = 1
+    reserve = 0.4
+    server = _EnvoyHeldStreamServer()
+    queue = _RecordingQueue(cancelled=0)
+
+    await stop_grpc_server(
+        _runtime(server=server, queue=queue),
+        grace_seconds=grace,
+        flush_reserve_seconds=reserve,
+    )
+
+    # The server drain was budget-capped at grace - reserve...
+    assert server.grace_seen == pytest.approx(grace - reserve)
+    # ...and the queue kept a real, non-zero flush window (~the reserve).
+    assert queue.drain_timeout_seen is not None
+    assert queue.drain_timeout_seen > 0.0
+    assert queue.drain_timeout_seen >= reserve * 0.5
+
+
+@pytest.mark.asyncio
+async def test_flush_reserve_larger_than_grace_is_clamped():
+    """A reserve bigger than the whole grace must not go negative — the.
+
+    server drain gets 0 and the queue gets (at most) the full grace.
+    """
+    server = _EnvoyHeldStreamServer()
+    queue = _RecordingQueue(cancelled=0)
+
+    await stop_grpc_server(
+        _runtime(server=server, queue=queue),
+        grace_seconds=1,
+        flush_reserve_seconds=30.0,
+    )
+
+    assert server.grace_seen == pytest.approx(0.0)
+    assert queue.drain_timeout_seen is not None
+    assert 0.0 < queue.drain_timeout_seen <= 1.0
