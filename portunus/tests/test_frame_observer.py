@@ -105,9 +105,9 @@ def test_parse_error_desyncs_its_direction_only_and_flags_lost_frames():
     wsproto swallows the ``ParseFailed`` internally and synthesizes a
     CloseConnection event (without moving off the OPEN state — the
     discriminator from a genuine wire close); after that it silently
-    discards every further byte in that direction. Pre-fix the caller had
-    no signal that observation had stopped, so the WS summary reported
-    clean counts for a blinded session (audit MEDIUM). The synthesized
+    discards every further byte in that direction. The ``desynced`` flag is
+    the caller's only signal that observation stopped — without it the WS
+    summary reports clean counts for a blinded session. The synthesized
     close must NOT surface as an observed close frame — it never existed
     on the wire.
     """

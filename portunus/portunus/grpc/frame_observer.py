@@ -149,9 +149,8 @@ class FrameObserver:
         # CloseReason surfacing as ParseFailed), its wsproto state is
         # desynced: nothing later in that direction can be parsed. The flag
         # lets the caller record the loss ONCE (per-direction truncated
-        # counter on the WS summary) instead of the pre-fix behaviour of
-        # silently observing nothing for the rest of the session while the
-        # summary reported clean counts.
+        # counter on the WS summary) instead of silently reporting clean
+        # counts for a session that stopped being observed.
         self._desynced: dict[Direction, bool] = {
             Direction.REQUEST: False,
             Direction.RESPONSE: False,

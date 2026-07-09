@@ -67,15 +67,15 @@ class CacheService:
         """Hash payload + target_host into a Redis-safe cache key.
 
         ``target_host`` MUST be included: the secret carries an optional
-        ``host`` restriction that ``SecretValidationService`` enforces on
-        cache-miss. Without ``target_host`` in the key, a bearer authorised
+        ``host`` restriction that ``validate_and_extract_api_key`` enforces
+        on cache-miss. Without ``target_host`` in the key, a bearer authorised
         for provider A could re-use a cached api_key when sent through a
         proxy fronting provider B — silently bypassing host enforcement.
 
         The two components are hashed independently before the outer hash
         (rather than joined with a delimiter) so no (host, payload) pair can
         collide with another by shifting bytes across an unescaped separator
-        — e.g. ``("a:b", "c")`` vs ``("a", "b:c")`` under the previous
+        — e.g. ``("a:b", "c")`` vs ``("a", "b:c")`` under a naive
         ``f"{host}:{payload}"`` scheme. The host is normalised (lower-case,
         default ``:443`` stripped) so equivalent hosts share one entry; the
         same normalisation is applied to the miss-path host-restriction

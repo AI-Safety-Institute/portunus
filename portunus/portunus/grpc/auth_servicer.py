@@ -1,7 +1,7 @@
 """Envoy ``ext_authz`` v3 Check servicer.
 
-Two passes share the entry point, discriminated by
-``attributes.context_extensions["pass"]``:
+Two passes share the entry point, discriminated by the
+``x-portunus-pass`` gRPC initial_metadata Envoy sets per filter config:
 
 - ``auth`` (default): header-only authentication. Returns the upstream
   api_key as a header mutation and sets ``dynamic_metadata`` so the
@@ -259,11 +259,10 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                 )
                 # ``sign_request`` is sync boto3 (KMS.Sign is a blocking
                 # HTTPS round-trip). ``sign_request_async`` offloads it to a
-                # dedicated, sized KMS executor (so signing throughput isn't
-                # capped by the shared default pool) behind a concurrency
-                # semaphore (so a signing burst can't pile up buffered 32 MiB
-                # bodies and exhaust memory — mem-V2). ``sign_fn`` keeps the
-                # sync-signer injection seam for test fakes.
+                # dedicated, sized KMS executor behind a concurrency semaphore
+                # so a signing burst can't pile up buffered 32 MiB bodies and
+                # exhaust memory. ``sign_fn`` keeps the sync-signer injection
+                # seam for test fakes.
                 signature_headers = await sign_request_async(
                     signable,
                     auth_result.signing_key,
@@ -310,7 +309,7 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             )
         except SigningOverloadedError:
             # Concurrency cap saturated past the acquire timeout — shed fail
-            # closed (503) rather than pile up buffered bodies (mem-V2).
+            # closed (503) rather than pile up buffered bodies.
             logger.warning(
                 "Signing capacity exhausted; shedding (request_id=%s)", request_id
             )
@@ -367,21 +366,19 @@ def _ok(
         if config.api_key_header.lower() != "authorization":
             headers_to_remove.append("authorization")
 
-    # ext_authz #1 is the single source of truth for signing-required.
-    # Envoy applies headers_to_add BEFORE headers_to_remove, so listing
-    # the header in both — as the previous version did — strips the
-    # value we just set and the composite filter downstream never
-    # dispatches the signing pass. ``OVERWRITE_IF_EXISTS_OR_ADD``
-    # already replaces any client-supplied value, so only strip on the
-    # non-signing branch where we don't re-add it ourselves.
-    # Strip any client-forged signature headers on the auth pass.
-    # Doing this at the ext_authz layer (not the route's
-    # request_headers_to_remove) preserves the legitimate values
-    # ext_authz #2 adds on the signing branch — Envoy applies ext_authz
-    # mutations in order, so #1's remove runs before #2's add.
+    # Strip client-forged signature headers on the auth pass. Stripping at
+    # the ext_authz layer (not the route's request_headers_to_remove)
+    # preserves the legitimate values ext_authz #2 adds on the signing
+    # branch — Envoy applies ext_authz mutations in order, so #1's remove
+    # runs before #2's add.
     if signing_required is not None:
         headers_to_remove.extend(("content-digest", "signature", "signature-input"))
 
+    # Envoy applies headers_to_add BEFORE headers_to_remove, so the signing
+    # branch must NOT also list the header in headers_to_remove — that would
+    # strip the value just set and the composite filter would never dispatch
+    # the signing pass. OVERWRITE_IF_EXISTS_OR_ADD already replaces any
+    # client-supplied value; only strip on the non-signing branch.
     if signing_required is not None:
         if signing_required:
             headers_to_add.append(

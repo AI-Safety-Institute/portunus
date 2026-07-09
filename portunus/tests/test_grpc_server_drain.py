@@ -95,9 +95,9 @@ def _runtime(*, server: object, queue: object) -> GrpcRuntime:
 async def test_drain_gives_queue_only_the_remaining_grace_not_a_second_full_grace():
     """The queue's drain budget is grace MINUS what server.stop already spent.
 
-    Pre-fix the queue was handed ``float(grace_seconds)`` outright — a
-    second full grace window stacked on top of ``server.stop``. The fix
-    derives the queue budget from a single shared deadline.
+    Handing the queue ``float(grace_seconds)`` outright stacks a second
+    full grace window on top of ``server.stop``; the budget must derive
+    from a single shared deadline.
     """
     grace = 1
     reserve = 0.2
@@ -129,8 +129,8 @@ async def test_drain_total_time_bounded_by_single_grace_with_wedged_sink():
 
     ``server.stop`` consumes most of the grace (active stream); the real
     queue is wedged behind a slow sender with records still buffered. The
-    fix bounds the *total* by one grace window and records the lost
-    records on ``cancelled_total`` (item 2).
+    total must stay bounded by one grace window, with the lost records
+    counted on ``cancelled_total``.
     """
     grace = 1
     sleeping = asyncio.Event()
@@ -168,7 +168,7 @@ async def test_drain_total_time_bounded_by_single_grace_with_wedged_sink():
     )
     elapsed = loop.time() - t0
 
-    # Post-fix ~1.0s; the pre-fix 2×grace path would be ~1.85s here.
+    # ~1.0s with the shared deadline; a 2×grace drain would be ~1.85s here.
     assert elapsed <= grace + 0.4, f"drain overran one grace window: {elapsed:.2f}s"
     # Records that never flushed are counted, not silently discarded.
     assert queue.cancelled_total > 0
@@ -216,8 +216,7 @@ class _EnvoyHeldStreamServer:
 
     Models the routine busy-stop case: any active ext_proc stream is held
     open by Envoy for its own (longer) drain — grpc.aio can't end it early,
-    so ``stop`` only returns at grace expiry. Pre-fix this starved the
-    publish-queue flush to a 0.0s budget on every live-traffic stop.
+    so ``stop`` only returns at grace expiry.
     """
 
     def __init__(self) -> None:
@@ -230,15 +229,13 @@ class _EnvoyHeldStreamServer:
 
 @pytest.mark.asyncio
 async def test_flush_reserve_leaves_nonzero_queue_budget_when_streams_held_open():
-    """F7 zero-budget regression (C2): an active stream at stop must NOT.
-
-    starve the audit flush to 0 seconds.
+    """An active stream at stop must NOT starve the audit flush to 0 seconds.
 
     With Envoy holding the stream open, ``server.stop`` uses everything it
     is given. The flush reserve caps what the server drain may consume, so
-    the queue always receives ~reserve seconds — instead of the pre-fix
-    ``drain_timeout=0.0`` that cancelled every buffered record on every
-    busy deploy with a perfectly healthy sink.
+    the queue always receives ~reserve seconds — a ``drain_timeout=0.0``
+    would cancel every buffered record on every busy deploy with a
+    perfectly healthy sink.
     """
     grace = 1
     reserve = 0.4

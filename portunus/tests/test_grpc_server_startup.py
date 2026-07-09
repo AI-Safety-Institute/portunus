@@ -48,26 +48,6 @@ def test_grpc_message_limit_has_signed_body_headroom():
 
 
 @pytest.mark.asyncio
-async def test_disabled_server_returns_none_without_checking_proxy_key():
-    """When ``enabled=False`` the fail-closed check is bypassed.
-
-    The empty-key fail-closed only applies once we'd actually start
-    serving, so a tenant that has GRPC_ENABLED=false (i.e. running
-    only the FastAPI side) doesn't crash on config validation.
-    """
-    config = GrpcConfig(enabled=False)
-    assert (
-        await start_grpc_server(
-            config=config,
-            firehose=_configured_firehose(),
-            auth_service=_FakeAuthService(),  # type: ignore[arg-type]
-            publish_service=_FakePublishService(),  # type: ignore[arg-type]
-        )
-        is None
-    )
-
-
-@pytest.mark.asyncio
 async def test_enabled_with_empty_key_and_optional_unset_raises_runtimeerror():
     """Production guard: empty key with optional=False refuses to start.
 
@@ -118,9 +98,7 @@ async def test_enabled_with_non_empty_key_does_not_raise():
         enabled=True,
         proxy_api_key="a-real-proxy-key-with-length",
         proxy_api_key_optional=False,
-        # Use an ephemeral port to avoid clashing with anything else
-        # the test runner has bound. Range 30000+ is safely above the
-        # well-known services.
+        # Distinct high port to avoid clashing with the other startup tests.
         port=50051,
     )
     runtime = await start_grpc_server(

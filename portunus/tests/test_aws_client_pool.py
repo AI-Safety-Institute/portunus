@@ -1,8 +1,8 @@
-"""Tests for the credential-keyed AWS client pool (backpressure LOW #3).
+"""Tests for the credential-keyed AWS client pool.
 
-STS + Secrets Manager clients used to be rebuilt per auth cache-miss
-(~200ms cold each: fresh aiohttp pool + TLS). ``StateService`` now pools
-them per (service, credential set, endpoint) behind a session-like adapter
+Rebuilding STS + Secrets Manager clients per auth cache-miss costs ~200ms
+cold each (fresh aiohttp pool + TLS). ``StateService`` pools them per
+(service, credential set, endpoint) behind a session-like adapter
 (``pooled_boto_session()``), which ``AuthService`` wires in by default.
 """
 

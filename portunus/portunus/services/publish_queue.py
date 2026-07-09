@@ -202,7 +202,7 @@ class BoundedPublishQueue:
         Firehose). A non-zero value means audit was lost at shutdown
         despite a clean process exit — alarm on it. Includes records a
         worker had already pulled into an in-flight batch when the drain
-        timed out (previously uncounted).
+        timed out.
         """
         return self._cancelled_total
 

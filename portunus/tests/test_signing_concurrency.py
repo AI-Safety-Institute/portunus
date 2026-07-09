@@ -1,4 +1,4 @@
-"""Tests for the bounded signing path (mem-V2 + KMS-executor MEDIUM).
+"""Tests for the bounded signing path.
 
 ``sign_request_async`` must:
 

@@ -1,12 +1,12 @@
 """Tests for the liveness/readiness split of the gRPC health services.
 
-The phase-1 detection fix drove the OVERALL ``""`` health service from the
-Redis monitor — but the ECS container liveness probe (``grpc_health_probe``,
-service ``""``) reads the same status, so a *correlated* Redis outage would
-NOT_SERVING every task at once → ECS recycles the whole fleet → replacements
-can't start (Envoy dependsOn Portunus-HEALTHY needs Redis) → deadlock.
+Driving the OVERALL ``""`` health service from the Redis monitor is a trap:
+the ECS container liveness probe (``grpc_health_probe``, service ``""``)
+reads the same status, so a *correlated* Redis outage would NOT_SERVING
+every task at once → ECS recycles the whole fleet → replacements can't
+start (Envoy dependsOn Portunus-HEALTHY needs Redis) → deadlock.
 
-The contract now (NEW-1, keep byte-for-byte in sync with proxy/envoy.yaml):
+The contract (keep byte-for-byte in sync with proxy/envoy.yaml):
 
 * ``""`` (overall) = **LIVENESS**: SERVING as soon as the listener binds,
   NOT_SERVING only at drain start. The Redis monitor NEVER touches it.
@@ -303,7 +303,7 @@ async def _status(runtime, service: str) -> int:
 
 @pytest.mark.asyncio
 async def test_liveness_stays_serving_across_redis_outage():
-    """The e2e shape of NEW-1.
+    """The end-to-end shape of the liveness/readiness split.
 
     Redis dies → readiness NOT_SERVING (task leaves ALB rotation) while
     liveness stays SERVING (ECS never recycles the task); recovery restores

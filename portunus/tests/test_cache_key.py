@@ -1,9 +1,9 @@
-"""Tests for the auth-cache key structure + host normalisation (security F4).
+"""Tests for the auth-cache key structure + host normalisation.
 
-The previous key was ``sha256(f"{host or ''}:{payload}")`` — an unescaped
+A naive key like ``sha256(f"{host or ''}:{payload}")`` has an unescaped
 ``:`` delimiter, so ``(host="a:b", payload="c")`` and
-``(host="a", payload="b:c")`` hashed identically. The new scheme hashes the
-components independently (structure-proof) and normalises the host
+``(host="a", payload="b:c")`` hash identically. The scheme under test hashes
+the components independently (structure-proof) and normalises the host
 (lower-case, default ``:443`` stripped) so equivalent hosts share one entry.
 
 The fail-closed miss-path recheck (``validate_and_extract_api_key``) applies

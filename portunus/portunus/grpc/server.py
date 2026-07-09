@@ -56,8 +56,7 @@ _MIN_PROXY_KEY_BYTES = 16
 # with a consecutive-failure debounce. The ALB /healthz (Envoy active gRPC
 # health check with service_name="readiness") reads it, so a Redis-down
 # task leaves rotation without being killed. Keep this string in sync with
-# proxy/envoy.yaml's grpc_health_check.service_name (see
-# shared/FIX-COORDINATION.md).
+# proxy/envoy.yaml's grpc_health_check.service_name.
 LIVENESS_SERVICE_NAME = ""
 READINESS_SERVICE_NAME = "readiness"
 
@@ -209,11 +208,9 @@ async def start_grpc_server(
     # record type is published unconditionally, but each ``build_*`` short-
     # circuits to ``None`` (warning only) when its stream is unset, so a task
     # with ``FIREHOSE_*`` unset would serve traffic while silently dropping
-    # 100% of audit records — no error to the caller, no alarm. This ports the
-    # FastAPI ``lifespan`` boot-guard from #22 (commit 0c9ff50) into the gRPC
-    # startup path that replaced ``app.py``: refuse to come up serving rather
-    # than let a blue task drop all audit. There is no opt-out (matching #22);
-    # a task that genuinely needs no audit sink should not be in rotation.
+    # 100% of audit records — no error to the caller, no alarm. Refuse to come
+    # up serving instead. There is no opt-out; a task that genuinely needs no
+    # audit sink should not be in rotation.
     missing_streams = firehose.missing_required_streams()
     if missing_streams:
         raise RuntimeError(
@@ -265,9 +262,7 @@ async def start_grpc_server(
     )
     proc_grpc.add_ExternalProcessorServicer_to_server(proc_servicer, server)
 
-    # Standard gRPC health service — the ECS / ALB probe target now that
-    # the FastAPI /ping endpoint is gone. Reports SERVING for the overall
-    # server ("") once listening.
+    # Standard gRPC health service — the ECS / ALB probe target.
     health_servicer = health.aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
@@ -401,16 +396,14 @@ async def stop_grpc_server(
         LIVENESS_SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING
     )
 
-    # Share a SINGLE drain budget across both stops. ``server.stop`` and
-    # ``publish_queue.stop`` were previously each passed the full
-    # ``grace_seconds`` and awaited sequentially, so a wedged sink + an
-    # active stream could consume up to 2×grace before returning — an
-    # overrun that risks a SIGKILL (137) if an operator raises grace
-    # toward the ECS ``stopTimeout``. Compute the deadline once; the server
-    # drain gets grace minus the flush reserve, and the queue gets whatever
-    # remains (>= the reserve when the stream drain used its full slice),
-    # so the total is bounded by ``grace_seconds`` and the flush is never
-    # starved to zero by Envoy-held streams.
+    # Share a SINGLE drain budget across both stops — giving ``server.stop``
+    # and ``publish_queue.stop`` a full grace each would let a wedged sink +
+    # an active stream consume up to 2×grace, risking a SIGKILL (137) if an
+    # operator raises grace toward the ECS ``stopTimeout``. Compute the
+    # deadline once; the server drain gets grace minus the flush reserve, and
+    # the queue gets whatever remains (>= the reserve when the stream drain
+    # used its full slice), so the total is bounded by ``grace_seconds`` and
+    # the flush is never starved to zero by Envoy-held streams.
     loop = asyncio.get_running_loop()
     reserve = min(max(0.0, flush_reserve_seconds), float(grace_seconds))
     deadline = loop.time() + grace_seconds
@@ -492,16 +485,16 @@ async def stop_grpc_server(
 async def run() -> None:
     """Process entrypoint: build services, serve gRPC, drain on SIGTERM.
 
-    This is the whole Portunus process — there is no FastAPI/uvicorn layer.
-    Services are constructed here (previously in the FastAPI module), the
-    gRPC server is started, and we block until SIGTERM/SIGINT, then drain
-    gracefully. ECS sends SIGTERM on task stop; the task ``stopTimeout``
-    (120s in the akp CDK) must exceed ``graceful_shutdown_seconds``.
+    This is the whole Portunus process — there is no HTTP layer. Services
+    are constructed here, the gRPC server is started, and we block until
+    SIGTERM/SIGINT, then drain gracefully. ECS sends SIGTERM on task stop;
+    the task ``stopTimeout`` (120s in the akp CDK) must exceed
+    ``graceful_shutdown_seconds``.
     """
     # Imported here, not at module top, so importing this module for its
     # start/stop helpers (e.g. in tests) doesn't construct AWS/Redis clients.
     # Importing portunus.logging runs configure_logging() (structured JSON
-    # to stdout) — previously done via uvicorn's --log-config.
+    # to stdout).
     import portunus.logging  # noqa: F401 — import side effect: configures logging
     from portunus.config import config
     from portunus.services.auth_service import AuthService

@@ -3,7 +3,7 @@
 
 Drives realistic client flows (signing-bearing HTTP POST, Codex-shaped
 Responses-API WS stream) through Portunus and asserts the expected
-Kinesis records land in LocalStack. The transport-level behaviour tests
+audit records land in LocalStack S3. The transport-level behaviour tests
 live in ``test_ws_proxy_behaviour.py`` / ``test_http_proxy_behaviour.py``;
 this file's job is the audit arm — the pipeline that aisitok consumes.
 
@@ -57,8 +57,8 @@ async def _wait_for_s3_records(
 ) -> list[dict[str, Any]]:
     """Poll the Firehose→S3 audit prefix until ``predicate(records)`` holds.
 
-    The audit pipeline is Firehose direct-PUT → S3 (Kinesis Data Streams
-    were retired in #22). ``conftest._read_audit_s3_records`` reads one
+    The audit pipeline is Firehose direct-PUT → S3.
+    ``conftest._read_audit_s3_records`` reads one
     logical stream's S3 prefix (e.g. ``response-body``) and parses the
     newline-delimited JSON; LocalStack's 1s/1MiB buffer hints
     (``scripts/localstack-init-firehose.sh``) land records within ~1-2s.
@@ -91,8 +91,8 @@ async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
 
     Drives ws-echo's ``/v1/responses`` mock, which emits a Responses-API
     event stream. Asserts:
-      * Each server-emitted WS event lands in the response-body Kinesis
-        stream as its own frame audit record.
+      * Each server-emitted WS event lands in the response-body stream
+        as its own frame audit record.
       * A per-connection summary record lands in the ws-summary stream
         with a matching server_text_frames count.
     """
@@ -169,7 +169,7 @@ async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
 
 
 # ---------------------------------------------------------------------------
-# Signing flow — request headers in Kinesis carry Content-Digest / Signature.
+# Signing flow — audited request headers carry Content-Digest / Signature.
 # ---------------------------------------------------------------------------
 
 
@@ -263,10 +263,10 @@ def test_signed_request_publishes_digest_and_signature_headers_to_s3(
     raw_headers = {k.lower(): v for k, v in record["raw_headers"].items()}
     decoded_digest = base64.b64decode(raw_headers["content-digest"]).decode("utf-8")
     assert decoded_digest == vector["expected_values"]["content_digest"], (
-        f"Content-Digest in Kinesis differs from upstream-seen value: "
+        f"Content-Digest in the audit record differs from upstream-seen value: "
         f"{decoded_digest} vs {vector['expected_values']['content_digest']}"
     )
     decoded_sig = base64.b64decode(raw_headers["signature"]).decode("utf-8")
     assert re.match(
         r"^sig1=:[A-Za-z0-9+/=]+:$", decoded_sig
-    ), f"Signature in Kinesis malformed: {decoded_sig!r}"
+    ), f"Signature in the audit record malformed: {decoded_sig!r}"

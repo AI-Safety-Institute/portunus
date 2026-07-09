@@ -197,8 +197,8 @@ class AuthService:
         """
         # Check cache first for better performance. target_host MUST be
         # part of the lookup key — without it a cache hit short-circuits
-        # SecretValidationService.validate_and_extract_api_key, which is
-        # where the secret's host-restriction is enforced.
+        # validate_and_extract_api_key, which is where the secret's
+        # host-restriction is enforced.
         if payload.raw:
             try:
                 async with asyncio.timeout(5):

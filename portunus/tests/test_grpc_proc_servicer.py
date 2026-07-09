@@ -292,8 +292,8 @@ async def test_credential_headers_are_redacted_from_published_request_headers():
 
     ext_proc observes headers AFTER ext_authz rewrites ``Authorization`` to
     the real upstream provider API key. Publishing that verbatim would
-    archive customer secrets to Firehose. Mirrors the legacy Lua filter's
-    exclusion. Also strips ``x-api-key`` (Anthropic-style key location),
+    archive customer secrets to Firehose. Also strips ``x-api-key``
+    (Anthropic-style key location),
     ``cookie`` / ``set-cookie`` (session credentials), ``proxy-authorization``
     (forward-proxy bearer tokens), and ``x-amz-security-token`` (STS session
     tokens forwarded by clients that signed requests upstream of us).
@@ -633,8 +633,8 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 
 # ---------------------------------------------------------------------------
-# Envoy 1.36 FDS contract — every body chunk gets a streamed_response;
-# the terminal chunk mirrors end_of_stream so Envoy unblocks the HCM
+# ProcessingResponse shape under observability_mode — header events yield a
+# matching HeadersResponse; body events yield nothing (Envoy ignores them)
 # ---------------------------------------------------------------------------
 
 
@@ -1059,7 +1059,7 @@ async def test_ws_frames_carry_monotonic_per_direction_frame_index():
 
     Downstream Glue keys WS frames by (request_id, frame_index); without a
     distinct index, identical same-timestamp frames collide on the body-hash
-    row key and get dropped by dedup (the H1 undercount). Assert successive
+    row key and get dropped by dedup (undercounting frames). Assert successive
     frames in one direction get 0, 1, ... and HTTP bodies leave it None.
     """
     servicer, publish, queue = _make_servicer()
@@ -1308,10 +1308,11 @@ async def test_ws_upgrade_request_headers_carry_x_portunus_debug_id():
 
 
 # ---------------------------------------------------------------------------
-# Redaction regression (PR #32 reviewed set) + capture allowlist
+# Redaction regression (security-reviewed reference denylist) + capture
+# allowlist
 # ---------------------------------------------------------------------------
 
-_PR32_DENYLIST = {
+_REFERENCE_DENYLIST = {
     "authorization",
     "proxy-authorization",
     "cookie",
@@ -1335,19 +1336,16 @@ def _header_map(headers: dict[str, str]) -> base_pb2.HeaderMap:
     "api_key_header",
     ["authorization", "x-api-key", "x-custom-tenant-key", "API-KEY"],
 )
-def test_pr32_denylist_headers_never_captured_under_any_api_key_header(
+def test_reference_denylist_headers_never_captured_under_any_api_key_header(
     monkeypatch, api_key_header
 ):
-    """Regression for the #19 redaction narrowing (security HIGH / C4).
+    """The security-reviewed denylist holds under ANY ``API_KEY_HEADER``.
 
-    PR #32's security-reviewed denylist redacted ``api-key`` (Azure),
-    ``x-goog-api-key`` (Google), ``xi-api-key`` (ElevenLabs),
-    ``x-hume-api-key`` (Hume) and a *hardcoded* ``authorization`` literal.
-    The #19 rewrite dropped the four provider headers entirely and made
-    ``authorization`` redacted only when it happened to equal the configured
-    ``API_KEY_HEADER``. Pin: the full #32 set is redacted under ANY
-    ``API_KEY_HEADER`` value, and the configured header itself is redacted
-    whatever it is set to.
+    ``authorization`` must be a hardcoded literal (redacted even when the
+    deployment configures a different API-key header), the provider-specific
+    key headers (Azure ``api-key``, Google ``x-goog-api-key``, ElevenLabs
+    ``xi-api-key``, Hume ``x-hume-api-key``) must always be redacted, and
+    the configured header itself is redacted whatever it is set to.
     """
     monkeypatch.setattr(portunus_config, "api_key_header", api_key_header)
 
@@ -1370,7 +1368,7 @@ def test_pr32_denylist_headers_never_captured_under_any_api_key_header(
         )
     )
 
-    leaked = _PR32_DENYLIST & set(captured)
+    leaked = _REFERENCE_DENYLIST & set(captured)
     assert not leaked, f"credential headers leaked to capture: {leaked}"
     assert api_key_header.lower() not in captured
     # The capture still works for safe headers.
@@ -1433,11 +1431,10 @@ def test_unknown_headers_are_dropped_by_the_capture_allowlist():
 async def test_drop_sentinel_survives_body_saturation_and_lands_in_publish():
     """Under body saturation the ``dropped=True`` marker must still enqueue.
 
-    Pre-fix the sentinel was submitted on the same ``submit_droppable`` path
-    at the very instant ``qsize >= body_capacity`` — so under the exact
-    condition it exists to signal, it was dropped too (99 drop warnings, 0
-    markers in S3 in the load test). Now it rides ``submit_blocking`` into
-    the reserved headroom.
+    A sentinel submitted on the same ``submit_droppable`` path would be
+    rejected at the very instant ``qsize >= body_capacity`` — dropped under
+    the exact condition it exists to signal. It must ride ``submit_blocking``
+    into the reserved headroom instead.
     """
     servicer, publish, queue = _make_servicer(queue_maxsize=12)
     # Default body_capacity is 90% of maxsize = 10. Saturate the body tier,
@@ -1515,12 +1512,12 @@ async def test_sentinel_timeout_under_true_saturation_counts_sentinel_dropped(
 
 @pytest.mark.asyncio
 async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
-    """A malformed WS frame desyncs the parser for that direction. Pre-fix the.
+    """A malformed WS frame desyncs the parser for that direction.
 
-    observer logged and went silent — the WSSummaryRecord then reported clean
-    counts while the rest of the session went unobserved (audit MEDIUM). Now
-    the transition bumps the per-direction truncated counter once, so the
-    summary reflects the observation gap.
+    An observer that just logs and goes silent leaves the WSSummaryRecord
+    reporting clean counts while the rest of the session goes unobserved.
+    The desync transition must bump the per-direction truncated counter
+    once, so the summary reflects the observation gap.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
