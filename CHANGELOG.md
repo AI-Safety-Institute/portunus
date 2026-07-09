@@ -6,6 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- `/healthz` Envoy endpoint for the ALB health check, served by the
+  `envoy.filters.http.health_check` filter and gated on an **active gRPC
+  health check** of Portunus (`grpc.health.v1.Health`, overall `""`
+  service) via a dedicated `portunus_health_cluster`. Unlike `/ping`
+  (Envoy-liveness direct_response, unchanged), `/healthz` goes 503 when
+  Portunus is dead, unreachable, reporting NOT_SERVING (including
+  dependency/Redis self-check failures), or draining — so the ALB pulls
+  a broken task in seconds instead of 403ing its traffic share until the
+  ~105s ECS container probe fires. The akp ALB target-group health check
+  must move from `/ping` to `/healthz` (see `shared/akp-changes.md`).
+- Dedicated `portunus_extproc_cluster` for the ext_proc (audit) filter.
+  ext_authz and ext_proc previously shared `portunus_grpc_cluster` and
+  its circuit-breaker budget (`max_requests: 2048`), so a wedged audit
+  sink accumulating long-lived ext_proc streams (WS streams live up to
+  3300s) could starve the fail-closed ext_authz Checks into customer
+  503s at high sustained rps. Same loopback endpoint, separate breaker:
+  audit overload now only trips the fail-open audit path.
+- Envoy version tripwires: the proxy image build asserts
+  `envoy --version` is 1.36.x and `entrypoint.sh` re-asserts at runtime
+  (`EXPECTED_ENVOY_MINOR`, default `1.36`), so a careless resolution of
+  the #31↔#34 `FROM`-line conflict back to the shutdown-SIGSEGV-prone
+  1.31 fails loudly instead of shipping.
+- `docs/cutover-landing-order.md` — consolidated landing order,
+  pre-cutover checklist (akp #154 sentinel dependency + tripwire,
+  `deregistration_delay`, `container_dependencies`), honest WS
+  close-code semantics, and the real rollback procedure.
+
+### Security
+- Supply-chain pinning re-applied to the rewritten Dockerfiles (#31
+  posture, re-resolved): `envoyproxy/envoy:v1.36.0` and both
+  `python:3.12-alpine` stages pinned by digest; `uv` copied from a
+  version+digest pin instead of `:latest`; `grpc_health_probe` `ADD`
+  gains `--checksum=sha256:…`; the `yq` download is sha256-verified.
 - Operator runbook for flushing the shared auth cache fleet-wide:
   `docs/runbooks/flush-auth-cache.md`. An operator runs
   `aws ecs execute-command` into a Portunus task and invokes the app's own

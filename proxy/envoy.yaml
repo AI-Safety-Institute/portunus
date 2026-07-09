@@ -94,7 +94,11 @@ static_resources:
             - name: local_service
               domains: ["*"]
               routes:
-              # ALB health check — no auth, no upstream call.
+              # Envoy-liveness smoke endpoint — no auth, no upstream call.
+              # Answers 200 as long as the Envoy process lives; it says
+              # nothing about Portunus. The ALB health check target is
+              # /healthz (health_check filter below), which is gated on
+              # Portunus's actual gRPC health.
               - match:
                   path: "/ping"
                 direct_response:
@@ -180,6 +184,31 @@ static_resources:
                     retry_on: reset
                     num_retries: 3
           http_filters:
+          # /healthz — the ALB health-check target. Unlike /ping (a
+          # direct_response that stays 200 as long as the Envoy process
+          # lives), this is answered by the health_check filter gated on
+          # the ACTIVE gRPC health check of ``portunus_health_cluster``
+          # below: it returns 503 when Portunus is dead, unreachable, or
+          # reporting NOT_SERVING on ``grpc.health.v1.Health`` ("") —
+          # which Portunus derives from its own dependency health (Redis)
+          # — and when the drain manager has been failed via the admin
+          # ``/healthcheck/fail`` (i.e. during the SIGTERM drain). Point
+          # the ALB target-group health check at /healthz so a task whose
+          # Portunus is dead or denying everything is pulled from rotation
+          # in seconds instead of serving 403s until the ~105s ECS
+          # container probe recycles it. First in the chain so probes are
+          # never rate-limited or authed.
+          - name: envoy.filters.http.health_check
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+              pass_through_mode: false
+              headers:
+              - name: ":path"
+                string_match:
+                  exact: "/healthz"
+              cluster_min_healthy_percentages:
+                portunus_health_cluster:
+                  value: 100
           - name: envoy.filters.http.local_ratelimit
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
@@ -289,7 +318,17 @@ static_resources:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
               grpc_service:
                 envoy_grpc:
-                  cluster_name: portunus_grpc_cluster
+                  # Dedicated cluster (NOT portunus_grpc_cluster): ext_proc
+                  # streams are long-lived (WS streams live up to the 3300s
+                  # max_stream_duration) and, under a wedged audit sink,
+                  # blocked submits keep them open until Envoy cancels the
+                  # stream — on a shared cluster that pressure consumes the
+                  # circuit-breaker request budget that the DECISION-MAKING
+                  # ext_authz Checks (failure_mode_allow: false) need, and a
+                  # saturated audit path turns into customer 503s. Same
+                  # loopback endpoint, separate budget: audit overload can
+                  # only trip its own (fail-open) breaker.
+                  cluster_name: portunus_extproc_cluster
                 timeout: 30s
                 initial_metadata:
                 - key: x-portunus-proxy-key
@@ -386,7 +425,12 @@ static_resources:
                 address: ${WS_TARGET_HOST}
                 port_value: ${WS_TARGET_PORT}
     transport_socket: ${WS_TARGET_HOST_TRANSPORT_SOCKET}
-  # Portunus gRPC cluster. STRICT_DNS so the same image works for both
+  # Portunus gRPC cluster — ext_authz ONLY (both the header pass and the
+  # composite signing pass). ext_proc uses portunus_extproc_cluster below
+  # so audit-stream pressure can never consume this cluster's request
+  # budget: ext_authz is failure_mode_allow: false, so exhausting its
+  # breaker denies customers.
+  # STRICT_DNS so the same image works for both
   # the sidecar topology (PORTUNUS_HOST=127.0.0.1 — one endpoint, no
   # DNS to refresh) and any future DNS-based deployment, without
   # rebuilding. The SC-era tuning (dns_refresh_rate, LEAST_REQUEST,
@@ -419,6 +463,88 @@ static_resources:
           max_retries: 3
     load_assignment:
       cluster_name: portunus_grpc_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${PORTUNUS_HOST}
+                port_value: ${PORTUNUS_GRPC_PORT}
+  # ext_proc (audit/observability) cluster. Same Portunus endpoint as
+  # portunus_grpc_cluster but a SEPARATE cluster so the fail-open audit
+  # path has its own circuit-breaker budget, isolated from the fail-closed
+  # ext_authz path. Under a wedged Firehose sink, blocked publish submits
+  # hold ext_proc streams open (HTTP streams until Envoy's ~5s deferred
+  # close after the request ends; WS streams up to the 3300s
+  # max_stream_duration) — that accumulation now saturates THIS cluster's
+  # breaker (dropping audit, which failure_mode_allow: true tolerates)
+  # instead of starving ext_authz Checks into customer 503s.
+  - name: portunus_extproc_cluster
+    connect_timeout: 5s
+    type: STRICT_DNS
+    common_http_protocol_options:
+      idle_timeout: 60s
+    upstream_connection_options:
+      tcp_keepalive:
+        keepalive_probes: 1
+        keepalive_interval: 60
+        keepalive_time: 10
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    # One ext_proc stream per proxied request/WS session: 2048 active
+    # streams comfortably covers the per-task request concurrency this
+    # sizing has always assumed. Overflowing it degrades AUDIT ONLY
+    # (ext_proc is fail-open) — never customer auth.
+    circuit_breakers:
+      thresholds:
+        - priority: DEFAULT
+          max_connections: 1024
+          max_pending_requests: 256
+          max_requests: 2048
+          max_retries: 3
+    load_assignment:
+      cluster_name: portunus_extproc_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${PORTUNUS_HOST}
+                port_value: ${PORTUNUS_GRPC_PORT}
+  # Health-observation cluster: same Portunus endpoint again, used ONLY by
+  # the /healthz health_check HTTP filter (cluster_min_healthy_percentages)
+  # — no request traffic is ever routed to it. It exists so the ACTIVE
+  # gRPC health check below can't perturb the data-path clusters: marking
+  # a shared single-endpoint cluster unhealthy would interact with
+  # ext_authz routing (panic-threshold semantics), whereas this cluster
+  # going unhealthy only flips /healthz to 503 for the ALB.
+  - name: portunus_health_cluster
+    connect_timeout: 2s
+    type: STRICT_DNS
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    # Active check of the standard grpc.health.v1.Health service, overall
+    # ("") service — the same target as the ECS grpc_health_probe. Portunus
+    # reports NOT_SERVING there when draining and when its auth-path
+    # dependencies (Redis) fail its self-check, so a SERVING-but-denying
+    # task fails /healthz and the ALB stops routing to it within seconds.
+    # no_traffic_interval matters: no data traffic ever hits this cluster,
+    # so without it Envoy would fall back to the 60s no-traffic cadence.
+    health_checks:
+    - timeout: 2s
+      interval: 5s
+      no_traffic_interval: 5s
+      unhealthy_threshold: 2
+      healthy_threshold: 1
+      grpc_health_check: {}
+    load_assignment:
+      cluster_name: portunus_health_cluster
       endpoints:
       - lb_endpoints:
         - endpoint:

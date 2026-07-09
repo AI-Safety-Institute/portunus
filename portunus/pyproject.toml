@@ -39,6 +39,10 @@ dependencies = [
     # service. ``FrameObserver`` wraps ``wsproto.Connection`` to recover
     # logical text/binary/close frames from post-101 byte chunks.
     "wsproto>=1.2.0,<2",
+    # Brotli: ``Content-Encoding: br`` decode branch in models.py (#26 port)
+    # — several providers brotli-compress response bodies; without it token
+    # accounting silently fails for them.
+    "Brotli>=1.1.0",
 ]
 
 [dependency-groups]

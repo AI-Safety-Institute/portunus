@@ -1,6 +1,10 @@
-FROM python:3.12-alpine as builder
+# Base images digest-pinned (supply-chain posture from #31, carried into
+# this rewritten multi-stage build).
+FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df as builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# uv pinned by version + digest — ``:latest`` is a moving tag and the
+# build toolchain is inside the trust boundary (#31 posture).
+COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /uvx /bin/
 RUN apk add gcc python3-dev libc-dev build-base linux-headers
 
 ENV UV_COMPILE_BYTECODE=1 \
@@ -14,14 +18,18 @@ RUN touch README.md
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
-FROM python:3.12-alpine as runtime
+FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df as runtime
 
 # grpc_health_probe: the standard static binary docker/ECS use to probe a
 # gRPC server's grpc.health.v1.Health service. Replaces the old HTTP /ping
 # probe now that Portunus serves only gRPC (no FastAPI). Fetched as a
-# pinned, musl-compatible static build.
+# pinned, musl-compatible static build; ``--checksum`` makes the pin
+# content-addressed rather than tag-addressed (a release tag's assets can
+# be replaced; the digest can't). Bumping GRPC_HEALTH_PROBE_VERSION
+# requires updating the checksum in the same change.
 ARG GRPC_HEALTH_PROBE_VERSION=v0.4.36
-ADD --chmod=0755 \
+ADD --checksum=sha256:1335e83e90eafc602303ca2e2501a11b5e26e69891007e4175362674669630c1 \
+    --chmod=0755 \
     https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64 \
     /usr/local/bin/grpc_health_probe
 
