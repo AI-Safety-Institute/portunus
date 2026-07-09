@@ -189,15 +189,21 @@ static_resources:
           # lives), this is answered by the health_check filter gated on
           # the ACTIVE gRPC health check of ``portunus_health_cluster``
           # below: it returns 503 when Portunus is dead, unreachable, or
-          # reporting NOT_SERVING on ``grpc.health.v1.Health`` ("") —
-          # which Portunus derives from its own dependency health (Redis)
-          # — and when the drain manager has been failed via the admin
-          # ``/healthcheck/fail`` (i.e. during the SIGTERM drain). Point
-          # the ALB target-group health check at /healthz so a task whose
-          # Portunus is dead or denying everything is pulled from rotation
-          # in seconds instead of serving 403s until the ~105s ECS
-          # container probe recycles it. First in the chain so probes are
-          # never rate-limited or authed.
+          # reporting NOT_SERVING on the **"readiness"** service of
+          # ``grpc.health.v1.Health`` — which Portunus derives from its
+          # dependency health (Redis, debounced) — and when the drain
+          # manager has been failed via the admin ``/healthcheck/fail``
+          # (i.e. during the SIGTERM drain). Point the ALB target-group
+          # health check at /healthz so a task whose Portunus is dead or
+          # denying everything is pulled from rotation in seconds instead
+          # of serving 403s until the ~105s ECS container probe recycles
+          # it. READINESS ONLY: the ECS container liveness probe
+          # (grpc_health_probe) stays on the overall "" service, which is
+          # Redis-INDEPENDENT — so a correlated Redis outage pulls every
+          # task from ALB rotation but never recycles the fleet (and akp
+          # #177's "Envoy dependsOn Portunus HEALTHY" start ordering can't
+          # deadlock on Redis). First in the chain so probes are never
+          # rate-limited or authed.
           - name: envoy.filters.http.health_check
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
@@ -529,11 +535,23 @@ static_resources:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
         explicit_http_config:
           http2_protocol_options: {}
-    # Active check of the standard grpc.health.v1.Health service, overall
-    # ("") service — the same target as the ECS grpc_health_probe. Portunus
-    # reports NOT_SERVING there when draining and when its auth-path
-    # dependencies (Redis) fail its self-check, so a SERVING-but-denying
-    # task fails /healthz and the ALB stops routing to it within seconds.
+    # Active check of the standard grpc.health.v1.Health service, named
+    # "readiness" service — NOT the overall "" that the ECS
+    # grpc_health_probe targets. The split is deliberate (liveness vs
+    # readiness):
+    #   ""          = LIVENESS. SERVING once the listener binds; flips
+    #                 NOT_SERVING only at drain start. Redis-independent.
+    #                 Probed by ECS (grpc_health_probe default service) —
+    #                 a Redis outage must never recycle the task, and akp
+    #                 #177's container-dependency start must not need
+    #                 Redis.
+    #   "readiness" = SERVING iff Portunus's dependency self-check (Redis
+    #                 PING, with a consecutive-failure debounce) passes,
+    #                 and NOT_SERVING while draining. Probed HERE, so a
+    #                 SERVING-but-denying task leaves ALB rotation within
+    #                 seconds and re-enters on the first successful probe.
+    # The string must match the service name Portunus registers on its
+    # health servicer byte-for-byte (see grpc/server.py).
     # no_traffic_interval matters: no data traffic ever hits this cluster,
     # so without it Envoy would fall back to the 60s no-traffic cadence.
     health_checks:
@@ -542,7 +560,8 @@ static_resources:
       no_traffic_interval: 5s
       unhealthy_threshold: 2
       healthy_threshold: 1
-      grpc_health_check: {}
+      grpc_health_check:
+        service_name: "readiness"
     load_assignment:
       cluster_name: portunus_health_cluster
       endpoints:
