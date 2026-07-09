@@ -260,7 +260,9 @@ def _decompress_b64_body(
         if "gzip" in encoding:
             try:
                 body_bytes = gzip.decompress(body_bytes)
-            except (OSError, EOFError):
+            except (OSError, EOFError, zlib.error):
+                # zlib.error: a valid gzip header wrapping a corrupt deflate
+                # stream escapes the OSError/BadGzipFile paths.
                 return None, True
         elif "deflate" in encoding:
             try:

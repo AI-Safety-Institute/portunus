@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- `_decompress_b64_body` now catches `zlib.error` in the gzip branch. A valid
+  gzip header wrapping a corrupt deflate stream raises `zlib.error` (e.g.
+  "invalid bit length repeat"), which escaped the existing
+  `(OSError, EOFError)` handler and crashed the caller instead of marking the
+  record as a decode failure — one such body in the 2026-06-11 00:00–12:00
+  raw logs repeatedly killed whole `portunus-log-analysis-backfill` windows
+  during the July 2026 regen.
+
 ### Added
 - Constrain `uvicorn>=0.29.0,<0.47`: portunus is incompatible with
   uvicorn >=0.47.0, which imports the ASGI app before the serving event loop
