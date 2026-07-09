@@ -1,137 +1,223 @@
-# gRPC cutover — landing order, pre-flip checklist, and rollback
+# gRPC cutover — landing order, pre-flip checklist, bake plan, rollback
 
-This is the single consolidated ordering document for landing portunus #19 and
-cutting traffic over to the blue (Envoy gRPC sidecar) fleet. It corrects two
-errors that circulated in earlier PR bodies (the `num_chunks` sentinel location
-and the WebSocket close-code claim) — treat this document as authoritative over
-any PR-body prose it contradicts.
+The single authoritative ordering document for landing portunus #19 and cutting
+traffic over to the blue (Envoy gRPC sidecar) fleet. It supersedes the ordering
+prose in any PR body it contradicts — including #19's own (corrections to apply
+to that body are in the appendix).
+
+**Status snapshot (2026-07-09).** The akp ETL prerequisites are **merged**
+(see §2 — note the PR renumbering). Not yet landed: the portunus stack itself
+(§1), akp #177 (the platform-topology gate, still a draft), akp #155 (Glue
+failure alarm), and akp #159 (teardown, last). No `CUTOVER` flip is permitted
+until every §3 box is ticked for the target environment.
 
 ## 1. Portunus repo landing order
 
 Land in this order, rebasing each onto the previous:
 
-1. **#34** — Envoy 1.31 → 1.36 base-image bump (de-risks the jump alone).
-2. **#35** — SIGTERM drain in `entrypoint.sh` (ships the drain to *current*
+1. **#22** — Kinesis → Firehose direct-PUT. Base of #19 (#19's branch already
+   contains its commits); #19 reuses its publish layer wholesale.
+2. **#34** — Envoy 1.31 → 1.36 base-image bump (de-risks the jump alone).
+3. **#35** — SIGTERM drain in `entrypoint.sh` (ships the drain to *current*
    prod first). ⚠️ #35 sets `DRAIN_TIME_S=60` but the **legacy** proxy stack's
    ECS `stopTimeout` is still **30s** — the drain gets SIGKILL'd (exit 137) at
    ~28s until the stopTimeout is raised. The akp PR that bumps the legacy
-   `.portunus-source` ref **must also raise the legacy `stop_timeout` to 120s**
-   (blue already locks 120s via synth test); land them as one change.
-3. **#31 (rebased)** — supply-chain pinning, with digests **re-resolved for
+   `.portunus-source-legacy` ref **must also raise the legacy `stop_timeout`
+   to 120s** (blue already locks 120s via synth test); land them as one change.
+4. **#31 (rebased)** — supply-chain pinning, with digests **re-resolved for
    v1.36.0** and for #19's new multi-stage `portunus/Dockerfile` base images.
    ⚠️ #31 and #34/#19 collide textually on `proxy/Dockerfile`'s `FROM` line.
-   The correct resolution is always **v1.36.x, digest-pinned**. Both the proxy
-   image build (`RUN envoy --version | grep -q '/1\.36\.'`) and
-   `entrypoint.sh` now assert the running version, so a bad resolution turns
-   red instead of shipping the 1.31 shutdown-SIGSEGV Envoy silently.
-4. **models.py ports on the #19 branch, before rebase** — #17
+   The correct resolution is always **v1.36.x, digest-pinned**. Three
+   independent tripwires turn a bad resolution red instead of shipping the
+   1.31 shutdown-SIGSEGV Envoy silently: the image build asserts
+   `envoy --version`, `entrypoint.sh` re-asserts at runtime, and akp CI has
+   `test_envoy_dockerfile_pins_1_36`.
+5. **models.py decode ports, on the #19 branch, before rebase** — #17
    (`vnd.amazon.eventstream` decode), #24 (truncation guard; closed-unmerged,
    port by hand), #26 (Brotli — the `Brotli>=1.1.0` runtime dep is already in
-   `portunus/pyproject.toml`), **and #36** (`zlib.error` on corrupt gzip —
-   missing from earlier checklists). `portunus/tests/test_models_decode.py`
-   must be restored on the branch first so a forgotten port fails CI.
-5. **#19** (rebased on #22) — this PR.
+   `portunus/pyproject.toml`, and akp #163 merged 2026-07-07 gives Glue the
+   `brotli` package that was blocking #26), **and #36** (`zlib.error` on
+   corrupt gzip). `portunus/tests/test_models_decode.py` must be restored on
+   the branch first so a forgotten port fails CI instead of a checklist.
+6. **#19** (rebased on #22) — this PR.
 
-## 2. akp (api-key-proxy) deploy order — all BEFORE any cutover flip
+**At #19-merge:** tag a release and **repin akp #136's `pyproject.toml`** from
+the `dl/grpc-ext-authz-ext-proc-services` branch to that tag *before* the
+branch is deleted, or akp's synth (`portunus.models` imports) breaks.
 
-`aisitok #38 → akp #154, #156, #155 → akp #152 (+#158) → akp #136 → akp #159`
+## 2. akp (api-key-proxy) order — ETL merged; #177 is the remaining gate
 
-### The `num_chunks=0` sentinel lives in akp #154, NOT #136
+### 2a. ETL prerequisites — MERGED (verify deployed, don't re-land)
 
-Earlier prose (including #19's PR body) said the Glue-side sentinel handling
-("treat `num_chunks=0` as *derive total at aggregation time*") was "folded into
-akp #136". **akp #136's own body says it was split out to akp #154 and #136
-touches zero ETL files.** The blue fleet emits `num_chunks=0` on **every** HTTP
-body record, unconditionally. If a provider is flipped while the old reassembly
-is live, the legacy ETL drops every chunk past `chunk_id=0` — **silent,
-per-provider, 100% HTTP token-usage loss** until someone notices the usage
-graph dip.
+⚠️ **PR renumbering** — earlier prose (including #19's body and older
+revisions of this doc) cites akp #154/#156/#152/#158. All four are
+**closed unmerged**; the work landed as a stacked split, all merged to akp
+`main` 2026-07-07/08 (and akp auto-deploys `main` to prod):
 
-**Tripwire (do not rely on the runbook prose):** the cutover is just a
-synth-time env var (`CUTOVER="anthropic=blue"`), so add a mechanical guard —
-the ETL deploy (#154) writes an SSM parameter / stack export
-(e.g. `portunus-etl-sentinel-version`), and akp's `_parse_cutover` refuses to
-synthesise a shadow rule unless it is importable. Until that lands, the flip
-runbook MUST include an explicit "verify akp #154 is deployed to this
-environment" step, and a first-hour canary alarm on body-record ingest rate
-per cut-over provider (>X% drop vs pre-flip baseline).
+| Merged PR | Carries | Replaces |
+|---|---|---|
+| aisitok **#38** (2026-06-30) | OpenAI Realtime `response.done` WS usage parsing | — |
+| akp **#163** | `brotli` in the Glue log-analysis job (unblocks portunus #26) | — |
+| akp **#164** | Off-heap body reassembly **including the `num_chunks=0` sentinel branch** | #137 → #154 → #152 |
+| akp **#165** | Fail-closed dedup + whole-second window floor | #156 → #152 |
+| akp **#166** | `portunus_frames` WS usage table (HTTP-only joined-logs) | #139 → #152 |
 
-### Platform changes that must land before the bake — akp #177 is the gate
+(#158's quarantine mechanism was dropped — off-heap reassembly is the OOM fix.)
 
-The platform-side fixes exist ONLY in the **DRAFT akp PR #177**
-(`AI-Safety-Institute/api-key-proxy#177`, branch
-`danl/portunus-proxy-ops-hardening`, based on #136's branch). Until #177 is
-**merged and deployed** to an environment, none of the drain/detection work in
-this repo functions there — the 10s deregistration delay still cuts every
-stream, containers still stop simultaneously, and the ALB still health-checks
-`/ping` (Envoy liveness only).
+**Why the sentinel matters:** the blue fleet emits `num_chunks=0` on **every**
+HTTP body record. A pre-#164 ETL drops every chunk of such a body, and the
+inner join then eliminates the whole record — **silent, per-provider, 100%
+HTTP token-usage loss** for any provider flipped against an old ETL. The flip
+runbook therefore verifies the *deployed* Glue job version (§3), not PR state.
 
-> **HARD LANDING GATE: do not set `CUTOVER` for ANY provider in an
-> environment until akp #177 is merged (or folded into #136) and deployed to
-> that environment.** Preferred: fold #177's commits into #136 itself so the
-> blue fleet cannot exist without them — a #136-without-#177 deploy is exactly
-> the topology every reproduced C3 failure ran against. Add "verify #177
-> content deployed (task def has Envoy→Portunus DependsOn + target group has
-> `deregistration_delay=120` + health check path `/healthz`)" to the flip
-> runbook alongside the #154 check in §2.
+### 2b. Remaining, in order
 
-See `shared/akp-changes.md` for the precise change spec. Summary:
+1. **akp #155** (open) — Glue failure/timeout on the CW dashboard. Land before
+   the bake: it's the alarm that surfaces ETL breakage during it.
+2. **akp #136** (draft) — blue fleet + declarative ALB cutover. Merge is a
+   traffic no-op (`DEPLOY_BLUE_SLOT` opt-in, `CUTOVER` empty). **Gate: fold
+   akp #177 into #136** (or merge #177 first) — see below.
+3. Per-provider `CUTOVER` flips (§4), each gated on §3.
+4. **akp #159** — legacy-fleet teardown. Post-cutover only, after green-drain;
+   it removes the data-level rollback safety net (§5).
 
-- **ALB `deregistration_delay` ≥ `DRAIN_TIME_S`** (60–120s) on the proxy
-  target groups. platform-lib-cdk hardcodes 10s and ECS deregisters *before*
-  SIGTERM, so today the ALB severs every stream older than ~10s before the
-  Envoy drain even starts. Compose tests cannot catch this (no ALB).
-- **ECS `container_dependencies`: Envoy `dependsOn` Portunus `HEALTHY`** so
-  ECS stops Envoy *first* and Portunus only after Envoy exits. Without it both
-  get SIGTERM simultaneously: Portunus exits at grace (~30s) while Envoy drains
-  to 60s → the drained tail is proxied *unobserved* (silent audit gap) and
-  mid-drain requests 403. Safe to depend on because the ECS liveness probe
-  targets the Redis-independent `""` health service (below).
-- **ALB health check → `/healthz`** (not `/ping`): `/healthz` is gated on
-  Portunus's **`"readiness"`** gRPC health service (Redis-derived, debounced),
-  so a dead — or SERVING-but-denying (Redis-down) — Portunus is pulled from
-  ALB rotation in seconds. **Liveness/readiness are split deliberately**: the
-  ECS container probe (`grpc_health_probe`, service `""`) checks liveness
-  only (listener up, not draining, Redis-independent), so a correlated Redis
-  outage takes the fleet out of rotation but does NOT ECS-recycle it — which
-  would otherwise deadlock against the container dependency above.
-- **Publish-queue flush-reserve + byte-bounding, redaction-denylist
-  restoration** (portunus-side, this repo) and a **task-stop disruption test**
-  asserting Portunus-first stop order and the observed WS close code.
+### 2c. HARD LANDING GATE — akp #177
 
-## 3. WebSocket close semantics — the honest version
+The platform-topology fixes exist ONLY in **draft akp #177**
+(`danl/portunus-proxy-ops-hardening`, based on #136's branch):
 
-On drain-budget expiry and at the 55-min `max_stream_duration` cap, WS clients
-receive a **TCP FIN → close code 1006 (abnormal closure)**, *not* a clean
-`1001 Going Away`. Portunus cannot inject a close frame: it is not in the WS
-data path (`observability_mode: true` — Envoy ignores its responses), and
-Envoy has no close-frame drain either. A clean 1001 requires a WASM (or Lua)
-close-frame injector — **tracked as a follow-up, not delivered by this stack**.
-What IS delivered: frames flow until budget expiry, and 1006 triggers SDK
-reconnect-with-backoff (an improvement over today's instant RST, but slower
-than the reconnect-immediately behaviour a 1001 would give). Any PR body or
-runbook claiming "Portunus emits WS 1001 before terminating" is wrong; sign
-off on 1006-at-expiry explicitly or build the WASM filter before calling the
-zero-downtime invariant done.
+- **ECS `container_dependencies`**: Envoy `DependsOn` Portunus `HEALTHY`, so
+  ECS stops Envoy *first*. Without it both SIGTERM simultaneously: Portunus
+  exits at grace while Envoy drains on → the drained tail is proxied
+  *unobserved* (silent audit gap, reproduced) and mid-drain requests 403.
+- **ALB `deregistration_delay` 10s → 120s**. ECS deregisters *before* SIGTERM,
+  so the platform-lib-cdk 10s default severs every stream older than ~10s
+  before the 60s Envoy drain even starts. Compose tests cannot catch this.
+- **ALB health check `/ping` → `/healthz`** (interval 10s, thresholds 2/2).
+  `/healthz` is gated on Portunus's **`"readiness"`** gRPC health service
+  (Redis-derived, debounced), so a dead — or SERVING-but-denying (Redis-down)
+  — Portunus is pulled from rotation in ~20s instead of 403ing for ~105s+.
+  **Liveness/readiness are split deliberately**: the ECS container probe
+  (`grpc_health_probe`, service `""`) is liveness only (Redis-independent), so
+  a correlated Redis outage de-pools the fleet from the ALB but does NOT
+  ECS-recycle it — recycling would deadlock against the container dependency.
+- **`GRPC_GRACEFUL_SHUTDOWN_SECONDS=90`** (< 120s stop_timeout) plus synth
+  tests locking all of the above and the proxy-key secret wiring.
 
-## 4. Rollback — it is NOT "flip the ALB rule back"
+> **Do not set `CUTOVER` for ANY provider in an environment until #177 is
+> merged (preferred: folded into #136 so the blue fleet cannot exist without
+> it) and deployed to that environment.** A #136-without-#177 deploy is
+> exactly the topology every reproduced C3 failure ran against.
+
+## 3. Pre-flip checklist — ALL boxes, per environment, before ANY flip
+
+- [ ] **ETL sentinel live**: the Glue `process_raw_data` job in this
+  environment is a post-#166 version (akp `main` ≥ 2026-07-08). Until the SSM
+  tripwire (below) exists, this is a mandatory manual check.
+- [ ] **#177 content deployed** — verify the *live* resources, not PR state:
+  task def has Envoy→Portunus `DependsOn HEALTHY`; target group has
+  `deregistration_delay.timeout_seconds=120`; ALB health check path is
+  `/healthz`; Portunus env has `GRPC_GRACEFUL_SHUTDOWN_SECONDS=90`.
+- [ ] **Portunus image** is the post-review #19: liveness/readiness split,
+  `/healthz` gated on `"readiness"`, redaction denylist restored,
+  byte-bounded publish queue + flush reserve, Envoy 1.36 tripwires.
+- [ ] **akp `pyproject.toml` repinned** to #19's release tag (not the branch).
+- [ ] **First-hour ingest canary armed**: alarm on the blue slot's
+  request/response-body Firehose `IncomingRecords` dropping >50% vs the
+  provider's pre-flip baseline within the first hour → immediate-rollback
+  signal.
+- [ ] **Rollback pre-staged**: a one-click pipeline run per provider with the
+  provider removed from `CUTOVER` (§5).
+
+**SSM tripwire (specced in #177's body, not yet built):** the ETL deploy
+writes `/portunus/etl-sentinel-version` (≥1 = sentinel live) and
+`PortunusFleetStack` refuses to synthesise a shadow rule unless it resolves —
+turning a flip-against-stale-ETL into a pipeline failure instead of silent
+token loss. Build it before the flips get routine; until then the checklist
+line above is the only guard. (SSM lookups cache in `cdk.context.json`;
+`cdk context --reset` once after the parameter first appears.)
+
+## 4. Per-provider bake plan
+
+Flip one provider at a time: **Anthropic first** (highest volume, exercises
+the signing path), bake **24–48h**, then **OpenAI**, then the remainder —
+`spark-bedrock` and the NCSC pair (`anthropic-ncsc`, `openai-ncsc`) **last**:
+the middleware-fronted NCSC proxies keep `health_check=None`, so a broken
+Portunus there is detected only by the ~105s ECS probe (§6).
+
+Per flip:
+
+1. Record the provider's pre-flip baselines: body-stream `IncomingRecords`,
+   4xx/5xx rate, p99 latency.
+2. Add the provider to `CUTOVER` (synth-time env var) and run the deploy
+   pipeline. Confirm the shadow rule (priority band 1–99) serves blue.
+3. First hour: watch the ingest canary, per-target-group 403/5xx rate, and
+   `/healthz` flaps.
+4. Through the bake: trigger one deploy/scale-in and confirm drain behaviour
+   (no mid-stream cuts <60s, no audit-loss ERROR with a healthy sink);
+   watch the Portunus container `MemoryUtilization` alarm (~75%).
+5. Bake clean 24–48h before the next provider.
+
+## 5. Rollback — it is NOT "flip the ALB rule back"
 
 The ALB shadow rule is CDK-managed and **re-asserted on every deploy** (by
 design — that is what fixed the old "manual flip silently reverted" failure).
 Consequences:
 
-- **Sanctioned rollback** = remove the provider from `CUTOVER` (a synth-time
-  env var in the deploy pipeline) **and run the deploy pipeline**. Expect
-  minutes-to-tens-of-minutes, and note it depends on CI/CD being healthy.
-  Pre-stage a one-click "rollback" pipeline run per provider before each flip.
-- **The manual `aws elbv2 modify-rule` flip is a trap**: it works for seconds
-  worth of relief, then the next deploy of *anything* silently re-cutovers the
+- **Sanctioned rollback** = remove the provider from `CUTOVER` **and run the
+  deploy pipeline**. Expect minutes-to-tens-of-minutes, and note it depends on
+  CI/CD being healthy. Pre-stage a one-click rollback run per provider before
+  each flip (§3).
+- **The manual `aws elbv2 modify-rule` flip is a trap**: it buys seconds of
+  relief, then the next deploy of *anything* silently re-cutovers the
   provider. If used in an emergency, it MUST be paired with an immediate
   `CUTOVER` edit; the incident runbook should otherwise forbid it.
-- **Data-level rollback is safe** (verified): the legacy KDS audit path is
-  untouched until akp #159; legacy and blue Redis cache keys are disjoint
+- **Data-level rollback is safe until akp #159** (verified): the legacy KDS
+  audit path is untouched; legacy and blue Redis cache keys are disjoint
   (rollback = a cold-cache STS/Secrets burst, not misbehaviour); blue-era
-  audit stays readable in the shared Glue tables.
+  audit stays readable in the shared Glue tables. #159 removes this net —
+  hence it lands last, post-green-drain.
 - **Exception — cache flush**: the blue runbook's `FLUSHDB` hits the *shared*
-  ElastiCache and also nukes the legacy fleet's cache. See the blast-radius
-  warning in `docs/runbooks/flush-auth-cache.md`.
+  ElastiCache and also nukes the legacy fleet's cache — including the fleet
+  you are rolling back *to*. See `docs/runbooks/flush-auth-cache.md`.
+
+## 6. Known gaps — sign off explicitly, don't rediscover at 2am
+
+- **WS drain close code is 1006, not 1001.** On drain-budget expiry and at
+  the 55-min `max_stream_duration` cap, WS clients get a TCP FIN → **close
+  code 1006 (abnormal closure)** and recover via SDK reconnect-with-backoff.
+  Portunus cannot inject a close frame (`observability_mode: true` — it is
+  not in the WS data path) and Envoy has no close-frame drain; a clean 1001
+  needs a WASM/Lua filter — **a follow-up, not delivered by this stack**.
+  Still a strict improvement over today's instant mid-frame RST. Any prose
+  claiming "Portunus emits WS 1001" is wrong (appendix, correction 1).
+- **NCSC middleware detection gap**: `anthropic-ncsc` / `openai-ncsc`
+  health-check the nginx allowlist sidecar, not `/healthz`; a broken Portunus
+  there rides the ~105s ECS probe. Acknowledged follow-up in #177.
+- **SSM tripwire not built** (§3) — flip ordering vs ETL is checklist-enforced
+  until it is.
+- **Legacy drain SIGKILL**: until the legacy-ref-bump akp PR raises legacy
+  `stop_timeout` to 120s (§1.3), legacy tasks SIGKILL the #35 drain at ~28s.
+  Bounded, known, strictly better than no drain.
+
+## Appendix — #19 PR-body corrections (apply to the PR body, then delete this section)
+
+1. **WS close code.** Delete "Portunus emits a WebSocket 1001 'Going Away'
+   close before terminating, so SDKs reconnect immediately…". Replace with
+   the §6 semantics (frames flow until budget expiry; TCP FIN → 1006; SDK
+   reconnect-with-backoff; 1001 = WASM follow-up). In the mermaid diagram:
+   `Side->>Client: WS 1001 "Going Away"` → `Envoy->>Client: TCP FIN (client
+   sees 1006, SDK reconnects)`.
+2. **Sentinel location.** Delete "the Glue `num_chunks=0` sentinel handling is
+   folded into akp #136 (from the closed #137/#140)". Replace with: the
+   sentinel landed via **akp #164** (the #137→#154→#152→#164 lineage; #136
+   touches zero ETL files) and is on akp `main` as of 2026-07-08; the flip
+   runbook still verifies the deployed ETL version per environment (§3).
+3. **Rollback.** Delete "Rollback = flip the ALB rule back; no DNS or
+   customer-config change". Replace with: rollback = remove the provider from
+   `CUTOVER` and run the deploy pipeline (no DNS/customer change, but it is a
+   CDK deploy; a manual `elbv2` edit is silently re-cutover by the next deploy
+   unless `CUTOVER` is edited too). Data-level rollback is safe until akp
+   #159; `FLUSHDB` is fleet-wide across both fleets (§5).
+4. **models.py port list** must read **#17 + #24 + #26 + #36**, with
+   `portunus/tests/test_models_decode.py` restored on the branch (§1.5).
