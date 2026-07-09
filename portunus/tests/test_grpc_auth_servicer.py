@@ -932,6 +932,44 @@ async def test_signing_pass_unexpected_exception_returns_500_without_leaking_mes
     assert "internal stack trace string" not in response.denied_response.body
 
 
+@pytest.mark.asyncio
+async def test_signing_pass_sheds_with_503_when_signing_capacity_exhausted():
+    """``SigningOverloadedError`` from the bounded signer is shed with a 503.
+
+    The signing call site routes through ``sign_request_async`` (dedicated
+    KMS executor + concurrency semaphore, mem-V2); when the cap stays
+    saturated past the acquire timeout the request must be denied promptly
+    (each waiter pins its buffered body, up to 32 MiB) — fail closed with
+    503, not queued and not a generic 500.
+    """
+    from portunus.services.signing_service import SigningOverloadedError
+
+    signing_key = SigningKey(
+        kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
+        provider_id="signingkey_1234abcd",
+    )
+    auth = FakeAuthService(
+        result=AuthResult(
+            api_key="sk-upstream-test-key",
+            signing_key=signing_key,
+            principal_info=_principal_info(),
+        )
+    )
+
+    class _OverloadedSign(FakeSignRequest):
+        def __call__(self, *args: Any, **kwargs: Any) -> dict:
+            super().__call__(*args, **kwargs)
+            raise SigningOverloadedError("saturated")
+
+    servicer, _auth, _sign = _make_servicer(auth=auth, sign=_OverloadedSign())
+
+    response = await servicer.Check(_check_request(body=b"{}"), _signing_ctx())
+
+    assert response.HasField("denied_response")
+    assert response.denied_response.status.code == 503
+    assert "capacity" in response.denied_response.body.lower()
+
+
 # ---------------------------------------------------------------------------
 # Signing pass rides the Redis cache — no double STS/Secrets round-trip.
 #
