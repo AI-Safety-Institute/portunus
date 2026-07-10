@@ -32,6 +32,20 @@ updates:
       docker:
         patterns:
           - "*"
+    ignore:
+      # Envoy 1.31 -> 1.38+ is a large, coordinated upgrade — hold the major/minor
+      # jump and take only patch releases of the current minor. Bump deliberately.
+      - dependency-name: "envoyproxy/envoy"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      # The Python interpreter version is upgraded by hand (needs matching
+      # requires-python in both pyproject.toml files, CI, and testing across the
+      # docker images) — not via Dependabot. Patch releases of 3.12.x are fine.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: "uv"
     directories:
@@ -45,3 +59,9 @@ updates:
       python:
         patterns:
           - "*"
+    ignore:
+      # uvicorn is version-sensitive for request tracing/logging: a minor bump
+      # has broken it before (see the <0.47 pin + comment in
+      # portunus/pyproject.toml). Upgrade manually, guarded by
+      # test_trace_propagation.py, rather than letting it ride in a grouped PR.
+      - dependency-name: "uvicorn"
