@@ -18,10 +18,7 @@ dev = [
     "types-requests>=2.32.0.20240712,<3",
     "types-pyyaml>=6.0.12.20240724,<7",
     "types-aiobotocore>=2.24.1,<3",
-    # Pinned: 2026 releases regressed capture_async typing so mypy reports
-    # "Coroutine not callable" at every decorated-method call site. Dev-only
-    # type stub with no security relevance; hold at the last-good version.
-    "types-aws-xray-sdk==2.15.0.20251111",
+    "types-aws-xray-sdk>=2.14.0.20250708,<3",
     "pre-commit>=3.7.1,<4",
     "pytest>=8.4.1,<9",
     "pytest-asyncio>=1.1.0,<2",

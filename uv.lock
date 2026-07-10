@@ -872,7 +872,7 @@ dev = [
     { name = "requests", specifier = ">=2.32.3,<3" },
     { name = "ruff", specifier = ">=0.6.0,<0.7" },
     { name = "types-aiobotocore", specifier = ">=2.24.1,<3" },
-    { name = "types-aws-xray-sdk", specifier = "==2.15.0.20251111" },
+    { name = "types-aws-xray-sdk", specifier = ">=2.14.0.20250708,<3" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20240724,<7" },
     { name = "types-requests", specifier = ">=2.32.0.20240712,<3" },
 ]
@@ -1231,11 +1231,11 @@ wheels = [
 
 [[package]]
 name = "types-aws-xray-sdk"
-version = "2.15.0.20251111"
+version = "2.15.0.20260518"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/78/44/b6d011fc9135e5b3a6f3cbc6bb7f869285a08dd6409be11fb252c085161e/types_aws_xray_sdk-2.15.0.20251111.tar.gz", hash = "sha256:8f74b0931d12eae5adc96bf275a88754b65cf9266efbd76c3205b062f0ce933a", size = 24170, upload-time = "2025-11-11T03:06:26.492Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d0/aa/6d5389c1e8c1495c74e3f37483ca950b57bee3c634e9c8b5df63e30ffde4/types_aws_xray_sdk-2.15.0.20260518.tar.gz", hash = "sha256:cab6bb8cf1169bd0cb4fb80e6ab4f04a4335268f087d3284e521cc0085209022", size = 24652, upload-time = "2026-05-18T06:03:42.413Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/91/c821a3c97c2996dadf71e9288697ed0546974b3b8951decd3c08494dd1cb/types_aws_xray_sdk-2.15.0.20251111-py3-none-any.whl", hash = "sha256:eab10e46a541b27540b5123edb7fbec655cdda628efbbe35ef8607223bfd3cfc", size = 44766, upload-time = "2025-11-11T03:06:25.505Z" },
+    { url = "https://files.pythonhosted.org/packages/30/36/bf8a742a68649888a962bde1c8830f819ada9d542704c1063f0a63c6e5af/types_aws_xray_sdk-2.15.0.20260518-py3-none-any.whl", hash = "sha256:919cb882fe4b65e3261838d05431ce60be6b245b76b30588aff940ee1a7ef492", size = 44813, upload-time = "2026-05-18T06:03:41.435Z" },
 ]
 
 [[package]]

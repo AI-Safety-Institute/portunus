@@ -10,7 +10,6 @@ import asyncio
 import logging
 from typing import Optional
 
-from aws_xray_sdk.core import xray_recorder
 from botocore.exceptions import ClientError
 
 from portunus.config import config
@@ -29,6 +28,7 @@ from portunus.services.arn_service import parse_identity_from_arn
 from portunus.services.cache_service import CacheService
 from portunus.services.secret_validation_service import SecretValidationService
 from portunus.services.secrets_service import SecretsService
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -58,7 +58,7 @@ class AuthService:
         self.validation_service = validation_service or SecretValidationService()
         self.boto_session = self.secrets_service.boto_session
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def get_aws_identity(
         self, credentials: Optional[AwsCredentials] = None
     ) -> PrincipalInfo:
@@ -114,7 +114,7 @@ class AuthService:
         # Parse the ARN to get identity information
         return parse_identity_from_arn(principal_arn)
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def authenticate(
         self, payload: AuthPayload, request_id: str, target_host: Optional[str] = None
     ) -> AuthResult:
