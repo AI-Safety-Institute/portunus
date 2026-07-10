@@ -1,11 +1,12 @@
-# Start from the Envoy Alpine Linux image
+# Start from the (Debian-based) Envoy image
 FROM envoyproxy/envoy:v1.31.0@sha256:2bf7f042e3960e3904864cb09c174498e20a06859a5c394b7e3a6528a649b1da
 
-# Update the package lists
-RUN apt update
-
-# Install gettext for envsubst and luarocks
-RUN apt install -y gettext luarocks wget
+# gettext provides envsubst (used at runtime by entrypoint.sh); luarocks builds
+# the Lua library (and pulls the C toolchain it needs to compile native rocks);
+# wget fetches yq. Cleaning the apt lists keeps the image free of stale metadata.
+RUN apt-get update && \
+    apt-get install -y gettext luarocks wget && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install yq (YAML processor) from GitHub releases, verifying its checksum
 RUN wget https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_amd64 -O /usr/bin/yq && \
@@ -28,4 +29,8 @@ ENV ENVOY_LOG_LEVEL=info
 
 COPY entrypoint.sh /envoy/entrypoint.sh
 RUN chmod +x /envoy/entrypoint.sh
+
+# Drop root — Envoy only needs to bind the non-privileged LISTEN_PORT (8888),
+# and entrypoint.sh writes its rendered config under /envoy (owned by envoy).
+USER envoy
 CMD ["/envoy/entrypoint.sh"]
