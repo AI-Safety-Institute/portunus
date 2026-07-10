@@ -148,6 +148,15 @@ The Envoy proxy already sends a shared secret with every call it makes to Portun
 
 Do not expose Portunus directly to clients or the public internet.
 
+### Logged data
+
+Portunus captures **full request and response data** — bodies, headers, and trailers — and publishes it to Kinesis for the audit trail. This is deliberate: the logs are an audit record of everything that passed through the proxy. Be aware that this means:
+
+- **Request and response bodies are stored verbatim**, including prompts, completions, and any data (personal, commercial, or otherwise sensitive) that clients send or receive.
+- **Headers and URLs are stored verbatim**, except the provider API key header (`API_KEY_HEADER`), which is dropped before logging because Portunus substitutes the real upstream key into it. No other headers are filtered — provider keys or other secrets carried in a *different* header, or embedded in a URL or body, **will be captured**.
+
+Portunus does **not** attempt to redact secrets or sensitive content from what it logs. If you need redaction, filtering, or access tiering, do it downstream of the Kinesis streams (e.g. in the ETL/query layer that consumes the logs) and restrict who can read the raw stream output. Treat the raw log storage as containing everything your clients send and receive.
+
 ## Configuration
 
 ### Environment Variables
