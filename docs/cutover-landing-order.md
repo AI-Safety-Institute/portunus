@@ -13,33 +13,34 @@ until every §3 box is ticked for the target environment.
 
 ## 1. Portunus repo landing order
 
-Land in this order, rebasing each onto the previous:
+**Simplified (2026-07-10): #22 was absorbed into #19 and #31 is already on
+`main`.** #19 is now based on `main` (not stacked on #22), and current `main`
+has been merged into its branch — `mergeable_state: clean`. So the "rebase the
+#22→#19 stack + hand-port decode + resolve #31 collision" dance is **done**;
+what remains:
 
-1. **#22** — Kinesis → Firehose direct-PUT. Base of #19 (#19's branch already
-   contains its commits); #19 reuses its publish layer wholesale.
-2. **#34** — Envoy 1.31 → 1.36 base-image bump (de-risks the jump alone).
-3. **#35** — SIGTERM drain in `entrypoint.sh` (ships the drain to *current*
-   prod first). ⚠️ #35 sets `DRAIN_TIME_S=60` but the **legacy** proxy stack's
-   ECS `stopTimeout` is still **30s** — the drain gets SIGKILL'd (exit 137) at
-   ~28s until the stopTimeout is raised. The akp PR that bumps the legacy
-   `.portunus-source-legacy` ref **must also raise the legacy `stop_timeout`
-   to 120s** (blue already locks 120s via synth test); land them as one change.
-4. **#31 (rebased)** — supply-chain pinning, with digests **re-resolved for
-   v1.36.0** and for #19's new multi-stage `portunus/Dockerfile` base images.
-   ⚠️ #31 and #34/#19 collide textually on `proxy/Dockerfile`'s `FROM` line.
-   The correct resolution is always **v1.36.x, digest-pinned**. Three
-   independent tripwires turn a bad resolution red instead of shipping the
-   1.31 shutdown-SIGSEGV Envoy silently: the image build asserts
-   `envoy --version`, `entrypoint.sh` re-asserts at runtime, and akp CI has
-   `test_envoy_dockerfile_pins_1_36`.
-5. **models.py decode ports, on the #19 branch, before rebase** — #17
-   (`vnd.amazon.eventstream` decode), #24 (truncation guard; closed-unmerged,
-   port by hand), #26 (Brotli — the `Brotli>=1.1.0` runtime dep is already in
-   `portunus/pyproject.toml`, and akp #163 merged 2026-07-07 gives Glue the
-   `brotli` package that was blocking #26), **and #36** (`zlib.error` on
-   corrupt gzip). `portunus/tests/test_models_decode.py` must be restored on
-   the branch first so a forgotten port fails CI instead of a checklist.
-6. **#19** (rebased on #22) — this PR.
+1. **#34** — Envoy 1.31 → 1.36 base-image bump. **Optional-but-recommended to
+   land first for *current-prod* value** (de-risks the jump alone). #19 already
+   carries v1.36, so if you skip straight to #19 this folds in.
+2. **#35** — SIGTERM drain in `entrypoint.sh`. Also standalone current-prod
+   value (fixes the mid-stream-cut-on-deploy incident class). ⚠️ #35 sets
+   `DRAIN_TIME_S=60` but the **legacy** proxy stack's ECS `stopTimeout` is still
+   **30s** — the drain gets SIGKILL'd (exit 137) at ~28s until it's raised. The
+   akp PR that bumps the legacy `.portunus-source-legacy` ref **must also raise
+   the legacy `stop_timeout` to 120s** (blue already locks 120s via synth test);
+   land them as one change.
+3. **#19** (based on `main`) — this PR. Now self-contained: it carries the
+   Kinesis→Firehose migration (absorbed from the closed #22), Envoy 1.36, the
+   drain work, **and** the `models.py` decode ports (#17 + #24 + #26 + #36, with
+   `test_models_decode.py` restored on the branch — a forgotten port fails CI,
+   not a checklist). `Brotli>=1.1.0` is in `portunus/pyproject.toml`; akp #163
+   (merged 2026-07-07) gives Glue the `brotli` package. The Envoy-version
+   tripwires (build-time `envoy --version`, runtime `entrypoint.sh` re-assert,
+   akp CI `test_envoy_dockerfile_pins_1_36`) guard against a 1.31 regression.
+
+> **Absorbed / already-landed:** #22 (closed — its Firehose migration lives in
+> #19) and #31 (supply-chain pinning — already merged to `main`; its Envoy pin
+> was v1.31, deliberately overridden to v1.36 on the #19 branch).
 
 **At #19-merge:** tag a release and **repin akp #136's `pyproject.toml`** from
 the `dl/grpc-ext-authz-ext-proc-services` branch to that tag *before* the
