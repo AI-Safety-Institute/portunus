@@ -924,7 +924,7 @@ dev = [
     { name = "redis", specifier = ">=5.0.0,<6" },
     { name = "requests", specifier = ">=2.32.3,<3" },
     { name = "ruff", specifier = ">=0.6.0,<0.7" },
-    { name = "types-aiobotocore", specifier = ">=2.24.1,<3" },
+    { name = "types-aiobotocore", specifier = ">=3.7.0,<4" },
     { name = "types-aws-xray-sdk", specifier = ">=2.14.0.20250708,<3" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20240724,<7" },
     { name = "types-requests", specifier = ">=2.32.0.20240712,<3" },
@@ -1328,14 +1328,14 @@ wheels = [
 
 [[package]]
 name = "types-aiobotocore"
-version = "2.25.2"
+version = "3.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore-stubs" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/77/b3/15e487a2a84ca827cbd80af1de4485d25dc3014f3122d8069665bee725bc/types_aiobotocore-2.25.2.tar.gz", hash = "sha256:6b2458ac1c0999de0ba4a1dcfbf3bc0d5c7ca2ea0c72f6732abe67d08ebf0240", size = 85272, upload-time = "2025-11-12T01:58:58.83Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/e8/ef1fcb876937dbdddc0f01b5df4ed53f33b166a6367d80a9014d5e5f091d/types_aiobotocore-3.7.0.tar.gz", hash = "sha256:fe35de52c12e5fdb89ca60b3989766e7fe827e3d2e95fcf4583e91581945205c", size = 87992, upload-time = "2026-05-10T03:19:32.353Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fe/1f/0115f843090b969ef4902eb8ef128c613fdc91787c34a4b9e4140cf763fa/types_aiobotocore-2.25.2-py3-none-any.whl", hash = "sha256:b6027aa2dc020a9e2eeaa0ab9178f5c2cb6bb5e07613b7ea26174cc491d33b39", size = 53655, upload-time = "2025-11-12T01:58:55.575Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/68/0cdfd7df415ee3e769c8e8f9bd8013c64c88cdd7306f72453a02123c58f9/types_aiobotocore-3.7.0-py3-none-any.whl", hash = "sha256:ff4139b3eae22d242b6b39ba56048344b2b86f67daeeca4680da1a6e191681fd", size = 54804, upload-time = "2026-05-10T03:19:29.487Z" },
 ]
 
 [[package]]
