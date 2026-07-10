@@ -18,7 +18,9 @@ dependencies = [
     "aws-xray-sdk>=2.14.0,<3",
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
-    "websockets>=12.0,<17",
+    # >=13.0: the relay imports websockets.asyncio.client, added in 13.0
+    # (12.x has no websockets.asyncio and fails at import).
+    "websockets>=13.0,<17",
     # <0.47: uvicorn 0.47.0 imports the ASGI app before the serving event loop
     # exists (encode/uvicorn#2919); XRayService()/AsyncContext() run at import
     # and bind to the wrong loop, so segments never reach handlers and every
