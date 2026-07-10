@@ -25,6 +25,8 @@ dependencies = [
     # request logs "No-Trace-Id" (2026-07-02 outage). Guarded by
     # tests/test_trace_propagation.py; lift only when AsyncContext moves to
     # app startup.
+    # uvicorn is ignored in .github/dependabot.yml so it isn't bumped
+    # automatically — update that ignore rule if this pin changes.
     "uvicorn>=0.29.0,<0.47",
 ]
 
