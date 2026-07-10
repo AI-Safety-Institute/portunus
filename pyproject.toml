@@ -28,7 +28,7 @@ dev = [
     "moto>=5.1.13,<6",
     "pandas>=2.3.3,<3",
     "pandas-stubs>=2.3.0,<3",
-    "pyarrow>=21.0.0,<22",
+    "pyarrow>=23.0.1,<24",
     "freezegun>=1.5.0,<2",
     "fakeredis>=2.26.0,<3",
 ]
