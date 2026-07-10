@@ -15,6 +15,7 @@ updates:
       - "/portunus"
       - "/proxy"
       - "/proxy/lib"
+      - "/ws-echo"
     schedule:
       interval: "weekly"
     cooldown:
