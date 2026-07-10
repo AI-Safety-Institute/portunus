@@ -7,8 +7,9 @@ RUN apt update
 # Install gettext for envsubst and luarocks
 RUN apt install -y gettext luarocks wget
 
-# Install yq (YAML processor) from GitHub releases
+# Install yq (YAML processor) from GitHub releases, verifying its checksum
 RUN wget https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_amd64 -O /usr/bin/yq && \
+    echo "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0  /usr/bin/yq" | sha256sum -c - && \
     chmod +x /usr/bin/yq
 
 # Copy and install the proxy-utils library (dependencies declared in rockspec)
