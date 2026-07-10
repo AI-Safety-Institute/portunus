@@ -187,7 +187,7 @@ drain_and_quit() {
 # #31↔#34 Dockerfile FROM-line conflict would ship the bad version with
 # every health check green. The build asserts this too (proxy/Dockerfile);
 # this runtime copy catches an image swapped at the task-definition level.
-EXPECTED_ENVOY_MINOR="${EXPECTED_ENVOY_MINOR:-1.36}"
+EXPECTED_ENVOY_MINOR="${EXPECTED_ENVOY_MINOR:-1.38}"
 if ! envoy --version | grep -q "/${EXPECTED_ENVOY_MINOR}\."; then
   echo "[entrypoint] FATAL: running Envoy is not v${EXPECTED_ENVOY_MINOR}.x:" >&2
   envoy --version >&2

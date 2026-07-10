@@ -1,19 +1,19 @@
-# Envoy 1.36 LTS — required for the maturity of the ext_proc
+# Envoy 1.38 LTS (>= 1.36 required for the maturity of the ext_proc
 # observability_mode + STREAMED body-mode combination this proxy uses,
 # and for HttpRequestHeaderMatchInput in the composite-filter signing
-# gate. Also the fix for the 1.31 shutdown SIGSEGV under in-flight
-# AsyncClient streams that #34/#35 were raised to eliminate — do NOT
-# resolve any merge conflict on this line back to v1.31.x (the version
-# assertion below turns that mistake into a build failure). Digest-pinned
-# (supply-chain posture from #31, re-resolved for 1.36).
-FROM envoyproxy/envoy:v1.36.0@sha256:d62f60a74cd9631b28bb3f538788ccff201b226975179de4265b0d75fc347e90
+# gate). Also carries the fix for the 1.31 shutdown SIGSEGV under
+# in-flight AsyncClient streams that #34/#35 were raised to eliminate —
+# do NOT resolve any merge conflict on this line back to v1.31.x (the
+# version assertion below turns that mistake into a build failure).
+# Digest-pinned (supply-chain posture from #31, re-resolved for 1.38.3).
+FROM envoyproxy/envoy:v1.38.3@sha256:5f7c43e1147412fdb3af578c651c67478a3df818eae89d2261e707e06c209cdb
 
 # Assert the resolved base image really is the Envoy this config was
 # qualified against. Catches a careless #31↔#34 FROM-line conflict
 # resolution (1.31 boots this config cleanly and passes every health
 # check — the regression only shows up as the nondeterministic shutdown
 # SIGSEGV). entrypoint.sh re-asserts at runtime.
-RUN envoy --version && envoy --version | grep -q '/1\.36\.'
+RUN envoy --version && envoy --version | grep -q '/1\.38\.'
 
 # gettext for envsubst (used in entrypoint.sh), wget for the yq binary.
 RUN apt update && apt install -y gettext wget
