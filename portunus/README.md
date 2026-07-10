@@ -32,7 +32,9 @@ The service follows a modular architecture with the following components:
 - Support mock mode for development/testing
 
 ## Security
-The service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay) do not authenticate their callers. The proxy sends a shared secret (`PORTUNUS_API_KEY`, header `x-api-key` by default) with every call, but this service does not check it — deployments must validate it in front of the service (e.g. an authenticating reverse-proxy sidecar) and/or restrict network reachability to the proxies. See the [Security Model](../README.md#security-model) section of the root README.
+The service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay) do not authenticate their callers. The proxy sends a shared secret (`PORTUNUS_API_KEY`, header `x-api-key` by default) with every call, but this service does not check it — deployments must validate it in front of the service (e.g. an authenticating reverse-proxy sidecar) and/or restrict network reachability to the proxies.
+
+The `/log/*` endpoints capture full request/response bodies, headers, and trailers verbatim (everything except the provider API key header) — no secret redaction is performed here; do any redaction downstream of Kinesis. See the [Security Model](../README.md#security-model) section of the root README for both points.
 
 ## Configuration
 The service is configured via environment variables. See `config.py` for a complete list of available options.

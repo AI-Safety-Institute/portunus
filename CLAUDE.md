@@ -77,6 +77,8 @@ The proxy is designed to handle streaming responses efficiently:
 ### Security Model
 Portunus service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay) do not authenticate callers. The proxy sends `PORTUNUS_API_KEY` in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`) on every service call, but Portunus does not validate it — deployments must enforce access in front of the service (authenticating sidecar and/or network isolation). Documented in README "Security Model".
 
+Logging captures full request/response bodies, headers, and trailers verbatim — everything except the provider API key header (`API_KEY_HEADER`), which is dropped in Lua before logging because the real upstream key is substituted into it. This is intentional (comprehensive audit trail); no secret redaction happens in Portunus. Any redaction/filtering/access-tiering is a downstream (ETL/query-layer) concern. Documented in README "Security Model" → "Logged data".
+
 ### Environment Variables
 - `PORTUNUS_API_KEY`: Shared secret the proxy attaches to Portunus service calls (validated by the deployment layer, not by Portunus)
 - `PORTUNUS_API_KEY_HEADER`: Header carrying the shared secret (default: "x-api-key")
