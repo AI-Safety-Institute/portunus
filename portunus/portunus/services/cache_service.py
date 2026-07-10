@@ -282,6 +282,12 @@ class CacheService:
         Raises:
             CacheError: If there's an error flushing the cache.
         """
+        # Clear the in-process cache layer first. get_cached_auth_result is
+        # wrapped with aiocache's @cached (in-memory), which sits in front of
+        # Redis; flushing only Redis would keep serving a flushed (e.g.
+        # compromised) key from process memory until its TTL expires.
+        await self.get_cached_auth_result.cache.clear()
+
         client = await self.state_service.acquire_redis_connection()
         if not client:
             logger.warning("Redis client unavailable for cache flush")

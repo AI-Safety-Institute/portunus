@@ -74,6 +74,22 @@ class TestCacheFlush:
         assert await fake_redis.dbsize() == 0
 
     @pytest.mark.asyncio
+    async def test_flush_clears_in_process_cache(
+        self, client_with_cache, fake_redis, mock_xray
+    ):
+        # Seed the in-process aiocache layer that sits in front of Redis.
+        inproc = CacheService.get_cached_auth_result.cache
+        await inproc.set("sentinel", "cached-value")
+        assert await inproc.get("sentinel") == "cached-value"
+
+        http = await client_with_cache(FakeStateService(fake_redis))
+        resp = await http.post("/cache/flush")
+
+        assert resp.status_code == 200
+        # The flush must wipe the in-process layer too, not only Redis.
+        assert await inproc.get("sentinel") is None
+
+    @pytest.mark.asyncio
     async def test_flush_redis_unavailable(self, client_with_cache, mock_xray):
         http = await client_with_cache(FakeStateService(None))
         resp = await http.post("/cache/flush")
