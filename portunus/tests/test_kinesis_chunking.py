@@ -38,9 +38,9 @@ class TestKinesisChunking:
 
         # Reassemble chunks
         reassembled_body = b"".join(chunks)
-        assert (
-            reassembled_body == original_body
-        ), "Reassembled body should match original"
+        assert reassembled_body == original_body, (
+            "Reassembled body should match original"
+        )
 
     def test_chunk_size_within_limits(self):
         """Test that each chunk stays within Kinesis size limits when base64 encoded."""
@@ -53,6 +53,6 @@ class TestKinesisChunking:
             encoded_size = len(base64.b64encode(chunk))
             # Add some overhead for the JSON wrapper (100 bytes)
             total_size = encoded_size + 100
-            assert (
-                total_size <= max_size
-            ), f"Chunk {i} exceeds max size after encoding ({total_size} > {max_size})"
+            assert total_size <= max_size, (
+                f"Chunk {i} exceeds max size after encoding ({total_size} > {max_size})"
+            )

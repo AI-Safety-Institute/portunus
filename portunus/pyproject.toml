@@ -18,7 +18,7 @@ dependencies = [
     "aws-xray-sdk>=2.14.0,<3",
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
-    "websockets>=12.0,<14",
+    "websockets>=12.0,<17",
     # <0.47: uvicorn 0.47.0 imports the ASGI app before the serving event loop
     # exists (encode/uvicorn#2919); XRayService()/AsyncContext() run at import
     # and bind to the wrong loop, so segments never reach handlers and every
@@ -33,8 +33,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "mypy>=1.11.0,<2",
-    "ruff>=0.5.5,<0.6",
+    "mypy>=1.11.0,<3",
+    "ruff>=0.5.5,<1",
     "boto3-stubs[secretsmanager, logs]>=1.34.149,<2",
     "types-pyyaml>=6.0.12.20240724,<7",
     "moto>=5.1.13,<6",
