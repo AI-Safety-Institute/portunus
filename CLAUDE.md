@@ -74,7 +74,12 @@ The proxy is designed to handle streaming responses efficiently:
 
 ## Configuration
 
+### Security Model
+Portunus service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay) do not authenticate callers. The proxy sends `PORTUNUS_API_KEY` in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`) on every service call, but Portunus does not validate it — deployments must enforce access in front of the service (authenticating sidecar and/or network isolation). Documented in README "Security Model".
+
 ### Environment Variables
+- `PORTUNUS_API_KEY`: Shared secret the proxy attaches to Portunus service calls (validated by the deployment layer, not by Portunus)
+- `PORTUNUS_API_KEY_HEADER`: Header carrying the shared secret (default: "x-api-key")
 - `API_KEY_HEADER`: Header name to use for API key (default: "authorization")
 - `API_KEY_PREFIX`: Prefix for API key (default: "Bearer ")
 - `RATE_LIMIT_PERCENT_ENABLED`: Enable rate limiting (0-100 percentage of traffic)
