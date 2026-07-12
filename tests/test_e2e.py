@@ -11,10 +11,7 @@ from conftest import encode_base64
 
 
 def test_custom_header_prefix_on_ping(docker_setup):
-    """Test that PORTUNUS_HEADER_PREFIX=aisi-proxy is reflected in response headers.
-
-    This doubles as a backwards-compatibility check for the original x-aisi-proxy-* headers.
-    """
+    """PORTUNUS_HEADER_PREFIX=aisi-proxy reflected in response headers (backwards-compat for x-aisi-proxy-*)."""
     response = requests.get("http://localhost:8888/ping")
 
     assert response.status_code == 200
@@ -94,13 +91,10 @@ def test_request_without_signing(
 def test_401_passthrough_for_missing_credentials(
     api_key_prefix: str, api_key_header: str, docker_setup
 ):
-    """Test that 401 errors from Portunus are passed through the Lua proxy.
+    """401 from Portunus is passed through the Lua proxy to the client.
 
-    This verifies that when Portunus returns a 401 (e.g., for missing/invalid
-    credentials), the Lua proxy correctly passes this through to the client.
-
-    Note: LocalStack doesn't validate AWS credentials like real AWS does,
-    so we test with missing credentials to trigger validation errors.
+    LocalStack doesn't validate AWS credentials like real AWS, so we use
+    missing credentials to trigger the validation error.
     """
     payload_data = {
         "credentials": {
@@ -131,10 +125,8 @@ def test_error_response_contains_trace_id(
 ):
     """Error responses must carry a correlatable debug ID.
 
-    On-call needs something to grep for in CloudWatch when a request
-    fails. Accept either ``request_id`` (current ext_authz response) or
-    the legacy ``x_amzn_trace_id`` field — the contract is presence,
-    not field name.
+    Accept either ``request_id`` (current) or the legacy ``x_amzn_trace_id``
+    field — the contract is presence, not field name.
     """
     response = requests.get(
         "http://localhost:8888/get",

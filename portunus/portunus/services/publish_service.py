@@ -1,11 +1,8 @@
 """Publish service: ships audit records to Kinesis Firehose direct-PUT.
 
-Records are *built* (synchronously serialized to bytes) by the ``build_*``
-methods and shipped in batches by :meth:`put_record_batch` via Firehose
-``PutRecordBatch``. The bounded publish queue (see :mod:`publish_queue`) drains
-itself in stream-grouped chunks and calls ``put_record_batch`` — so batching is
-opportunistic (only what's already queued), keeping memory bounded by the queue
-cap while cutting records/s ~Nx vs one ``put_record`` per event.
+``build_*`` methods serialize records to bytes; :meth:`put_record_batch` ships
+them via Firehose ``PutRecordBatch``. The bounded publish queue (see
+:mod:`publish_queue`) drives batching, so memory stays bounded by the queue cap.
 """
 
 import base64
@@ -30,8 +27,7 @@ from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
 
-# A built record ready for Firehose: the target delivery stream and the
-# newline-terminated JSON bytes.
+# A built record: target delivery stream + newline-terminated JSON bytes.
 BuiltRecord = Tuple[str, bytes]
 
 # Firehose PutRecordBatch hard limits: 500 records and 4 MiB per call.
@@ -47,10 +43,9 @@ def _serialize(record_data: Dict[str, Any]) -> bytes:
 def _chunk_records(records: List[bytes]) -> List[List[bytes]]:
     """Split records into Firehose-legal batches (<=500 recs, <=4 MiB).
 
-    A single record over 4 MiB can't fit a batch; it's placed in its own
-    chunk and will be rejected by Firehose (counted as failed) rather than
-    silently dropped here — body records are already capped well under this
-    by ``FIREHOSE_MAX_RECORD_SIZE``.
+    A record over 4 MiB gets its own chunk and is rejected by Firehose
+    (counted failed) rather than dropped silently here; body records are
+    already capped well under this by ``FIREHOSE_MAX_RECORD_SIZE``.
     """
     chunks: List[List[bytes]] = []
     current: List[bytes] = []
@@ -81,15 +76,11 @@ class PublishService:
     async def put_record_batch(self, stream_name: str, records: List[bytes]) -> int:
         """Ship ``records`` to ``stream_name`` via Firehose ``PutRecordBatch``.
 
-        Splits into Firehose-legal chunks (<=500 records / <=4 MiB). On a
-        partial failure (``FailedPutCount > 0``) the failed *subset* is
-        identified via ``RequestResponses[].ErrorCode`` and retried once
-        (partial failures are usually transient throttling — AWS's
-        recommended pattern), since audit is fire-and-forget with no other
-        retry. Any records still failing after the retry are logged with
-        their Firehose error codes (operational metadata, payload-free) so
-        the loss is observable rather than a silent chunk-id gap. Returns the
-        count of records Firehose ultimately did NOT accept. Never raises.
+        Splits into legal chunks (<=500 / <=4 MiB). On partial failure the
+        failed subset (via ``RequestResponses[].ErrorCode``) is retried once —
+        audit is fire-and-forget with no other retry. Survivors are logged with
+        their error codes (payload-free) so loss is observable. Returns the
+        count Firehose did NOT accept. Never raises.
         """
         if not stream_name or not records:
             return 0
@@ -116,8 +107,8 @@ class PublishService:
                     Records=[{"Data": data} for data in records],
                 )
             except Exception as e:
-                # Log type(e).__name__ only — botocore exceptions can carry
-                # payload fragments (customer body content) in their messages.
+                # Log type(e).__name__ only — botocore messages can carry
+                # payload fragments (customer body content).
                 logger.error(
                     "put_record_batch on %s raised: %s (%d records, attempt %d)",
                     stream_name,
@@ -140,9 +131,8 @@ class PublishService:
                 if code:
                     retry.append(data)
                     last_error_codes[code] = last_error_codes.get(code, 0) + 1
-            # Fallback: if responses are missing/misaligned, treat the tail as
-            # failed (Firehose returns failures without a stable order only on
-            # malformed responses; never silently under-count).
+            # Fallback for missing/misaligned responses: treat the tail as
+            # failed so we never silently under-count.
             if not retry:
                 retry = records[len(records) - failed_count :]
 
@@ -226,14 +216,12 @@ class PublishService:
     ) -> Optional[BuiltRecord]:
         """Build one request-body chunk record.
 
-        ``dropped=True`` is a sentinel marker emitted in place of a chunk
-        the publish queue could not accept; ``body_bytes`` is empty in
-        that case. ``truncated=True`` marks a chunk whose payload was
-        capped (currently only the WS deflate path). ``final_chunk=True``
-        marks the terminal chunk of a streamed (``num_chunks=0``) body — the
-        chunk emitted with Envoy's ``end_of_stream`` — so the ETL can detect
-        a lost trailing chunk. ``frame_index`` is the per-direction WS frame
-        ordinal (None for HTTP); Glue keys WS frames by (request_id,
+        ``dropped=True``: sentinel for a chunk the queue couldn't accept
+        (``body_bytes`` empty). ``truncated=True``: payload capped (WS deflate
+        path only). ``final_chunk=True``: terminal chunk of a streamed
+        (``num_chunks=0``) body, emitted with Envoy ``end_of_stream``, so the
+        ETL can detect a lost trailing chunk. ``frame_index``: per-direction WS
+        frame ordinal (None for HTTP); Glue keys WS frames by (request_id,
         frame_index).
         """
         if not config.firehose.request_body_stream_name:

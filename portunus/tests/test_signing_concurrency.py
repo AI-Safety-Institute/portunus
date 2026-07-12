@@ -1,13 +1,9 @@
 """Tests for the bounded signing path.
 
-``sign_request_async`` must:
-
-- run the blocking signer on the dedicated ``kms-sign`` executor, not the
-  process-default ``asyncio.to_thread`` pool;
-- cap concurrent signing requests with a semaphore (excess waits);
-- shed waiters with ``SigningOverloadedError`` once the acquire timeout
-  passes (so buffered 32 MiB bodies can't pile up unbounded);
-- release the semaphore on both success and signer failure.
+``sign_request_async`` runs the blocking signer on the dedicated ``kms-sign``
+executor (not ``asyncio.to_thread``), caps concurrency with a semaphore, sheds
+waiters with ``SigningOverloadedError`` past the acquire timeout (so buffered
+bodies can't pile up), and releases the semaphore on success and failure.
 """
 
 import asyncio

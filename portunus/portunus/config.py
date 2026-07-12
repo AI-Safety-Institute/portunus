@@ -11,16 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class RedisConfig(BaseModel):
-    """Redis configuration settings.
-
-    Attributes:
-        host: Redis server hostname
-        port: Redis server port
-        password: Redis server password (optional)
-        cache_duration: How long to cache authorization responses (seconds)
-        log_ttl: How long to store log data (seconds)
-        max_connections: Maximum number of Redis connections
-    """
+    """Redis configuration settings."""
 
     host: str = Field(
         default="localhost",
@@ -58,22 +49,10 @@ class RedisConfig(BaseModel):
 
 
 class FirehoseConfig(BaseModel):
-    """Firehose direct-PUT configuration for log record publishing.
+    """Per-component Firehose delivery stream names for log record publishing.
 
-    Configures the per-component Firehose delivery stream names that Portunus
-    publishes request/response log records to. S3 destinations and Glue ETL are
-    provisioned separately (in the api-key-proxy CDK infra) and not configured here.
-
-    Attributes:
-        metadata_stream_name: Firehose delivery stream for metadata records
-        request_headers_stream_name: Firehose delivery stream for request headers
-        request_body_stream_name: Firehose delivery stream for request bodies
-        request_trailers_stream_name: Firehose delivery stream for request trailers
-        response_headers_stream_name: Firehose delivery stream for response headers
-        response_body_stream_name: Firehose delivery stream for response bodies
-        response_trailers_stream_name: Firehose delivery stream for response trailers
-        ws_summary_stream_name: Stream name for per-connection WebSocket summaries
-        max_record_size: Maximum size in bytes for a single Firehose record
+    S3 destinations and Glue ETL are provisioned separately (api-key-proxy CDK
+    infra), not configured here.
     """
 
     metadata_stream_name: Optional[str] = Field(
@@ -109,8 +88,7 @@ class FirehoseConfig(BaseModel):
         description="Firehose stream for one summary record per WebSocket connection",
     )
     max_record_size: int = Field(
-        # Must match the env-loader default in get_config() (1_000_000) so the
-        # model default and the runtime path agree.
+        # Must match get_config()'s env-loader default (1_000_000).
         default=1_000_000,
         description="Maximum size in bytes for a single Firehose record (1MB)",
         ge=1000,
@@ -119,24 +97,16 @@ class FirehoseConfig(BaseModel):
     def missing_required_streams(self) -> list[str]:
         """Return the ``FIREHOSE_*`` env-var names whose stream is unset.
 
-        Every HTTP audit record type is published unconditionally on the
-        request path, but each ``PublishService.build_*`` short-circuits to
-        ``None`` (logging only a warning) when its stream is unset — so a task
-        with these unset serves traffic while silently dropping 100% of audit
-        records. This is the single source of truth used to fail fast at gRPC
-        startup, so a misconfigured task (e.g. one still carrying the
-        pre-migration ``KINESIS_*`` env vars, leaving ``FIREHOSE_*`` unset)
-        never serves.
+        Used to fail fast at gRPC startup: with a stream unset, the build path
+        short-circuits to None and the task serves traffic while dropping 100%
+        of that audit record type.
 
-        ``ws_summary_stream_name`` is deliberately excluded from the required
-        set: it is a per-connection roll-up, and the underlying WebSocket
-        frame payloads are still captured via the (required) request/response
-        body streams, so an unset summary stream loses only connection-level
-        stats, not the audit trail itself.
+        ``ws_summary_stream_name`` is excluded from the required set: its frame
+        payloads are still captured via the required request/response body
+        streams, so an unset summary loses only connection-level stats.
 
         Returns:
-            The names of the ``FIREHOSE_*`` env vars whose stream is unset
-            (an empty list when every required stream is configured).
+            Unset required ``FIREHOSE_*`` env-var names (empty when all set).
         """
         required = {
             "FIREHOSE_METADATA_STREAM": self.metadata_stream_name,
@@ -151,15 +121,7 @@ class FirehoseConfig(BaseModel):
 
 
 class AwsConfig(BaseModel):
-    """AWS-related configuration settings.
-
-    Attributes:
-        xray_daemon_address: AWS X-Ray daemon address
-        xray_log_group: AWS X-Ray log group
-        xray_extra_log_groups: Additional AWS X-Ray log groups,
-                               comma separated (optional)
-        xray_enabled: Whether AWS X-Ray tracing is enabled
-    """
+    """AWS-related configuration settings."""
 
     xray_daemon_address: str = Field(
         default="127.0.0.1:2000",
@@ -328,15 +290,9 @@ class GrpcConfig(BaseModel):
 class SigningConfig(BaseModel):
     """HTTP message-signing (KMS) throughput and memory bounds.
 
-    ``signing_service`` reads these via ``config.signing`` to size the
-    dedicated KMS.Sign executor and cap concurrent buffered signing
-    requests (each waiter pins a buffered request body in memory).
-
-    Attributes:
-        kms_executor_workers: Thread count of the dedicated KMS.Sign executor
-        max_concurrent: Cap on concurrent signing requests (semaphore)
-        acquire_timeout_s: How long a signing request waits for a slot before
-            being shed (fail-closed)
+    Read by ``signing_service`` via ``config.signing`` to size the KMS.Sign
+    executor and cap concurrent buffered signing requests (each waiter pins a
+    buffered request body in memory).
     """
 
     kms_executor_workers: int = Field(
@@ -423,9 +379,7 @@ class PortunusConfig(BaseModel):
 
 @lru_cache()
 def get_config() -> PortunusConfig:
-    """Get the application configuration, using environment variables.
-
-    The function is cached to avoid reloading the configuration on every call.
+    """Get the application configuration from environment variables (cached).
 
     Returns:
         PortunusConfig: The application configuration
@@ -532,5 +486,4 @@ def get_config() -> PortunusConfig:
     )
 
 
-# Create a singleton instance of the configuration
 config = get_config()

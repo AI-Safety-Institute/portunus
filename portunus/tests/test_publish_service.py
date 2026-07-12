@@ -24,9 +24,8 @@ class _FakeFirehoseClient:
         self.calls: list[list[bytes]] = []
         self._failed_per_call = failed_per_call
         self._raise = raise_on_call
-        # If set, the first N calls fail the LAST `failed_per_call` records
-        # (with an ErrorCode), and subsequent calls succeed — models transient
-        # throttling that the retry recovers from.
+        # If set, the first N calls fail the last `failed_per_call` records
+        # (with an ErrorCode); later calls succeed — models transient throttling.
         self._fail_first_n_calls = fail_first_n_calls
 
     async def put_record_batch(self, **kwargs) -> dict:
@@ -43,8 +42,8 @@ class _FakeFirehoseClient:
                 "FailedPutCount": 0,
                 "RequestResponses": [{"RecordId": "ok"} for _ in records],
             }
-        # Fail the LAST n_fail records, marked with an ErrorCode so the
-        # service can identify and retry exactly that subset.
+        # Fail the last n_fail records, marked with an ErrorCode so the service
+        # can retry exactly that subset.
         n_fail = min(n_fail, len(records))
         ok = len(records) - n_fail
         responses = [{"RecordId": "ok"} for _ in range(ok)] + [
@@ -97,8 +96,7 @@ async def test_put_record_batch_ships_all_records_in_one_call() -> None:
 
 @pytest.mark.asyncio
 async def test_put_record_batch_reports_partial_failures() -> None:
-    # Persistent failure: 2 records fail on every attempt (incl. the retry),
-    # so 2 are ultimately surfaced as unrecoverable.
+    # Persistent failure: 2 records fail on every attempt, incl. the retry.
     client = _FakeFirehoseClient(failed_per_call=2)
     failed = await _service(client).put_record_batch("audit", [b"a\n", b"b\n", b"c\n"])
     assert failed == 2
@@ -108,9 +106,8 @@ async def test_put_record_batch_reports_partial_failures() -> None:
 
 @pytest.mark.asyncio
 async def test_put_record_batch_retries_failed_subset_and_recovers() -> None:
-    # Transient: the last 2 records fail on the FIRST call only; the retry
-    # succeeds. Net failed == 0 (recovered), and the retry shipped only the
-    # failed subset, not the whole chunk.
+    # Transient: the last 2 records fail on the first call only; the retry
+    # recovers them and ships only the failed subset, not the whole chunk.
     client = _FakeFirehoseClient(failed_per_call=2, fail_first_n_calls=1)
     failed = await _service(client).put_record_batch("audit", [b"a\n", b"b\n", b"c\n"])
     assert failed == 0

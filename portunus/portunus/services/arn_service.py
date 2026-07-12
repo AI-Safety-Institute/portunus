@@ -1,9 +1,4 @@
-"""
-ARN handling service module.
-
-This module contains functions for working with AWS ARNs, including parsing
-and extracting identity information.
-"""
+"""AWS ARN parsing and identity extraction."""
 
 import logging
 from typing import Optional, Tuple

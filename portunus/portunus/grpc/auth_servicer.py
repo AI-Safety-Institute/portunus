@@ -1,17 +1,17 @@
 """Envoy ``ext_authz`` v3 Check servicer.
 
-Two passes share the entry point, discriminated by the
-``x-portunus-pass`` gRPC initial_metadata Envoy sets per filter config:
+Two passes share the entry point, discriminated by the ``x-portunus-pass``
+gRPC initial_metadata Envoy sets per filter config:
 
 - ``auth`` (default): header-only authentication. Returns the upstream
-  api_key as a header mutation and sets ``dynamic_metadata`` so the
-  composite filter ahead of the signing pass can gate on it.
-- ``signing``: re-authenticates (cache hit), computes Content-Digest
-  over the buffered body, and returns the RFC 9421 Signature headers.
+  api_key as a header mutation and sets ``dynamic_metadata`` for the
+  composite filter gating the signing pass.
+- ``signing``: re-authenticates (cache hit), computes Content-Digest over the
+  buffered body, and returns the RFC 9421 Signature headers.
 
-Audit metadata is published asynchronously from the ext_proc logging
-pass via ``CheckResponse.dynamic_metadata``, so Firehose writes stay off
-the auth-latency critical path.
+Audit metadata is published from the ext_proc pass via
+``CheckResponse.dynamic_metadata``, keeping Firehose writes off the
+auth-latency critical path.
 """
 
 from __future__ import annotations
@@ -64,8 +64,8 @@ from portunus.services.xray_service import (
 logger = logging.getLogger("api.access")
 
 
-# Bound the STS / Secrets Manager call below Envoy's 5s ext_authz deadline so
-# a stalled AWS endpoint surfaces as a structured 504 from Portunus.
+# Below Envoy's 5s ext_authz deadline so a stalled STS / Secrets Manager call
+# surfaces as a structured 504 from Portunus.
 _AUTH_TIMEOUT_S = 4.0
 
 
@@ -147,8 +147,8 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             if config.api_key_prefix and raw_payload.startswith(config.api_key_prefix):
                 raw_payload = raw_payload[len(config.api_key_prefix) :]
 
-            # target_host comes from route context or gRPC initial_metadata
-            # (both Envoy-controlled), never from client-controllable headers.
+            # target_host comes from Envoy-controlled route context / gRPC
+            # initial_metadata, never client-controllable headers.
             target_host = _extract_target_host_for_check(request, context)
 
             payload = AuthPayload.from_contents(raw_payload, target_host=None)
@@ -169,17 +169,16 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                     request_id=request_id,
                 )
 
-            # If a signing pass will follow, defer the authorization
-            # replacement to it. ext_authz #2 re-reads the bearer payload
-            # from the authorization header to recover the original
-            # credentials (cache hit), so we must NOT clobber the
-            # header here on the signing branch.
+            # If a signing pass follows, defer the authorization replacement to
+            # it: the signing pass re-reads the bearer payload from the
+            # authorization header to recover credentials (cache hit), so we
+            # must NOT clobber the header here on the signing branch.
             signing_required = auth_result.signing_key is not None
 
-            # Reject WS upgrade from signing tenants explicitly: the signing pass
-            # would otherwise sign an empty body (the upgrade GET has none) and
-            # attach meaningless headers, wasting a KMS.Sign call per upgrade and
-            # silently misleading the caller. No provider supports signed WS today.
+            # Reject WS upgrades from signing tenants: the signing pass would
+            # sign an empty body (the upgrade GET has none) and attach
+            # meaningless headers, wasting a KMS.Sign call. No provider supports
+            # signed WS today.
             is_ws_upgrade = headers.get("upgrade", "").lower() == "websocket"
             if signing_required and is_ws_upgrade:
                 return _denied(
@@ -212,8 +211,8 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                 code=e.http_status_code, body=e.message, request_id=request_id
             )
         except Exception as e:
-            # Log type(e).__name__ only — boto / pydantic / wsproto messages
-            # can carry payload bytes.
+            # Log type name only — boto / pydantic / wsproto messages can carry
+            # payload bytes.
             logger.error(
                 "Unhandled error in Check (request_id=%s): %s",
                 request_id,
@@ -232,14 +231,13 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         """Buffered-body pass that computes Content-Digest and signs.
 
         Re-authenticates to recover ``signing_key`` / ``api_key`` /
-        credentials; the auth result is cached in Redis from the first
-        pass so this is a cache hit, not a fresh STS round-trip.
-        Carrying AWS credentials via dynamic_metadata would leak them
-        to every downstream filter, so we use a cache hit instead.
+        credentials; the auth result is cached in Redis from the first pass, so
+        this is a cache hit, not a fresh STS round-trip. (Carrying AWS
+        credentials via dynamic_metadata would leak them to every downstream
+        filter, hence the cache-hit approach.)
 
-        Backend-error mapping mirrors ``_auth_pass`` so the same failure
-        produces the same customer-visible status code regardless of
-        whether the request requires signing.
+        Backend-error mapping mirrors ``_auth_pass`` so the same failure yields
+        the same customer-visible status code whether or not signing is needed.
         """
         try:
             headers = _http_headers(request)
@@ -285,12 +283,11 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                 signable = _signable_request_from_check(
                     request, headers, content_digest, target_host
                 )
-                # ``sign_request`` is sync boto3 (KMS.Sign is a blocking
-                # HTTPS round-trip). ``sign_request_async`` offloads it to a
-                # dedicated, sized KMS executor behind a concurrency semaphore
-                # so a signing burst can't pile up buffered 32 MiB bodies and
-                # exhaust memory. ``sign_fn`` keeps the sync-signer injection
-                # seam for test fakes.
+                # KMS.Sign is a blocking HTTPS round-trip; ``sign_request_async``
+                # offloads it to a sized KMS executor behind a concurrency
+                # semaphore so a signing burst can't pile up buffered 32 MiB
+                # bodies and exhaust memory. ``sign_fn`` is the injection seam
+                # for test fakes.
                 signature_headers = await sign_request_async(
                     signable,
                     auth_result.signing_key,
@@ -301,7 +298,7 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             except (ValidationError, ValueError) as e:
                 # ValueError: target_host missing (fail-closed, never sign a
                 # client-controlled @target-uri). ValidationError: malformed
-                # signing params. Both are server-side signing faults → 500.
+                # signing params. Both are server-side faults → 500.
                 logger.error(
                     "Failed to build signable request (request_id=%s): %s",
                     request_id,
@@ -313,11 +310,10 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                     request_id=request_id,
                 )
 
-            # Replace authorization with the upstream api_key here, not
-            # in ext_authz #1: this servicer needs the original bearer
-            # payload to re-authenticate (cache hit on the same Redis
-            # entry), so ext_authz #1 deferred the swap when it saw a
-            # signing_key on the auth result.
+            # Replace authorization with the upstream api_key here, not in the
+            # auth pass: this pass needs the original bearer payload to
+            # re-authenticate (cache hit), so the auth pass deferred the swap
+            # when it saw a signing_key.
             return _ok(
                 api_key=auth_result.api_key,
                 signature_headers=signature_headers,
@@ -336,8 +332,8 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                 code=e.http_status_code, body=e.message, request_id=request_id
             )
         except SigningOverloadedError:
-            # Concurrency cap saturated past the acquire timeout — shed fail
-            # closed (503) rather than pile up buffered bodies.
+            # Concurrency cap saturated past the acquire timeout — shed (503)
+            # rather than pile up buffered bodies.
             logger.warning(
                 "Signing capacity exhausted; shedding (request_id=%s)", request_id
             )
@@ -394,19 +390,18 @@ def _ok(
         if config.api_key_header.lower() != "authorization":
             headers_to_remove.append("authorization")
 
-    # Strip client-forged signature headers on the auth pass. Stripping at
-    # the ext_authz layer (not the route's request_headers_to_remove)
-    # preserves the legitimate values ext_authz #2 adds on the signing
-    # branch — Envoy applies ext_authz mutations in order, so #1's remove
-    # runs before #2's add.
+    # Strip client-forged signature headers on the auth pass. Doing it here
+    # (not via the route's request_headers_to_remove) preserves the legitimate
+    # values the signing pass adds: Envoy applies ext_authz mutations in order,
+    # so the auth pass's remove runs before the signing pass's add.
     if signing_required is not None:
         headers_to_remove.extend(("content-digest", "signature", "signature-input"))
 
     # Envoy applies headers_to_add BEFORE headers_to_remove, so the signing
-    # branch must NOT also list the header in headers_to_remove — that would
+    # branch must NOT also list the header in headers_to_remove (that would
     # strip the value just set and the composite filter would never dispatch
-    # the signing pass. OVERWRITE_IF_EXISTS_OR_ADD already replaces any
-    # client-supplied value; only strip on the non-signing branch.
+    # the signing pass). OVERWRITE_IF_EXISTS_OR_ADD already replaces any
+    # client value; only strip on the non-signing branch.
     if signing_required is not None:
         if signing_required:
             headers_to_add.append(
@@ -466,8 +461,8 @@ def _denied(
 ) -> external_auth_pb2.CheckResponse:
     """Build a CheckResponse denying the request with a specific HTTP code.
 
-    Body shape ``{"error": {"message": ..., "request_id": ...}}`` is a
-    stable client contract — do not change.
+    Body shape ``{"error": {"message": ..., "request_id": ...}}`` is a stable
+    client contract — do not change.
     """
     json_body = json.dumps(
         {"error": {"message": body, "request_id": request_id}},
@@ -525,8 +520,7 @@ def _extract_pass(context: grpc.aio.ServicerContext) -> str:
     try:
         metadata = context.invocation_metadata() or ()
         for item in metadata:
-            # Unpack explicitly: mypy can't narrow ``Metadatum`` when the
-            # fallback is an empty tuple.
+            # Unpack explicitly: mypy can't narrow ``Metadatum`` here.
             key: str = item[0]
             value = item[1]
             if key.lower() == "x-portunus-pass":
@@ -560,8 +554,8 @@ def _extract_target_host_for_check(
 def _request_body_bytes(request: external_auth_pb2.CheckRequest) -> bytes:
     """Read the buffered request body Envoy attaches under with_request_body.
 
-    Envoy uses ``raw_body`` when ``pack_as_bytes`` is true (signing pass)
-    and ``body`` otherwise; check both for compatibility.
+    Envoy uses ``raw_body`` when ``pack_as_bytes`` is true (signing pass) and
+    ``body`` otherwise; check both.
     """
     try:
         raw = request.attributes.request.http.raw_body
@@ -590,12 +584,11 @@ def _signable_request_from_check(
     """Construct the SignableRequest from the ext_authz CheckRequest.
 
     Uses the trusted ``target_host`` from route context / gRPC
-    initial_metadata so a forged Host header cannot redirect the
-    signature. Fails closed (raises ``ValueError``) when ``target_host``
-    is absent rather than falling back to the client-supplied
-    ``:authority`` / ``host`` — signing a URL the client controls would
-    let a forged Host redirect the signed ``@target-uri``. The caller
-    maps this to a 500 "Signing misconfiguration".
+    initial_metadata so a forged Host header cannot redirect the signature.
+    Fails closed (raises ``ValueError``, mapped by the caller to 500) when
+    ``target_host`` is absent rather than falling back to the client-supplied
+    ``:authority`` / ``host``, which would let a forged Host redirect the
+    signed ``@target-uri``.
     """
     if not target_host:
         raise ValueError(

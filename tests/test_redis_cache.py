@@ -23,12 +23,10 @@ _cache_service = CacheService(_state_service)
 
 @pytest.fixture(autouse=True)
 def reset_redis_client():
-    """Reset global Redis client between tests to prevent event loop issues.
+    """Reset the global Redis client between tests to avoid event-loop reuse.
 
-    The global _test_redis_client caches a Redis connection for reuse, but when
-    pytest creates a new event loop for each test, the cached client becomes
-    attached to the old loop. This causes "Event loop is closed" errors.
-    Resetting the client ensures each test gets a fresh connection on the current loop.
+    pytest creates a new event loop per test; a cached client bound to the old
+    loop raises "Event loop is closed". Resetting forces a fresh connection.
     """
     global _test_redis_client
     _test_redis_client = None
@@ -101,13 +99,11 @@ async def get_test_redis_client():
 
 @pytest.mark.asyncio
 async def test_generate_cache_key():
-    """Cache-key contract (host+payload hashed independently, host normalised).
+    """Cache-key contract: determinism, host/payload sensitivity, host normalisation.
 
-    Asserts the properties that matter for correctness/security rather than
-    re-deriving the internal hash: determinism, host- and payload-sensitivity
-    (so a bearer authorised for provider A can't re-use a cached api_key on
-    provider B), and host normalisation (equivalent hosts share one entry).
-    The exact construction is unit-tested in portunus/tests/test_cache_key.py.
+    Host-sensitivity is a security property (a bearer authorised for provider A
+    can't reuse a cached api_key on provider B). Exact construction is
+    unit-tested in portunus/tests/test_cache_key.py.
     """
     payload = "test-payload"
     target_host = "api.example.com"
@@ -134,11 +130,10 @@ async def test_generate_cache_key():
 
 @pytest.mark.asyncio
 async def test_cache_and_retrieve_with_none_signing_key(docker_setup, request):
-    """Regression test for None signing_key cache retrieval.
+    """Regression: cached auth with None signing_key retrieves without error.
 
-    Tests bug where retrieving cached auth with None signing_key would fail
-    with 'NoneType' object is not subscriptable. This is the common case
-    where API keys don't require request signing.
+    Retrieval used to fail with "'NoneType' object is not subscriptable". This
+    is the common case — most API keys don't require request signing.
     """
     # Create test data with None signing_key (the common case)
     payload = f"test-payload-none-signing-{uuid.uuid4()}"
@@ -180,11 +175,7 @@ async def test_cache_and_retrieve_with_none_signing_key(docker_setup, request):
 
 @pytest.mark.asyncio
 async def test_cache_and_retrieve_with_signing_key(docker_setup, request):
-    """Test caching and retrieving auth with signing_key present.
-
-    Tests the less common case where API keys require request signing
-    (e.g., certain labs + models).
-    """
+    """Cache + retrieve auth with a signing_key present (the request-signing case)."""
     # Create test data with a signing_key
     payload = f"test-payload-with-signing-{uuid.uuid4()}"
     api_key = "sk-test-api-key-with-signing"

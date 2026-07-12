@@ -1,15 +1,11 @@
 """WebSocket echo server with scriptable handlers for end-to-end tests.
 
-Two families of handler:
-
 **Positive-path / SDK shape**
 * ``/`` and ``/echo`` — bidirectional echo.
 * ``/v1/responses`` — minimal OpenAI Responses-API mock. Emits
   ``response.created`` then ``RESPONSE_CHUNKS`` (default 3)
-  ``response.output_text.delta`` events at ``CHUNK_INTERVAL_SEC``
-  intervals (default 0.1s), then ``response.completed``. Just enough
-  shape for Codex / openai-python to validate the relay end to end
-  without burning real OpenAI quota.
+  ``response.output_text.delta`` events at ``CHUNK_INTERVAL_SEC`` (default
+  0.1s), then ``response.completed``.
 
 **Failure-mode**
 * ``/close-after/N`` — echo N messages, then close cleanly with 1000.
@@ -80,10 +76,10 @@ async def _close_after(websocket: WebSocketServerProtocol, n: int) -> None:
 
 
 async def _echo_then_die(websocket: WebSocketServerProtocol) -> None:
-    """Echo one message, then drop the TCP connection without a close frame.
+    """Echo one message, then abort the TCP socket without a close frame.
 
-    Mimics an upstream that crashes mid-stream. Tests should observe a
-    clean WS-error on the client side, not a hang.
+    Mimics an upstream that crashes mid-stream (client should see a WS error,
+    not a hang).
     """
     async for message in websocket:
         await websocket.send(message)
@@ -98,9 +94,8 @@ async def _echo_then_die(websocket: WebSocketServerProtocol) -> None:
 async def _malformed(websocket: WebSocketServerProtocol) -> None:
     """Accept the handshake, then write bytes that don't form a valid WS frame.
 
-    The ``websockets`` library will treat our direct transport.write as
-    leaving the framing layer entirely, so the bytes reach the peer
-    without further encoding.
+    Direct ``transport.write`` bypasses the ``websockets`` framing layer, so
+    the raw bytes reach the peer unencoded.
     """
     transport = websocket.transport
     if transport is None:
@@ -116,11 +111,9 @@ async def _malformed(websocket: WebSocketServerProtocol) -> None:
 async def _openai_responses_mock(websocket: WebSocketServerProtocol) -> None:
     """Minimal OpenAI Responses-API mock over WebSocket.
 
-    Receives one client message (any shape), then emits a Responses-API
-    event stream: ``response.created`` -> ``response.output_text.delta``
-    x N -> ``response.completed``. Each event is sent as a JSON text frame.
-
-    Configurable via env vars (set on the ws-echo container):
+    Waits for one client frame, then emits ``response.created`` →
+    ``response.output_text.delta`` × N → ``response.completed`` as JSON text
+    frames. Env config (ws-echo container):
       RESPONSE_CHUNKS       number of delta chunks (default 3)
       CHUNK_INTERVAL_SEC    delay between chunks (default 0.1)
     """

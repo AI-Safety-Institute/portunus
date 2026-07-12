@@ -1,22 +1,8 @@
 """Disruption / graceful-drain e2e tests for the Portunus gRPC sidecar.
 
-Modelled on gimlet's ``tests/test_disruption.py``: inject real container
-failures (SIGTERM, restart) against the live docker-compose stack and assert
-the system drains / recovers gracefully rather than dropping or hanging.
-
-These exercise the behaviours the gRPC refactor newly owns and that unit tests
-can't reach end to end:
-
-* graceful drain on SIGTERM (gRPC server stops accepting, flushes the publish
-  queue, exits within the grace window — server.py ``run`` + ``stop_grpc_server``)
-* the gRPC health service flipping NOT_SERVING at drain start
-* no audit-record loss / no client hang while a request is in flight during a
-  Portunus restart
-* auth failure short-circuiting at ext_authz without touching the upstream
-* Envoy drain on SIGTERM (proxy/entrypoint.sh): in-flight streaming HTTP
-  responses (the SSE / eventstream shape) and established WebSocket sessions
-  survive a task stop and keep flowing through the drain window; Envoy exits
-  0 as soon as the last downstream connection closes, not at the SIGKILL
+Inject real container failures (SIGTERM, restart) against the live
+docker-compose stack and assert the system drains / recovers gracefully
+rather than dropping or hanging.
 
 Destructive (they kill/restart containers), so they run serially and are
 marked ``slow`` + ``disruption``. Run with the stack up:
@@ -75,13 +61,10 @@ def _wait_for_proxy_ping(timeout: float = 30.0) -> bool:
 
 
 def _grpc_health(timeout: float = 2.0) -> int:
-    """Query Portunus' gRPC health from inside the portunus container.
+    """Query Portunus' gRPC health from inside the container (SERVING/NOT_SERVING).
 
-    Returns a ``health_pb2.HealthCheckResponse.ServingStatus`` enum value
-    (an int): SERVING or NOT_SERVING.
-
-    The gRPC port is loopback-only, so we exec grpc_health_probe in the
-    container rather than dialling from the test host.
+    The gRPC port is loopback-only, so exec grpc_health_probe in the container
+    rather than dialling from the test host.
     """
     out = _docker(
         "exec",
@@ -100,11 +83,9 @@ def _grpc_health(timeout: float = 2.0) -> int:
 
 @pytest.fixture
 def restore_portunus():
-    """Ensure the portunus container is running + healthy after a test.
+    """Restart the portunus container after a test and wait for readiness.
 
-    Mirrors gimlet's ``ensure_system_running``: destructive tests can leave
-    the container stopped; restart it and wait for readiness so the next test
-    (and the session teardown) sees a healthy stack.
+    Destructive tests can leave it stopped; the next test needs a healthy stack.
     """
     yield
     if _container_state(PORTUNUS_CONTAINER) != "running":
@@ -154,10 +135,9 @@ def test_auth_failure_short_circuits_at_ext_authz(docker_setup):
 def test_sigterm_drains_within_grace_window(docker_setup, restore_portunus):
     """SIGTERM the portunus container; it should exit cleanly within grace.
 
-    server.py installs a SIGTERM handler that stops accepting new gRPC
-    streams, flushes the publish queue, and exits. The container's
-    ``GRPC_GRACEFUL_SHUTDOWN_SECONDS`` default is 30s; a quiescent server
-    should drain well inside that and not be SIGKILL'd.
+    server.py's SIGTERM handler stops accepting gRPC streams, flushes the
+    publish queue, and exits. A quiescent server drains well inside the 30s
+    ``GRPC_GRACEFUL_SHUTDOWN_SECONDS`` grace, not SIGKILL'd.
     """
     assert _container_state(PORTUNUS_CONTAINER) == "running"
 
@@ -250,17 +230,14 @@ def test_portunus_restart_keeps_same_topology_and_recovers(
 
 
 # ---------------------------------------------------------------------------
-# Envoy drain on SIGTERM — in-flight streams across protocols
+# Envoy drain on SIGTERM — in-flight streams across protocols.
 #
-# ECS task stop is: ALB target deregistration (10s delay) → SIGTERM →
-# stopTimeout → SIGKILL. Everything Claude Code / Inspect sees as a
-# "connection closed mid-response" during a scale-in happens in that window.
-# proxy/entrypoint.sh owns the SIGTERM side: it must put Envoy into a drain
-# (in-flight streams keep flowing, no new connections routed here anyway)
-# and only exit once downstream connections hit zero or the drain budget
-# expires. SSE and AWS eventstream are both just long streaming HTTP
-# responses through Envoy, so one streaming-HTTP test covers that class;
-# WebSocket is a separate upgraded-connection path and gets its own test.
+# ECS task stop is: ALB deregistration → SIGTERM → stopTimeout → SIGKILL.
+# proxy/entrypoint.sh must put Envoy into a drain (in-flight streams keep
+# flowing) and exit only once downstream connections hit zero or the budget
+# expires. SSE and AWS eventstream are both long streaming HTTP responses, so
+# one streaming-HTTP test covers that class; WebSocket is a separate upgraded
+# path with its own test.
 # ---------------------------------------------------------------------------
 
 _PROXY_CONTAINER_CACHE: str | None = None
@@ -269,9 +246,8 @@ _PROXY_CONTAINER_CACHE: str | None = None
 def _proxy_container() -> str:
     """Resolve the proxy service's container name for this compose project.
 
-    The compose project name derives from the checkout directory, so the
-    container name isn't stable across clones — resolve it via the compose
-    service label rather than hardcoding.
+    The project name derives from the checkout dir, so the container name isn't
+    stable across clones — resolve via compose rather than hardcoding.
     """
     global _PROXY_CONTAINER_CACHE
     if _PROXY_CONTAINER_CACHE is None:
@@ -311,12 +287,11 @@ def _wait_for_authed_200(timeout: float = 45.0) -> bool:
 
 @pytest.fixture
 def restore_proxy():
-    """Bring the proxy (and its netns-sharing portunus sidecar) back after a test.
+    """Bring the proxy and its netns-sharing portunus sidecar back after a test.
 
-    Stopping the proxy container tears down the network namespace portunus
-    shares (``network_mode: service:proxy``), so after restarting the proxy
-    the portunus container must also be restarted to join the fresh
-    namespace — ``docker start`` alone would leave it in the dead one.
+    Portunus shares the proxy's network namespace (``network_mode:
+    service:proxy``), so restarting the proxy requires restarting portunus too
+    to join the fresh namespace — ``docker start`` alone leaves it in the dead one.
     """
     yield
     proxy = _proxy_container()
@@ -330,12 +305,10 @@ def restore_proxy():
 def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_proxy):
     """A streaming HTTP response in flight at SIGTERM completes, uncut.
 
-    This is the SSE / eventstream shape: a long-lived chunked response
-    trickling through Envoy (httpbun ``/drip`` at ~1 byte/sec). SIGTERM
-    lands ~2s into a ~12s stream; the drain must let the remaining ~10s
-    stream to the client rather than resetting the connection, and Envoy
-    must exit 0 shortly after the stream (its last downstream connection)
-    completes — well before the 90s SIGKILL backstop.
+    SSE / eventstream shape: a chunked response trickling through Envoy
+    (httpbun ``/drip``). The drain must let it finish rather than reset the
+    connection, and Envoy must exit 0 shortly after the last downstream
+    connection completes — before the 90s SIGKILL backstop.
     """
     proxy = _proxy_container()
     assert _container_state(proxy) == "running"
@@ -349,14 +322,11 @@ def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_prox
     stop_started = 0.0
 
     # ``Connection: close`` so Envoy closes the wire once the response
-    # completes — otherwise the client's parked keep-alive connection
-    # (which the drain rightly cannot force-close mid-nothing on HTTP/1.1)
-    # holds the drain open until its deadline. Prod behaves the same way:
-    # the ALB closes its idle keep-alives to a deregistered target.
-    # The finally ensures the background ``docker stop`` has landed before
-    # restore_proxy runs, even when the stream dies mid-read (the failure
-    # mode this test exists to catch) — otherwise the fixture's
-    # ``docker start`` races the still-running stop.
+    # completes — otherwise the client's parked HTTP/1.1 keep-alive holds the
+    # drain open until its deadline (prod's ALB closes idle keep-alives the
+    # same way). The finally ensures the background ``docker stop`` has landed
+    # before restore_proxy runs even if the stream dies mid-read, so the
+    # fixture's ``docker start`` doesn't race a still-running stop.
     try:
         with requests.get(
             f"{PROXY_URL}/drip?duration={num_bytes}&numbytes={num_bytes}&delay=0",
@@ -404,10 +374,10 @@ async def test_envoy_sigterm_keeps_websocket_flowing_during_drain(
 ):
     """An established WebSocket session keeps echoing through the drain.
 
-    Upgraded connections can't be nudged closed at a response boundary the
-    way plain HTTP can, so the drain must simply leave them open until the
-    client closes (or the budget expires). Echo frames for ~6s after
-    SIGTERM, close from the client side, then expect a prompt clean exit.
+    Upgraded connections can't be closed at a response boundary like plain
+    HTTP, so the drain must leave them open until the client closes (or the
+    budget expires). Echo for ~6s after SIGTERM, close client-side, expect a
+    prompt clean exit.
     """
     from websockets.asyncio.client import connect as ws_connect
 

@@ -1,13 +1,7 @@
-"""Behaviour tests for the ext_authz gRPC Check servicer.
+"""Behaviour tests for the ext_authz gRPC Check servicer in isolation.
 
-Each test name reads as a claim about what the servicer guarantees.
-Collaborators (``AuthService``, ``sign_request_fn``) are replaced by
-small ``Fake*`` classes that record what they received, so assertions
-check observable effects rather than internal call counts.
-
-End-to-end behaviour (gRPC framing, Envoy round-trip, real Redis/AWS) is
-covered by the docker-compose-driven tests in ``tests/test_http_proxy_behaviour.py``;
-this file's scope is the servicer's request handling logic in isolation.
+End-to-end behaviour (gRPC framing, Envoy, real Redis/AWS) is covered by
+``tests/test_http_proxy_behaviour.py``.
 """
 
 from __future__ import annotations
@@ -47,10 +41,9 @@ class _AuthCall:
 
 
 class FakeAuthService:
-    """A trivial AuthService stand-in that returns a fixed result or raises.
+    """AuthService stand-in returning a fixed result or raising.
 
-    Holds an ``auth_calls`` list so tests can confirm ``target_host`` was
-    propagated correctly.
+    Records ``auth_calls`` so tests can confirm ``target_host`` propagation.
     """
 
     def __init__(
@@ -89,9 +82,9 @@ class _SignCall:
 
 
 class FakeSignRequest:
-    """Replaces ``sign_request_fn``. Returns the configured headers (default.
+    """Replaces ``sign_request_fn``: returns configured headers (default empty.
 
-    empty: no signing) and records each call for later inspection.
+    = no signing) and records each call.
     """
 
     def __init__(self, returns: Optional[dict] = None) -> None:
@@ -104,8 +97,7 @@ class FakeSignRequest:
 
 
 # ---------------------------------------------------------------------------
-# Builders — protobuf scaffolding kept out of the test bodies so the tests
-# focus on the headers / behaviour, not the proto field structure.
+# Builders — protobuf scaffolding kept out of the test bodies.
 # ---------------------------------------------------------------------------
 
 
@@ -119,9 +111,8 @@ def _principal_info() -> PrincipalInfo:
     )
 
 
-# A base64 payload that *parses* cleanly. Tests using it expect the auth
-# fake to be the gate that succeeds or fails — the bytes only need to
-# survive the up-front payload decoding.
+# A base64 payload that parses cleanly; the auth fake is the gate that
+# succeeds or fails, so the bytes only need to survive payload decoding.
 _VALID_PAYLOAD = base64.b64encode(
     json.dumps(
         {
@@ -215,16 +206,14 @@ def _ctx_with_key(value: Optional[str] = _PROXY_KEY) -> _FakeContext:
 
 @pytest.fixture(autouse=True)
 def _enable_proxy_key_validation(monkeypatch):
-    """Force proxy-key validation on by default. Tests that need it off.
+    """Force proxy-key validation on by default; tests needing it off.
 
-    re-monkeypatch within their own body.
+    re-monkeypatch in their own body.
     """
-    # monkeypatch: proxy_api_key / api_key_prefix live in a module-level
-    # Pydantic config singleton (config.py); the servicer reads it
+    # Config is a module-level Pydantic singleton the servicer reads
     # directly, so DI wouldn't reach the validation call site.
     monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", _PROXY_KEY)
-    # Pin api_key_prefix to a stable value so prefix-stripping tests
-    # don't depend on host env.
+    # Pin api_key_prefix so prefix-stripping tests don't depend on host env.
     monkeypatch.setattr(portunus_config, "api_key_prefix", "Bearer ")
 
 
@@ -266,12 +255,9 @@ async def test_successful_auth_substitutes_upstream_api_key_in_authorization_hea
 
 @pytest.mark.asyncio
 async def test_configured_bearer_prefix_is_stripped_before_decoding_payload():
-    """ext_authz must strip the configured API-key prefix before decoding.
+    """The servicer must strip the configured ``Bearer `` prefix before.
 
-    ext_authz receives the raw Authorization header value (including the
-    default ``Bearer `` prefix). The servicer must strip the prefix
-    before base64-decoding the payload, otherwise every real client
-    request fails.
+    base64-decoding the payload, otherwise every real client request fails.
     """
     servicer, auth, _sign = _make_servicer()
     request = _check_request(payload_header=f"Bearer {_VALID_PAYLOAD}")
@@ -282,18 +268,13 @@ async def test_configured_bearer_prefix_is_stripped_before_decoding_payload():
         f"Expected OK after stripping 'Bearer '; got denied with "
         f"{response.denied_response.body!r}"
     )
-    # And the auth backend received the unprefixed payload through to its
-    # authenticate call (proves the strip happened, not that the prefix
-    # was somehow tolerated by the decoder).
+    # auth was reached, proving the strip happened (not a tolerant decoder).
     assert auth.auth_calls, "auth.authenticate should have been called"
 
 
 @pytest.mark.asyncio
 async def test_bare_payload_without_prefix_still_works():
-    """Clients that pre-strip the prefix (or use a prefix-less header.
-
-    like x-api-key) shouldn't be regressed by the strip logic.
-    """
+    """A prefix-less header (client pre-stripped, or x-api-key) still works."""
     servicer, auth, _sign = _make_servicer()
     request = _check_request(payload_header=_VALID_PAYLOAD)  # no Bearer
 
@@ -305,11 +286,10 @@ async def test_bare_payload_without_prefix_still_works():
 
 @pytest.mark.asyncio
 async def test_target_host_from_grpc_invocation_metadata_is_passed_to_auth_service():
-    """target_host is sourced from gRPC ``invocation_metadata`` — the only.
+    """target_host comes from gRPC ``invocation_metadata`` (Envoy-only.
 
-    channel Envoy can write that clients can't reach. Reading from the
-    HTTP request header would let a client forge a different host and
-    pass auth's secret.host check.
+    channel). Reading it from the HTTP header would let a client forge a
+    host and pass auth's secret.host check.
     """
     servicer, auth, _sign = _make_servicer()
     ctx = _FakeContext(
@@ -349,11 +329,10 @@ async def test_ws_route_context_target_host_overrides_listener_metadata():
 
 @pytest.mark.asyncio
 async def test_target_host_http_header_is_ignored_to_prevent_client_forgery():
-    """If the only target_host is in the HTTP request headers (no gRPC.
+    """With target_host only in the HTTP header (no gRPC metadata), the.
 
-    metadata channel), the servicer should pass ``None`` to auth rather
-    than trusting the client-forgeable header. The forgery vector exists
-    because route_config header rewrites land *after* ext_authz.
+    servicer passes ``None`` to auth rather than the client-forgeable header.
+    Forgery is possible because route_config rewrites land after ext_authz.
     """
     servicer, auth, _sign = _make_servicer()
 
@@ -366,12 +345,9 @@ async def test_target_host_http_header_is_ignored_to_prevent_client_forgery():
 
 @pytest.mark.asyncio
 async def test_check_attaches_principal_info_and_secret_arn_dynamic_metadata():
-    """Auth pass returns principal_info + secret_arn in dynamic_metadata.
+    """Auth pass returns principal_info + secret_arn in dynamic_metadata,.
 
-    The audit Firehose publish is owned by the logging pass
-    (proc_servicer); ext_authz forwards principal_info via Envoy's
-    ``CheckResponse.dynamic_metadata`` and the ext_proc filter is
-    configured to surface it on the Process stream.
+    which ext_proc later surfaces for the audit Firehose publish.
     """
     servicer, _auth, _sign = _make_servicer()
 
@@ -380,7 +356,6 @@ async def test_check_attaches_principal_info_and_secret_arn_dynamic_metadata():
     )
 
     assert response.HasField("ok_response")
-    # principal_info + secret_arn are attached on the dynamic_metadata.
     fields = response.dynamic_metadata.fields
     assert "principal_info" in fields
     assert fields["principal_info"].HasField("struct_value")
@@ -421,10 +396,9 @@ async def test_wrong_proxy_key_is_rejected_with_401_and_does_not_call_auth():
 
 @pytest.mark.asyncio
 async def test_empty_proxy_api_key_config_disables_the_identity_check(monkeypatch):
-    """Operator escape hatch — an unset config skips the validation so a.
+    """An unset (empty-string) proxy_api_key skips the identity check, so a.
 
-    blank-slate dev environment doesn't require a pre-shared key. Tested
-    end-to-end here because the empty-string default is load-bearing.
+    blank-slate dev environment needs no pre-shared key.
     """
     monkeypatch.setattr(portunus_config.grpc, "proxy_api_key", "")
     servicer, _auth, _sign = _make_servicer()
@@ -472,11 +446,7 @@ async def test_credentials_error_from_auth_service_is_rejected_with_401():
 
 @pytest.mark.asyncio
 async def test_authentication_error_from_auth_service_is_rejected_with_403():
-    """``AuthenticationError`` is what host-validation mismatch raises, so.
-
-    this is the unit-level analog of the
-    ``secret_with_mismatching_host_is_rejected_with_403`` behaviour test.
-    """
+    """``AuthenticationError`` (host-validation mismatch) maps to 403."""
     auth = FakeAuthService(raises=AuthenticationError("identity mismatch"))
     servicer, _auth, _sign = _make_servicer(auth=auth)
 
@@ -526,20 +496,17 @@ async def test_denied_response_carries_request_id_in_x_portunus_debug_id_header(
 
 
 # ---------------------------------------------------------------------------
-# Request signing — two-pass design via ext_authz #1 (auth) + #2 (signing).
-# The composite filter ahead of #2 gates on the x-portunus-signing-required
-# request header (set by the auth pass, stripped at the route before reaching
-# upstream); the signing pass re-uses the cached auth result.
+# Request signing — two-pass design: ext_authz #1 (auth) + #2 (signing).
+# The composite filter gates #2 on the x-portunus-signing-required header set
+# by the auth pass; the signing pass re-uses the cached auth result.
 # ---------------------------------------------------------------------------
 
 
 def _signing_ctx(target_host: str | None = "api.openai.com") -> "_FakeContext":
-    """Build a gRPC context tagged for the signing pass (ext_authz #2).
+    """GRPC context tagged for the signing pass (ext_authz #2).
 
-    Includes ``x-portunus-target-host`` by default — Envoy always injects it,
-    and the signing pass fails closed without it (it refuses to sign a
-    client-controlled @target-uri). Pass ``target_host=None`` to exercise
-    that fail-closed path.
+    Includes ``x-portunus-target-host`` by default (the signing pass fails
+    closed without it). Pass ``target_host=None`` to exercise that path.
     """
     metadata = [
         ("x-portunus-proxy-key", _PROXY_KEY),
@@ -552,22 +519,13 @@ def _signing_ctx(target_host: str | None = "api.openai.com") -> "_FakeContext":
 
 @pytest.mark.asyncio
 async def test_auth_pass_for_signing_tenant_sets_signing_required_metadata():
-    """The auth pass (ext_authz #1) signals the composite filter to fire.
+    """Auth pass for a signing tenant sets ``x-portunus-signing-required: true``.
 
-    ext_authz #2 by setting the ``x-portunus-signing-required: true``
-    request header. The composite matcher gates on that header and
-    dispatches ext_authz #2. The header is stripped at the route's
-    ``request_headers_to_remove`` so it never reaches upstream. Header
-    mutations on this pass cover only the upstream api_key —
-    Content-Digest and signature headers are produced by the signing
-    pass.
+    to dispatch ext_authz #2, and does NOT swap authorization or emit
+    signature headers (that's the signing pass).
 
-    The header MUST NOT also appear in ``headers_to_remove`` on the
-    signing branch: Envoy applies headers_to_add before
-    headers_to_remove, so listing it in both strips the value we just
-    set and the composite filter sees no header. The ``OVERWRITE_IF_-
-    EXISTS_OR_ADD`` append_action on the add already replaces any
-    client-supplied value.
+    The header MUST NOT also be in ``headers_to_remove`` here: Envoy applies
+    adds before removes, so listing it in both would strip the value we set.
     """
     signing_key = SigningKey(
         kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
@@ -588,26 +546,19 @@ async def test_auth_pass_for_signing_tenant_sets_signing_required_metadata():
     response_headers = {
         h.header.key: h.header.value for h in response.ok_response.headers
     }
-    # authorization MUST NOT be replaced on the signing branch — the
-    # signing pass that follows re-reads the original bearer payload
-    # to recover the credentials (cache hit). The signing pass takes
-    # care of installing the upstream api_key.
+    # authorization is left untouched: the signing pass re-reads the original
+    # bearer to recover credentials (cache hit) and installs the upstream key.
     assert "authorization" not in response_headers
     assert "Content-Digest" not in response_headers
     assert "Signature" not in response_headers
-    # No signing call on this pass — that's the signing pass's job.
     assert sign.calls == []
-    # x-portunus-signing-required header signals the composite filter.
     assert response_headers["x-portunus-signing-required"] == "true"
-    # Header is NOT in headers_to_remove on the signing branch — see
-    # the docstring above for why this would break the composite filter.
+    # Not in headers_to_remove here (see docstring: add-before-remove).
     assert "x-portunus-signing-required" not in list(
         response.ok_response.headers_to_remove
     )
-    # SECURITY: client-forged signature headers MUST be stripped on the auth
-    # pass so a client cannot smuggle a Signature/Content-Digest to the
-    # upstream. ext_authz #1's remove runs before ext_authz #2's add, so the
-    # legitimate signing-pass values survive while forged ones are dropped.
+    # SECURITY: client-forged signature headers must be stripped on the auth
+    # pass; #1's remove runs before #2's add, so legitimate values survive.
     removed = {h.lower() for h in response.ok_response.headers_to_remove}
     assert {
         "content-digest",
@@ -618,12 +569,10 @@ async def test_auth_pass_for_signing_tenant_sets_signing_required_metadata():
 
 @pytest.mark.asyncio
 async def test_auth_pass_for_non_signing_tenant_sets_signing_required_false():
-    """Tenants without a ``signing_key`` omit the signing-required header so the.
+    """Tenants without a ``signing_key`` omit the signing-required header so.
 
-    composite filter skips ext_authz #2 entirely and the body never
-    has to be buffered for that request. The header is listed in
-    ``headers_to_remove`` on this branch (no competing add) to defang
-    any forged inbound copy.
+    the composite filter skips ext_authz #2. The header is listed in
+    ``headers_to_remove`` here (no competing add) to defang a forged copy.
     """
     servicer, _auth, sign = _make_servicer()
 
@@ -642,12 +591,10 @@ async def test_auth_pass_for_non_signing_tenant_sets_signing_required_false():
 
 @pytest.mark.asyncio
 async def test_auth_pass_rejects_ws_upgrade_from_signing_tenant_with_400():
-    """A signing tenant initiating a WebSocket upgrade is rejected at ext_authz #1.
+    """A signing tenant's WebSocket upgrade is rejected with 400 at ext_authz.
 
-    The signing pass would otherwise sign an empty body (the upgrade GET
-    has none) and attach meaningless Signature / Content-Digest headers
-    — wasting a KMS.Sign call per upgrade and silently misleading the
-    caller. We reject early with a clear 400 + remediation message.
+    #1, before the signing pass signs the (empty) upgrade GET body and wastes
+    a KMS.Sign call on meaningless signature headers.
     """
     signing_key = SigningKey(
         kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
@@ -686,18 +633,15 @@ async def test_auth_pass_rejects_ws_upgrade_from_signing_tenant_with_400():
     assert response.HasField("denied_response")
     assert response.denied_response.status.code == http_status_pb2.BadRequest
     assert "WebSocket" in response.denied_response.body
-    # Spirit of the assertion: we returned early, no signing-pass
-    # dispatch happened from within _auth_pass.
+    # Returned early: no signing-pass dispatch from within _auth_pass.
     assert sign.calls == []
 
 
 @pytest.mark.asyncio
 async def test_auth_pass_allows_ws_upgrade_from_non_signing_tenant():
-    """WS upgrade from a non-signing tenant is unaffected by the rejection.
+    """WS upgrade from a non-signing tenant passes through: the 400 fires only.
 
-    Guards against accidentally over-restricting: the explicit 400 fires
-    only when ``signing_required`` is true. Non-signing tenants pass
-    through with signing_required=false (header stripped) as usual.
+    when ``signing_required`` is true (guards against over-restricting).
     """
     servicer, _auth, sign = _make_servicer()
 
@@ -732,13 +676,10 @@ async def test_auth_pass_allows_ws_upgrade_from_non_signing_tenant():
 
 @pytest.mark.asyncio
 async def test_signing_pass_computes_digest_and_returns_signature_headers():
-    """ext_authz #2 (signing pass) buffers the body, computes.
+    """Signing pass buffers the body, computes Content-Digest, signs, and.
 
-    Content-Digest, re-authenticates (cache hit in prod), signs, and
-    returns Content-Digest + Signature + Signature-Input as header
-    mutations. The signing pass also installs the upstream api_key on
-    the authorization header: ext_authz #1 deferred that swap so we
-    could re-read the original bearer payload here.
+    returns Content-Digest + Signature + Signature-Input, plus installs the
+    upstream api_key on authorization (deferred from ext_authz #1).
     """
     body = b'{"key3": "value3", "key1": "value1", "key2": "value2"}'
     expected_digest = (
@@ -772,8 +713,6 @@ async def test_signing_pass_computes_digest_and_returns_signature_headers():
     response_headers = {
         h.header.key: h.header.value for h in response.ok_response.headers
     }
-    # The signing pass installs the upstream api_key on authorization
-    # (ext_authz #1 deferred this so it could re-read the bearer here).
     assert response_headers["authorization"] == "Bearer sk-upstream-test-key"
     assert response_headers["Content-Digest"] == expected_digest
     assert response_headers["Signature"].startswith("sig1=:")
@@ -784,13 +723,10 @@ async def test_signing_pass_computes_digest_and_returns_signature_headers():
 
 @pytest.mark.asyncio
 async def test_signing_pass_fails_closed_if_auth_no_longer_has_signing_key():
-    """If ext_authz #2 fires but the auth result lacks ``signing_key``, fail closed.
+    """If ext_authz #2 fires but the auth result lacks ``signing_key`` (secret.
 
-    Two ways to reach here: the secret was edited between passes, OR a
-    non-signing tenant forged ``x-portunus-signing-required: true`` to trick
-    the composite filter into dispatching the signing pass. Either way the
-    signing pass must fail closed (500) and — critically — must NOT invoke
-    KMS.Sign, so a forged flag can never extract a signature.
+    edited between passes, or a forged ``x-portunus-signing-required``), fail
+    closed with 500 and must NOT invoke KMS.Sign — no forged-flag signature.
     """
     auth = FakeAuthService(
         result=AuthResult(
@@ -805,19 +741,16 @@ async def test_signing_pass_fails_closed_if_auth_no_longer_has_signing_key():
 
     assert response.HasField("denied_response"), response
     assert response.denied_response.status.code == http_status_pb2.InternalServerError
-    # SECURITY: KMS.Sign must NOT be called for a tenant without a signing_key,
-    # even though the signing pass was dispatched (forged-flag defence).
+    # SECURITY: KMS.Sign must NOT run without a signing_key (forged-flag defence).
     assert sign.calls == [], "signing pass must not invoke KMS without a signing_key"
 
 
 @pytest.mark.asyncio
 async def test_signing_pass_fails_closed_without_target_host():
-    """No ``target_host`` on the signing pass → 500, never sign.
+    """No ``target_host`` on the signing pass → 500, never sign. The signed.
 
-    The signed ``@target-uri`` must come from the trusted ``target_host``
-    (route context / gRPC metadata). If it's absent we must not fall back to
-    the client-supplied Host header — a forged Host would redirect the signed
-    URI. Fail closed with 500 instead.
+    ``@target-uri`` must come from the trusted target_host, not the
+    client-supplied Host header (a forged Host would redirect the signed URI).
     """
     signing_key = SigningKey(
         kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
@@ -845,9 +778,8 @@ async def test_signing_pass_fails_closed_without_target_host():
 
 
 # ---------------------------------------------------------------------------
-# Signing-pass error mapping mirrors the auth pass — the same backend
-# failure must produce the same customer-visible status code regardless of
-# whether the request requires signing.
+# Signing-pass error mapping mirrors the auth pass: the same backend failure
+# produces the same status code regardless of whether signing is required.
 # ---------------------------------------------------------------------------
 
 
@@ -873,10 +805,9 @@ async def test_signing_pass_credentials_error_is_rejected_with_401():
 
 @pytest.mark.asyncio
 async def test_signing_pass_authentication_error_is_rejected_with_403():
-    """Host-validation mismatch on the signing pass returns 403, not 401.
+    """Host-validation mismatch on the signing pass returns 403 (authn ok,.
 
-    The auth pass already established the tenant; a 403 here surfaces the
-    distinct "authn ok, authz failed" failure to the customer.
+    authz failed), not 401.
     """
     auth = FakeAuthService(raises=AuthenticationError("identity mismatch"))
     servicer, _auth, _sign = _make_servicer(auth=auth)
@@ -900,10 +831,7 @@ async def test_signing_pass_fetch_secret_error_uses_its_http_status_code():
 
 @pytest.mark.asyncio
 async def test_signing_pass_auth_timeout_is_rejected_with_504(monkeypatch):
-    """A stalled auth backend in the signing pass surfaces as 504.
-
-    Matches the auth pass, instead of falling through to a generic 500.
-    """
+    """A stalled auth backend in the signing pass surfaces as 504, not 500."""
     monkeypatch.setattr("portunus.grpc.auth_servicer._AUTH_TIMEOUT_S", 0.01)
 
     class _SleepingAuth:
@@ -934,13 +862,9 @@ async def test_signing_pass_unexpected_exception_returns_500_without_leaking_mes
 
 @pytest.mark.asyncio
 async def test_signing_pass_sheds_with_503_when_signing_capacity_exhausted():
-    """``SigningOverloadedError`` from the bounded signer is shed with a 503.
+    """``SigningOverloadedError`` from the bounded signer is shed with a 503,.
 
-    The signing call site routes through ``sign_request_async`` (dedicated
-    KMS executor + concurrency semaphore); when the cap stays
-    saturated past the acquire timeout the request must be denied promptly
-    (each waiter pins its buffered body, up to 32 MiB) — fail closed with
-    503, not queued and not a generic 500.
+    not queued and not a generic 500 (each waiter pins its buffered body).
     """
     from portunus.services.signing_service import SigningOverloadedError
 
@@ -973,15 +897,11 @@ async def test_signing_pass_sheds_with_503_when_signing_capacity_exhausted():
 # ---------------------------------------------------------------------------
 # Signing pass rides the Redis cache — no double STS/Secrets round-trip.
 #
-# The signing pass deliberately carries NO AWS credentials in
-# dynamic_metadata (that would leak them to every downstream filter), so
-# it re-derives the upstream key + signing_key by re-running
-# ``AuthService.authenticate`` — which is a Redis cache HIT in prod
-# because the auth pass populated it. These tests use a REAL AuthService
-# + CacheService (in-memory Redis) and count STS / Secrets Manager calls,
-# so a regression that breaks the cache hit (an extra STS+Secrets on
-# every signed request — 2× latency/cost, risking the 4s _AUTH_TIMEOUT_S)
-# fails loudly instead of silently doubling AWS traffic.
+# The signing pass carries no AWS credentials in dynamic_metadata, so it
+# re-derives keys by re-running ``AuthService.authenticate`` (a cache HIT
+# in prod). These tests use a REAL AuthService + CacheService (in-memory
+# Redis) and count STS / Secrets calls, so a broken cache hit (2× AWS
+# traffic per signed request) fails loudly.
 # ---------------------------------------------------------------------------
 
 
@@ -1058,10 +978,9 @@ _SIGNING_SECRET = json.dumps(
 
 
 def _signing_payload() -> str:
-    """A bearer payload whose credentials carry a far-future expiration.
+    """A bearer payload with a far-future expiration, giving the cache write a.
 
-    The expiration gives the cache write a positive TTL so the entry is
-    actually stored (CacheService skips caching when TTL <= 0).
+    positive TTL so the entry is stored (CacheService skips TTL <= 0).
     """
     return base64.b64encode(
         json.dumps(
@@ -1113,12 +1032,10 @@ def _auth_ctx_with_host(target_host: str) -> _FakeContext:
 
 @pytest.mark.asyncio
 async def test_signing_pass_cache_hit_issues_sts_and_secrets_once_not_twice():
-    """Auth pass then signing pass hit AWS exactly once between them.
+    """With the SAME trusted ``target_host`` on both passes (as Envoy sends),.
 
-    With the SAME trusted ``target_host`` on both passes (what Envoy
-    sends — identical ``x-portunus-target-host`` initial_metadata on
-    ext_authz #1 and #2), the signing pass is a Redis cache hit and does
-    NOT re-run STS / Secrets Manager.
+    the signing pass is a cache hit: STS/Secrets are each hit exactly once
+    across both passes, not twice.
     """
     servicer, counters = _real_servicer_with_counting_aws()
     payload = _signing_payload()
@@ -1132,8 +1049,7 @@ async def test_signing_pass_cache_hit_issues_sts_and_secrets_once_not_twice():
     assert auth_resp.HasField("ok_response"), auth_resp
     assert counters == {"sts": 1, "secrets": 1}
 
-    # Pass 2 — signing. Re-authenticates off the SAME (payload, host) key
-    # → cache hit → no further AWS round-trip.
+    # Pass 2 — signing. Same (payload, host) key → cache hit → no AWS call.
     sign_resp = await servicer.Check(
         _check_request(payload_header=payload, target_host=None, body=b'{"m":1}'),
         _signing_ctx(target_host=host),
@@ -1142,8 +1058,7 @@ async def test_signing_pass_cache_hit_issues_sts_and_secrets_once_not_twice():
     sign_headers = {h.header.key: h.header.value for h in sign_resp.ok_response.headers}
     assert sign_headers.get("Signature", "").startswith("sig1=:")
 
-    # The crux: STS and Secrets Manager were each touched exactly ONCE
-    # across both passes — the signing pass rode the cache.
+    # The crux: STS and Secrets each touched exactly once across both passes.
     assert counters == {
         "sts": 1,
         "secrets": 1,
@@ -1152,14 +1067,10 @@ async def test_signing_pass_cache_hit_issues_sts_and_secrets_once_not_twice():
 
 @pytest.mark.asyncio
 async def test_divergent_target_host_between_passes_forces_double_sts():
-    """A target_host mismatch across passes defeats the cache → double AWS.
+    """A target_host mismatch across passes defeats the host-scoped cache key.
 
-    Documents WHY both Envoy ext_authz filters MUST inject the same
-    ``x-portunus-target-host``: ``generate_cache_key`` is host-scoped, so
-    if the signing pass saw a different host it would miss the cache and
-    re-run STS + Secrets on every signed request. This is the failure the
-    cache-hit test guards against — pinned here so a config that lets the
-    two passes diverge can't regress silently.
+    → cache miss → double STS + Secrets. Documents why both ext_authz filters
+    MUST inject the same ``x-portunus-target-host``.
     """
     servicer, counters = _real_servicer_with_counting_aws()
     payload = _signing_payload()

@@ -1,7 +1,6 @@
-# Loopback-only admin listener. entrypoint.sh drives the SIGTERM drain
-# sequence through it (/healthcheck/fail, /drain_listeners, /stats,
-# /quitquitquit). Keep it bound to 127.0.0.1 — /config_dump exposes
-# substituted secrets, so it must never be reachable off-task.
+# Loopback-only admin listener; entrypoint.sh drives the SIGTERM drain
+# through it. Must stay bound to 127.0.0.1 — /config_dump exposes
+# substituted secrets.
 admin:
   address:
     socket_address:
@@ -15,8 +14,8 @@ static_resources:
       socket_address:
         address: 0.0.0.0
         port_value: ${LISTEN_PORT}
-    # 50 MiB: some upstream LLM APIs accept large request bodies
-    # (e.g. long-document embeddings).
+    # 50 MiB — some upstream LLM APIs accept large request bodies
+    # (long-document embeddings).
     per_connection_buffer_limit_bytes: 52428800  # 50 MiB
     filter_chains:
     - filters:
@@ -69,36 +68,31 @@ static_resources:
           codec_type: AUTO
           # SSE / slow LLM tokens / WS sessions need a long idle timeout.
           stream_idle_timeout: 3600s
-          # Default is 1s, which adds a full second of latency to every
-          # WS close (those terminate via close frame at the app layer).
+          # Default 1s adds a full second of latency to every WS close.
           delayed_close_timeout: 0.1s
           upgrade_configs:
           - upgrade_type: websocket
           route_config:
             name: local_route
-            # Defence in depth: strip internal x-portunus-* inbound;
-            # the authoritative target_host comes via gRPC initial_metadata
-            # below. Client-forgery of x-portunus-signing-required would
-            # spuriously trigger the signing pass.
+            # Strip internal x-portunus-* inbound so clients can't forge them
+            # (authoritative values arrive via gRPC initial_metadata below);
+            # forging x-portunus-signing-required would trigger the signing pass.
             request_headers_to_remove:
               - x-portunus-debug-id
               - x-portunus-proxy-key
               - x-portunus-target-host
               - x-portunus-signing-required
-              # content-digest / signature / signature-input forgery
-              # protection lives in ext_authz #1's headers_to_remove,
-              # NOT here. Route-level remove applies after ext_authz
-              # mutations, so listing them here would strip the
-              # legitimate values ext_authz #2 adds on the signing pass.
+              # content-digest/signature/signature-input are stripped in
+              # ext_authz #1's headers_to_remove, NOT here: route-level remove
+              # runs after ext_authz, so it would strip the legitimate values
+              # ext_authz #2 adds on the signing pass.
             virtual_hosts:
             - name: local_service
               domains: ["*"]
               routes:
-              # Envoy-liveness smoke endpoint — no auth, no upstream call.
-              # Answers 200 as long as the Envoy process lives; it says
-              # nothing about Portunus. The ALB health check target is
-              # /healthz (health_check filter below), which is gated on
-              # Portunus's actual gRPC health.
+              # Envoy-liveness smoke endpoint — no auth, no upstream. 200 while
+              # the Envoy process lives; says nothing about Portunus (that is
+              # /healthz, gated on Portunus's gRPC health).
               - match:
                   path: "/ping"
                 direct_response:
@@ -116,11 +110,8 @@ static_resources:
                   envoy.filters.http.ext_proc:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
                     disabled: true
-              # WS route. ``observability_mode: true`` on the ext_proc
-              # filter only supports body modes NONE or STREAMED — FDS is
-              # silently rejected at runtime with "Wrong body mode for
-              # observability mode, no data is sent." Trailer mode SEND
-              # is kept (no-op for WS, which has no HTTP trailers).
+              # WS route. Body modes must be STREAMED under the ext_proc
+              # filter's observability_mode (see the ext_proc filter below).
               - match:
                   prefix: "/"
                   headers:
@@ -152,25 +143,20 @@ static_resources:
                         request_trailer_mode: SEND
                         response_trailer_mode: SEND
                 route:
-                  # Static name (not ${WS_TARGET_HOST}) so the WS and
-                  # HTTP clusters don't collide when WS_TARGET_HOST
-                  # defaults to TARGET_HOST in prod.
+                  # Static name (not ${WS_TARGET_HOST}) so the WS and HTTP
+                  # clusters don't collide when WS_TARGET_HOST defaults to
+                  # TARGET_HOST in prod.
                   cluster: ws_upstream
                   timeout: 0s
-                  # Bounded WS connection lifetime so scale-out actually
-                  # rebalances. With ``timeout: 0s`` there is no upstream
-                  # response timeout (correct — WS is long-lived), but
-                  # without a cap a connection opened pre-scale-out stays
-                  # pinned to its original task forever. 55min lets a 60min
-                  # OpenAI Realtime session complete naturally while still
-                  # cycling pathologically long sessions. Per-route so HTTP
-                  # / SSE traffic is unaffected. SDK reconnect handles the
-                  # close (TCP FIN → 1006; cleaner 1001 needs a WASM
-                  # filter, tracked as follow-up).
+                  # timeout:0s means no upstream response timeout (correct for
+                  # long-lived WS), but a connection would then stay pinned to
+                  # its task forever and defeat scale-out rebalancing. Cap at
+                  # 55min: lets a 60min OpenAI Realtime session finish while
+                  # still cycling pathologically long ones.
                   max_stream_duration:
                     max_stream_duration: 3300s
-                  # Without host rewrite, Cloudflare etc. reject on
-                  # host/SNI mismatch.
+                  # Without host rewrite, Cloudflare etc. reject on host/SNI
+                  # mismatch.
                   host_rewrite_literal: "${WS_TARGET_HOST}"
                   upgrade_configs:
                   - upgrade_type: websocket
@@ -184,26 +170,13 @@ static_resources:
                     retry_on: reset
                     num_retries: 3
           http_filters:
-          # /healthz — the ALB health-check target. Unlike /ping (a
-          # direct_response that stays 200 as long as the Envoy process
-          # lives), this is answered by the health_check filter gated on
-          # the ACTIVE gRPC health check of ``portunus_health_cluster``
-          # below: it returns 503 when Portunus is dead, unreachable, or
-          # reporting NOT_SERVING on the **"readiness"** service of
-          # ``grpc.health.v1.Health`` — which Portunus derives from its
-          # dependency health (Redis, debounced) — and when the drain
-          # manager has been failed via the admin ``/healthcheck/fail``
-          # (i.e. during the SIGTERM drain). Point the ALB target-group
-          # health check at /healthz so a task whose Portunus is dead or
-          # denying everything is pulled from rotation in seconds instead
-          # of serving 403s until the ~105s ECS container probe recycles
-          # it. READINESS ONLY: the ECS container liveness probe
-          # (grpc_health_probe) stays on the overall "" service, which is
-          # Redis-INDEPENDENT — so a correlated Redis outage pulls every
-          # task from ALB rotation but never recycles the fleet (and akp
-          # #177's "Envoy dependsOn Portunus HEALTHY" start ordering can't
-          # deadlock on Redis). First in the chain so probes are never
-          # rate-limited or authed.
+          # /healthz — the ALB health-check target, answered by this
+          # health_check filter gated on the ACTIVE gRPC health check of
+          # portunus_health_cluster (readiness service; see that cluster for
+          # the readiness-vs-liveness split). Returns 503 when Portunus is
+          # dead/unreachable/NOT_SERVING or draining, so ALB pulls a bad task
+          # in seconds rather than serving 403s until ECS recycles it. First
+          # in the chain so probes are never rate-limited or authed.
           - name: envoy.filters.http.health_check
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
@@ -254,14 +227,14 @@ static_resources:
                 # Channel-identity gate.
                 - key: x-portunus-proxy-key
                   value: "${PORTUNUS_API_KEY}"
-                # Authoritative target_host; the matching HTTP header
-                # is stripped at route_config so clients cannot forge.
+                # Authoritative target_host; the matching HTTP header is
+                # stripped at route_config so clients cannot forge.
                 - key: x-portunus-target-host
                   value: "${TARGET_HOST}"
               failure_mode_allow: false
           # composite — invokes ext_authz #2 (signing pass) only when
-          # ext_authz #1 set ``x-portunus-signing-required: true``.
-          # Unsigned tenants stream end-to-end without body buffering.
+          # ext_authz #1 set x-portunus-signing-required: true. Unsigned
+          # tenants stream end-to-end without body buffering.
           - name: envoy.filters.http.composite
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
@@ -303,15 +276,12 @@ static_resources:
                                   - key: x-portunus-pass
                                     value: signing
                                 failure_mode_allow: false
-                                # Buffer the body so the signing pass can
-                                # compute Content-Digest over the full
-                                # payload. 32 MiB matches Anthropic's
-                                # documented request-body ceiling.
-                                # ``allow_partial_message: false`` so
-                                # Envoy returns 413 instead of silently
-                                # truncating — signing a truncated body
-                                # would produce a valid signature over
-                                # the wrong bytes.
+                                # Buffer the body so the signing pass computes
+                                # Content-Digest over the full payload. 32 MiB =
+                                # Anthropic's documented request-body ceiling.
+                                # allow_partial_message: false → Envoy returns
+                                # 413 rather than truncating; signing a truncated
+                                # body yields a valid signature over wrong bytes.
                                 with_request_body:
                                   max_request_bytes: 33554432
                                   allow_partial_message: false
@@ -324,27 +294,19 @@ static_resources:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
               grpc_service:
                 envoy_grpc:
-                  # Dedicated cluster (NOT portunus_grpc_cluster): ext_proc
-                  # streams are long-lived (WS streams live up to the 3300s
-                  # max_stream_duration) and, under a wedged audit sink,
-                  # blocked submits keep them open until Envoy cancels the
-                  # stream — on a shared cluster that pressure consumes the
-                  # circuit-breaker request budget that the DECISION-MAKING
-                  # ext_authz Checks (failure_mode_allow: false) need, and a
-                  # saturated audit path turns into customer 503s. Same
-                  # loopback endpoint, separate budget: audit overload can
-                  # only trip its own (fail-open) breaker.
+                  # Dedicated cluster (NOT portunus_grpc_cluster) so audit-stream
+                  # pressure gets its own circuit-breaker budget — see
+                  # portunus_extproc_cluster below.
                   cluster_name: portunus_extproc_cluster
                 timeout: 30s
                 initial_metadata:
                 - key: x-portunus-proxy-key
                   value: "${PORTUNUS_API_KEY}"
               failure_mode_allow: true
-              # Fire-and-forget: Envoy ignores ProcessingResponses, so
-              # the per-message ACK / body-echo round-trips disappear.
+              # Fire-and-forget: Envoy ignores ProcessingResponses.
               observability_mode: true
-              # Forward ext_authz #1's dynamic_metadata so the Process
-              # service can publish the audit record off the auth path.
+              # Forward ext_authz #1's dynamic_metadata so the Process service
+              # can publish the audit record off the auth path.
               metadata_options:
                 forwarding_namespaces:
                   untyped:
@@ -352,10 +314,10 @@ static_resources:
               processing_mode:
                 request_header_mode: SEND
                 response_header_mode: SEND
-                # observability_mode only supports body modes NONE and
-                # STREAMED. FDS is silently rejected at runtime with
-                # "Wrong body mode for observability mode, no data is
-                # sent." and no body bytes reach the ext_proc service.
+                # observability_mode only supports body modes NONE and STREAMED.
+                # FDS is silently rejected at runtime ("Wrong body mode for
+                # observability mode, no data is sent.") and no body bytes reach
+                # the ext_proc service.
                 request_body_mode: STREAMED
                 response_body_mode: STREAMED
                 request_trailer_mode: SEND
@@ -369,10 +331,8 @@ static_resources:
     connect_timeout: 5s
     type: LOGICAL_DNS
     dns_lookup_family: V4_ONLY
-    # LOGICAL_DNS resolves to a single IP per connection, so lb_policy is
-    # mostly decorative here — but if the cluster ever moves to STRICT_DNS
-    # (multivalue A records, multiple endpoints), LEAST_REQUEST is what
-    # we want. Cheap to keep aligned with intent.
+    # LOGICAL_DNS resolves to one IP per connection, so lb_policy is mostly
+    # decorative; LEAST_REQUEST is kept for a possible future move to STRICT_DNS.
     lb_policy: LEAST_REQUEST
     common_http_protocol_options:
       idle_timeout: 60s
@@ -431,18 +391,12 @@ static_resources:
                 address: ${WS_TARGET_HOST}
                 port_value: ${WS_TARGET_PORT}
     transport_socket: ${WS_TARGET_HOST_TRANSPORT_SOCKET}
-  # Portunus gRPC cluster — ext_authz ONLY (both the header pass and the
-  # composite signing pass). ext_proc uses portunus_extproc_cluster below
-  # so audit-stream pressure can never consume this cluster's request
-  # budget: ext_authz is failure_mode_allow: false, so exhausting its
-  # breaker denies customers.
-  # STRICT_DNS so the same image works for both
-  # the sidecar topology (PORTUNUS_HOST=127.0.0.1 — one endpoint, no
-  # DNS to refresh) and any future DNS-based deployment, without
-  # rebuilding. The SC-era tuning (dns_refresh_rate, LEAST_REQUEST,
-  # max_concurrent_streams) was for spreading across multiple Portunus
-  # tasks behind a multivalue A-record; defaults are fine for a single
-  # endpoint and remain reasonable for a future multi-task setup.
+  # Portunus gRPC cluster — ext_authz ONLY (header pass + composite signing
+  # pass). ext_proc uses portunus_extproc_cluster so audit-stream pressure
+  # can't consume this budget; ext_authz is failure_mode_allow: false, so
+  # exhausting its breaker denies customers. STRICT_DNS so one image serves
+  # both the sidecar topology (PORTUNUS_HOST=127.0.0.1) and a future
+  # DNS-based deployment without rebuilding.
   - name: portunus_grpc_cluster
     connect_timeout: 5s
     type: STRICT_DNS
@@ -477,14 +431,11 @@ static_resources:
                 address: ${PORTUNUS_HOST}
                 port_value: ${PORTUNUS_GRPC_PORT}
   # ext_proc (audit/observability) cluster. Same Portunus endpoint as
-  # portunus_grpc_cluster but a SEPARATE cluster so the fail-open audit
-  # path has its own circuit-breaker budget, isolated from the fail-closed
-  # ext_authz path. Under a wedged Firehose sink, blocked publish submits
-  # hold ext_proc streams open (HTTP streams until Envoy's ~5s deferred
-  # close after the request ends; WS streams up to the 3300s
-  # max_stream_duration) — that accumulation now saturates THIS cluster's
-  # breaker (dropping audit, which failure_mode_allow: true tolerates)
-  # instead of starving ext_authz Checks into customer 503s.
+  # portunus_grpc_cluster but SEPARATE so the fail-open audit path has its own
+  # circuit-breaker budget. Under a wedged Firehose sink, blocked publish
+  # submits hold ext_proc streams open (WS up to the 3300s max_stream_duration);
+  # that accumulation saturates THIS breaker (dropping audit, tolerated by
+  # failure_mode_allow: true) instead of starving ext_authz into customer 503s.
   - name: portunus_extproc_cluster
     connect_timeout: 5s
     type: STRICT_DNS
@@ -500,10 +451,8 @@ static_resources:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
         explicit_http_config:
           http2_protocol_options: {}
-    # One ext_proc stream per proxied request/WS session: 2048 active
-    # streams comfortably covers the per-task request concurrency this
-    # sizing has always assumed. Overflowing it degrades AUDIT ONLY
-    # (ext_proc is fail-open) — never customer auth.
+    # One ext_proc stream per proxied request/WS session; 2048 covers per-task
+    # concurrency. Overflow degrades AUDIT ONLY (fail-open), never customer auth.
     circuit_breakers:
       thresholds:
         - priority: DEFAULT
@@ -520,13 +469,11 @@ static_resources:
               socket_address:
                 address: ${PORTUNUS_HOST}
                 port_value: ${PORTUNUS_GRPC_PORT}
-  # Health-observation cluster: same Portunus endpoint again, used ONLY by
-  # the /healthz health_check HTTP filter (cluster_min_healthy_percentages)
-  # — no request traffic is ever routed to it. It exists so the ACTIVE
-  # gRPC health check below can't perturb the data-path clusters: marking
-  # a shared single-endpoint cluster unhealthy would interact with
-  # ext_authz routing (panic-threshold semantics), whereas this cluster
-  # going unhealthy only flips /healthz to 503 for the ALB.
+  # Health-observation cluster: same Portunus endpoint, used ONLY by the
+  # /healthz health_check filter — no request traffic is routed to it. Kept
+  # separate so its ACTIVE gRPC check can't perturb data-path clusters
+  # (marking a shared cluster unhealthy would hit ext_authz panic-threshold
+  # routing); here, unhealthy only flips /healthz to 503 for the ALB.
   - name: portunus_health_cluster
     connect_timeout: 2s
     type: STRICT_DNS
@@ -535,25 +482,18 @@ static_resources:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
         explicit_http_config:
           http2_protocol_options: {}
-    # Active check of the standard grpc.health.v1.Health service, named
-    # "readiness" service — NOT the overall "" that the ECS
-    # grpc_health_probe targets. The split is deliberate (liveness vs
-    # readiness):
-    #   ""          = LIVENESS. SERVING once the listener binds; flips
-    #                 NOT_SERVING only at drain start. Redis-independent.
-    #                 Probed by ECS (grpc_health_probe default service) —
-    #                 a Redis outage must never recycle the task, and akp
-    #                 #177's container-dependency start must not need
-    #                 Redis.
-    #   "readiness" = SERVING iff Portunus's dependency self-check (Redis
-    #                 PING, with a consecutive-failure debounce) passes,
-    #                 and NOT_SERVING while draining. Probed HERE, so a
-    #                 SERVING-but-denying task leaves ALB rotation within
-    #                 seconds and re-enters on the first successful probe.
-    # The string must match the service name Portunus registers on its
-    # health servicer byte-for-byte (see grpc/server.py).
-    # no_traffic_interval matters: no data traffic ever hits this cluster,
-    # so without it Envoy would fall back to the 60s no-traffic cadence.
+    # Active check of grpc.health.v1.Health's "readiness" service — NOT the
+    # overall "" that ECS grpc_health_probe targets. Liveness vs readiness:
+    #   ""          = LIVENESS: SERVING once the listener binds, NOT_SERVING
+    #                 only at drain start. Redis-independent, so a Redis
+    #                 outage never recycles the task.
+    #   "readiness" = SERVING iff the dependency self-check (Redis PING, with
+    #                 consecutive-failure debounce) passes; NOT_SERVING while
+    #                 draining. Probed HERE, so a SERVING-but-denying task
+    #                 leaves ALB rotation in seconds.
+    # service_name must byte-for-byte match what Portunus registers (grpc/server.py).
+    # no_traffic_interval is required: no data traffic hits this cluster, else
+    # Envoy falls back to the 60s no-traffic cadence.
     health_checks:
     - timeout: 2s
       interval: 5s

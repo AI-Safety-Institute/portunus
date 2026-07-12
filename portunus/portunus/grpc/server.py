@@ -1,13 +1,12 @@
 """gRPC server lifecycle and process entrypoint for Portunus.
 
-The gRPC server is the Portunus process: it serves the Envoy ext_authz /
-ext_proc filters and the standard ``grpc.health.v1.Health`` +
-server-reflection services. There is no HTTP / FastAPI surface — :func:`run`
-owns the asyncio loop and SIGTERM-driven drain (the Dockerfile ``CMD`` is
+The gRPC server is the whole Portunus process (no HTTP / FastAPI surface): it
+serves the Envoy ext_authz / ext_proc filters plus the standard
+``grpc.health.v1.Health`` and server-reflection services. :func:`run` owns the
+asyncio loop and SIGTERM-driven drain (Dockerfile ``CMD`` is
 ``python -m portunus.grpc.server``).
 
-Gated on :attr:`GrpcConfig.enabled` (default off; tests construct the runtime
-directly).
+Gated on :attr:`GrpcConfig.enabled` (default off).
 """
 
 from __future__ import annotations
@@ -35,28 +34,24 @@ from portunus.services.signing_service import reset_signing_runtime, sign_reques
 
 logger = logging.getLogger("api.grpc")
 
-# Envoy may buffer a 32 MiB signed request body; the full CheckRequest also
-# carries headers and protobuf framing, so the gRPC receive limit needs headroom.
+# Envoy may buffer a 32 MiB signed body; the CheckRequest adds headers and
+# protobuf framing, so the gRPC receive limit needs headroom.
 _MAX_GRPC_MSG_BYTES = 64 * 1024 * 1024
 
-# Minimum length for a configured proxy key. The boot guard already refuses
-# an *empty* key; a 1-char placeholder ("x", a stray space) passes that check
-# while giving no real channel-identity protection — refuse it too.
+# Minimum proxy-key length. The empty-key guard passes a 1-char placeholder
+# that gives no real channel-identity protection — refuse it too.
 _MIN_PROXY_KEY_BYTES = 16
 
 # gRPC health-service names — the liveness/readiness split.
 #
-# ``""`` (the overall/default service) is LIVENESS: SERVING as soon as the
-# listener binds, NOT_SERVING only at drain start. The ECS container probe
-# (``grpc_health_probe``, default service "") reads it, so a Redis outage
-# never recycles a task — and the ECS container-dependency start (Envoy
-# dependsOn Portunus HEALTHY) is Redis-independent.
+# ``""`` (default service) is LIVENESS: SERVING once the listener binds,
+# NOT_SERVING only at drain start. The ECS container probe (``grpc_health_probe``,
+# default service "") reads it, so a Redis outage never recycles a task.
 #
-# ``"readiness"`` is READINESS: driven by the dependency (Redis) monitor
-# with a consecutive-failure debounce. The ALB /healthz (Envoy active gRPC
-# health check with service_name="readiness") reads it, so a Redis-down
-# task leaves rotation without being killed. Keep this string in sync with
-# proxy/envoy.yaml's grpc_health_check.service_name.
+# ``"readiness"`` is driven by the Redis monitor (consecutive-failure debounce)
+# and read by the ALB /healthz (Envoy gRPC health check, service_name
+# "readiness"), so a Redis-down task leaves rotation without being killed. Keep
+# this string in sync with proxy/envoy.yaml's grpc_health_check.service_name.
 LIVENESS_SERVICE_NAME = ""
 READINESS_SERVICE_NAME = "readiness"
 
@@ -76,8 +71,8 @@ class GrpcRuntime:
     publish_queue: BoundedPublishQueue
     publish_service: PublishService
     health_servicer: health.aio.HealthServicer
-    # Background task pinging Redis and flipping the gRPC health status —
-    # None when the monitor is disabled or no state service is available.
+    # Background Redis-ping task driving the readiness health status — None when
+    # the monitor is disabled or no state service is available.
     health_monitor: Optional[asyncio.Task] = field(default=None)
 
 
@@ -91,20 +86,18 @@ async def _dependency_health_loop(
 ) -> None:
     """Drive the ``readiness`` gRPC health service from Redis health.
 
-    A Portunus whose event loop is alive but whose Redis is unreachable
-    times out every ext_authz ``Check`` → fail-closed deny. The monitor
-    pings Redis and drives the **readiness** service so the ALB /healthz
-    pulls the task from rotation — while LIVENESS (``""``) is deliberately
-    left alone: on a *correlated* Redis outage, flipping ``""`` would make
-    ECS recycle the entire fleet at once and (with Envoy dependsOn
+    A Portunus whose loop is alive but whose Redis is unreachable times out
+    every ext_authz ``Check`` (fail-closed deny). The monitor drives only
+    **readiness** so the ALB pulls the task from rotation; LIVENESS (``""``) is
+    left alone because on a *correlated* Redis outage flipping ``""`` would make
+    ECS recycle the whole fleet at once and (with Envoy dependsOn
     Portunus-HEALTHY) deadlock replacements behind the same dead Redis.
-    Redis-down must mean "out of rotation", never "kill the task".
+    Redis-down means "out of rotation", never "kill the task".
 
     Debounce: readiness flips NOT_SERVING only after ``failure_threshold``
-    CONSECUTIVE probe failures (a single slow ping must not pull the task),
-    and flips back SERVING on the FIRST success. The first probe runs
-    immediately (readiness starts NOT_SERVING until proven), so a healthy
-    boot is ready within one probe round-trip.
+    CONSECUTIVE failures, and back SERVING on the FIRST success. The first probe
+    runs immediately (readiness starts NOT_SERVING), so a healthy boot is ready
+    within one round-trip.
 
     ``stop_grpc_server`` cancels this task *before* flipping the drain's
     NOT_SERVING, so the monitor can never resurrect a draining task.
@@ -161,22 +154,20 @@ async def start_grpc_server(
 ) -> Optional[GrpcRuntime]:
     """Start the Portunus gRPC server.
 
-    Registers ext_authz, ext_proc, the standard health service, and server
-    reflection. Returns None when ``config.enabled`` is False.
+    Registers ext_authz, ext_proc, the health service, and reflection. Returns
+    None when ``config.enabled`` is False.
 
-    Refuses to start (raises ``RuntimeError``) when the channel-identity key
-    or the Firehose audit sink is misconfigured, so a task that would either
-    accept unauthenticated callers or silently drop 100% of audit records
-    never comes up serving.
+    Raises ``RuntimeError`` when the channel-identity key or the Firehose audit
+    sink is misconfigured, so a task that would accept unauthenticated callers
+    or silently drop all audit records never comes up serving.
     """
     if not config.enabled:
         logger.info("gRPC server disabled (config.grpc.enabled=false); skipping start")
         return None
 
-    # Fail closed if the channel-identity gate is silently off in what
-    # looks like a production config. ``proxy_api_key`` empty makes
-    # ``is_valid_proxy_key`` accept every caller; require explicit
-    # GRPC_PROXY_API_KEY_OPTIONAL=true to opt in.
+    # Fail closed if the channel-identity gate is silently off: an empty
+    # ``proxy_api_key`` makes ``is_valid_proxy_key`` accept every caller.
+    # Require explicit GRPC_PROXY_API_KEY_OPTIONAL=true to opt in.
     if not config.proxy_api_key and not config.proxy_api_key_optional:
         raise RuntimeError(
             "GRPC_PROXY_API_KEY is empty and GRPC_PROXY_API_KEY_OPTIONAL "
@@ -189,10 +180,9 @@ async def start_grpc_server(
             "only)."
         )
 
-    # A configured-but-trivial key (1-char placeholder, stray whitespace)
-    # passes the empty-key guard while providing no real gate. Require a
-    # minimum length so a fat-fingered deployment fails at boot, not in a
-    # security review.
+    # A trivial key (1-char placeholder, stray whitespace) passes the empty-key
+    # guard but is no real gate. Require a minimum length so a fat-fingered
+    # deployment fails at boot, not in a security review.
     if (
         config.proxy_api_key
         and len(config.proxy_api_key.encode("utf-8")) < _MIN_PROXY_KEY_BYTES
@@ -204,13 +194,10 @@ async def start_grpc_server(
             "gives a false sense of a channel-identity gate."
         )
 
-    # Fail fast if the Firehose audit sink is misconfigured. Every audit
-    # record type is published unconditionally, but each ``build_*`` short-
-    # circuits to ``None`` (warning only) when its stream is unset, so a task
-    # with ``FIREHOSE_*`` unset would serve traffic while silently dropping
-    # 100% of audit records — no error to the caller, no alarm. Refuse to come
-    # up serving instead. There is no opt-out; a task that genuinely needs no
-    # audit sink should not be in rotation.
+    # Fail fast if the Firehose audit sink is misconfigured: each ``build_*``
+    # short-circuits to ``None`` (warning only) when its stream is unset, so a
+    # task with ``FIREHOSE_*`` unset would serve while silently dropping all
+    # audit records. Refuse to serve instead — there is no opt-out.
     missing_streams = firehose.missing_required_streams()
     if missing_streams:
         raise RuntimeError(
@@ -242,16 +229,13 @@ async def start_grpc_server(
     publish_queue = BoundedPublishQueue(
         maxsize=config.publish_queue_maxsize,
         body_capacity=config.publish_queue_body_capacity,
-        # Byte budget alongside the record-count cap: each queued body task
-        # retains its raw chunk by closure, so 10k records × ~750 KB chunks
-        # is ~6.4 GiB retained — far past the container memory cap. The byte
-        # bound keeps worst-case retention inside the memory budget whatever
-        # the record count.
+        # Byte budget alongside the record-count cap: each body task retains its
+        # raw chunk by closure, so the record count alone (10k × ~750 KB ≈
+        # 6.4 GiB) would blow past the container memory cap.
         max_bytes=config.publish_queue_max_bytes,
         num_workers=max(4, config.max_concurrent_streams // 64),
-        # Workers drain themselves in stream-grouped batches via Firehose
-        # PutRecordBatch — opportunistic batching keeps records/s well under
-        # the per-stream quota without an unbounded buffer.
+        # Workers drain in stream-grouped Firehose PutRecordBatch calls, keeping
+        # records/s under the per-stream quota without an unbounded buffer.
         batch_sender=publish_service.put_record_batch,
     )
     await publish_queue.start()
@@ -266,9 +250,8 @@ async def start_grpc_server(
     health_servicer = health.aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
-    # Server reflection (the standard health service plus the reflection
-    # service itself) so operators can introspect the server without
-    # shipping a local .proto copy.
+    # Server reflection so operators can introspect the server without a local
+    # .proto copy.
     reflection.enable_server_reflection(
         (
             health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
@@ -281,20 +264,19 @@ async def start_grpc_server(
     server.add_insecure_port(listen_addr)
     await server.start()
 
-    # Mark liveness SERVING only after the listener is up, so a probe can't
-    # see SERVING before the port accepts connections. Liveness stays
-    # SERVING until drain start — the Redis monitor never touches it, so a
-    # dependency outage can never make ECS recycle the task.
+    # Mark liveness SERVING only after the listener is up, so a probe can't see
+    # SERVING before the port accepts connections. It stays SERVING until drain
+    # start; the Redis monitor never touches it, so a dependency outage can
+    # never make ECS recycle the task.
     await health_servicer.set(
         LIVENESS_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING
     )
 
-    # Surface dependency (Redis) health into the READINESS service (the ALB
-    # /healthz target): a task that is alive but would fail-closed deny
-    # every Check (Redis down) leaves rotation instead of 403ing traffic
-    # invisibly — and instead of being killed. Readiness starts NOT_SERVING
-    # and the monitor's immediate first probe proves it (one round-trip on a
-    # healthy boot).
+    # Surface Redis health into the READINESS service (ALB /healthz target): a
+    # task that is alive but would fail-closed deny every Check (Redis down)
+    # leaves rotation instead of 403ing traffic invisibly — without being
+    # killed. Readiness starts NOT_SERVING; the monitor's immediate first probe
+    # proves it.
     health_monitor: Optional[asyncio.Task] = None
     dependency = getattr(publish_service, "state_service", None)
     if (
@@ -316,8 +298,8 @@ async def start_grpc_server(
             name="dependency-health-monitor",
         )
     else:
-        # No monitor to drive readiness — report SERVING unconditionally so
-        # a monitor-disabled deployment (tests, local dev) still passes the
+        # No monitor to drive readiness — report SERVING unconditionally so a
+        # monitor-disabled deployment (tests, local dev) still passes the
         # /healthz-gated probes.
         await health_servicer.set(
             READINESS_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING
@@ -353,20 +335,18 @@ async def stop_grpc_server(
 ) -> None:
     """Stop the gRPC server, drain the publish queue, close the AWS client.
 
-    grpc.aio's ``server.stop(grace=N)`` stops accepting new streams and
-    waits up to N seconds for active ones to finish naturally. Active
-    ext_proc streams end when Envoy closes them — there is no
-    application-layer signal we can send into a WS tunnel from
-    ``observability_mode: true``, so this is grace-then-cancel rather
-    than coordinated drain.
+    ``server.stop(grace=N)`` stops accepting new streams and waits up to N
+    seconds for active ones to finish. Active ext_proc streams end only when
+    Envoy closes them — under ``observability_mode: true`` there is no
+    application-layer signal we can send — so this is grace-then-cancel, not a
+    coordinated drain.
 
-    ``flush_reserve_seconds`` carves a slice of the grace out for the
-    publish-queue flush *before* the stream drain runs. With any active
-    ext_proc stream at SIGTERM (i.e. every busy stop) Envoy holds the
-    stream open for its own, longer drain, so ``server.stop`` consumes its
-    entire budget; without the reserve the queue would get a 0-second
-    flush window and cancel every buffered audit record even with a
-    perfectly healthy sink. The total remains bounded by ``grace_seconds``.
+    ``flush_reserve_seconds`` reserves a slice of the grace for the
+    publish-queue flush *before* the stream drain. With any active stream at
+    SIGTERM Envoy holds it open for its own longer drain, so ``server.stop``
+    consumes its whole budget; without the reserve the queue would get a
+    0-second flush window and cancel every buffered record even with a healthy
+    sink. The total stays bounded by ``grace_seconds``.
     """
     if runtime is None:
         return
@@ -378,17 +358,17 @@ async def stop_grpc_server(
         min(flush_reserve_seconds, grace_seconds),
     )
 
-    # Stop the dependency health monitor FIRST: it must not race the drain
-    # and flip readiness back to SERVING after we mark NOT_SERVING below.
+    # Stop the health monitor FIRST so it can't race the drain and flip
+    # readiness back to SERVING after we mark NOT_SERVING below.
     if runtime.health_monitor is not None:
         runtime.health_monitor.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runtime.health_monitor
 
-    # Flip BOTH health services to NOT_SERVING so an in-flight probe sees
-    # the drain immediately: readiness (ALB /healthz) stops routing new
-    # connections here, and liveness ("") reflects intentional shutdown —
-    # the one case where the task going away is the point.
+    # Flip BOTH health services to NOT_SERVING so an in-flight probe sees the
+    # drain immediately: readiness stops routing new connections, and liveness
+    # reflects intentional shutdown (the one case where the task going away is
+    # the point).
     await runtime.health_servicer.set(
         READINESS_SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING
     )
@@ -396,32 +376,26 @@ async def stop_grpc_server(
         LIVENESS_SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING
     )
 
-    # Share a SINGLE drain budget across both stops — giving ``server.stop``
-    # and ``publish_queue.stop`` a full grace each would let a wedged sink +
-    # an active stream consume up to 2×grace, risking a SIGKILL (137) if an
-    # operator raises grace toward the ECS ``stopTimeout``. Compute the
-    # deadline once; the server drain gets grace minus the flush reserve, and
-    # the queue gets whatever remains (>= the reserve when the stream drain
-    # used its full slice), so the total is bounded by ``grace_seconds`` and
-    # the flush is never starved to zero by Envoy-held streams.
+    # Share a SINGLE drain budget across both stops: a full grace each would let
+    # a wedged sink + active stream consume up to 2×grace, risking SIGKILL (137)
+    # if grace approaches the ECS ``stopTimeout``. The server drain gets grace
+    # minus the flush reserve, the queue gets what remains, so the total stays
+    # bounded by ``grace_seconds`` and the flush is never starved to zero.
     loop = asyncio.get_running_loop()
     reserve = min(max(0.0, flush_reserve_seconds), float(grace_seconds))
     deadline = loop.time() + grace_seconds
 
     await runtime.server.stop(grace=max(0.0, grace_seconds - reserve))
 
-    # The queue gets the remaining grace to flush to Firehose — records
-    # already accepted should not be dropped on shutdown while grace
-    # remains. ``stop`` reports how many accepted records it had to cancel
-    # (in-flight batches included) so the loss is observable.
+    # The queue gets the remaining grace to flush to Firehose — accepted
+    # records should not be dropped while grace remains. ``stop`` reports how
+    # many accepted records it had to cancel so the loss is observable.
     queue_drain_budget = max(0.0, deadline - loop.time())
     cancelled = await runtime.publish_queue.stop(drain_timeout=queue_drain_budget)
     if cancelled:
-        # ERROR, not WARNING: a clean ``exit 0`` otherwise masks audit
-        # loss entirely. The ``extra`` fields give a stable key
-        # (``event=audit_records_lost_on_drain``) for a CloudWatch metric
-        # filter / alarm — ``cancelled_total`` on the queue is the
-        # in-process counter for the same loss.
+        # ERROR, not WARNING: a clean ``exit 0`` would otherwise mask audit
+        # loss. The ``extra`` fields give a stable key
+        # (``event=audit_records_lost_on_drain``) for a CloudWatch alarm.
         logger.error(
             "AUDIT LOSS on drain: %d accepted audit records were never "
             "flushed within the %.1fs flush window of the %ds grace "
@@ -438,14 +412,12 @@ async def stop_grpc_server(
             },
         )
 
-    # Tear down the dedicated KMS signing executor inside what's left of the
-    # drain deadline. ``server.stop`` already ended all RPCs, so the executor
-    # is idle in the happy path and this returns immediately — but a hung
-    # KMS.Sign thread would make ``shutdown(wait=True)`` join forever, so it
-    # runs off-loop under the remaining budget. On timeout (or a budget
-    # already spent by the flush) fall back to a non-blocking shutdown
-    # (cancel_futures, no join) so a wedged KMS can never push process exit
-    # past the ECS stopTimeout.
+    # Tear down the KMS signing executor within the remaining drain deadline.
+    # ``server.stop`` already ended all RPCs, so the executor is normally idle
+    # and this returns at once — but a hung KMS.Sign thread would make
+    # ``shutdown(wait=True)`` join forever, so it runs off-loop under a timeout.
+    # On timeout (or an exhausted budget) fall back to a non-blocking shutdown
+    # so a wedged KMS can never push process exit past the ECS stopTimeout.
     teardown_budget = max(0.0, deadline - loop.time())
     torn_down = False
     if teardown_budget > 0:
@@ -485,16 +457,12 @@ async def stop_grpc_server(
 async def run() -> None:
     """Process entrypoint: build services, serve gRPC, drain on SIGTERM.
 
-    This is the whole Portunus process — there is no HTTP layer. Services
-    are constructed here, the gRPC server is started, and we block until
-    SIGTERM/SIGINT, then drain gracefully. ECS sends SIGTERM on task stop;
-    the task ``stopTimeout`` (120s in the akp CDK) must exceed
+    Blocks until SIGTERM/SIGINT, then drains gracefully. ECS sends SIGTERM on
+    task stop; the task ``stopTimeout`` (120s in the akp CDK) must exceed
     ``graceful_shutdown_seconds``.
     """
     # Imported here, not at module top, so importing this module for its
     # start/stop helpers (e.g. in tests) doesn't construct AWS/Redis clients.
-    # Importing portunus.logging runs configure_logging() (structured JSON
-    # to stdout).
     import portunus.logging  # noqa: F401 — import side effect: configures logging
     from portunus.config import config
     from portunus.services.auth_service import AuthService

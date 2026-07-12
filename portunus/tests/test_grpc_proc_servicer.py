@@ -1,13 +1,7 @@
 """Behaviour tests for the ext_proc gRPC Process servicer.
 
-Each test name reads as a claim about what the servicer guarantees.
 ``PublishService`` is replaced by a ``FakePublishService`` that records
-every call's arguments — assertions inspect what was published, not how
-many times a method was called.
-
-End-to-end behaviour (real Firehose, real Envoy, real WS clients) is
-covered by the docker-compose-driven tests in ``tests/test_http_proxy_behaviour.py``
-and ``tests/test_ws_proxy_behaviour.py``.
+every call's arguments so assertions inspect what was published.
 """
 
 from __future__ import annotations
@@ -38,8 +32,7 @@ from portunus.grpc.proc_servicer import (
 from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 
 # ---------------------------------------------------------------------------
-# Fake publish service — records what was published so assertions can read
-# the data flowing through, rather than counting internal method calls.
+# Fake publish service — records what was published.
 # ---------------------------------------------------------------------------
 
 
@@ -53,16 +46,11 @@ class _PublishedItem:
 
 
 class FakePublishService:
-    """Captures every build_* call. ``items`` is the ordered record of.
+    """Captures every build_* call; ``items`` is the ordered dispatch record.
 
-    everything the servicer dispatched.
-
-    The real PublishService.build_* methods synchronously return
-    ``(stream_name, data_bytes)`` and the queue worker ships them via
-    ``put_record_batch``. Here build_* records a ``_PublishedItem`` (so the
-    existing ``of_kind`` assertions keep working) and returns a tuple whose
-    stream name *is* the kind — so the queue's stream-grouping is exercised
-    too. ``put_record_batch`` is a no-op (items already captured at build).
+    build_* records a ``_PublishedItem`` and returns ``(stream_name, bytes)``
+    with stream name == kind, so the queue's per-kind stream-grouping is
+    exercised. ``put_record_batch`` is a no-op (captured already at build).
     """
 
     def __init__(self) -> None:
@@ -200,10 +188,9 @@ def _make_servicer(
 
 
 async def _drain_queue(queue: BoundedPublishQueue, *, timeout: float = 1.0) -> None:
-    """Wait for the queue to fully drain so publish-side assertions see all.
+    """Wait for the queue to fully drain so publish-side assertions see every.
 
-    items the servicer dispatched. Avoids a fixed ``sleep(0.1)`` that
-    relies on workers being faster than wall-clock.
+    dispatched item (avoids a wall-clock-dependent fixed sleep).
     """
     end = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < end:
@@ -255,10 +242,8 @@ async def test_http_request_headers_are_published_with_their_headers_intact():
 async def test_headers_are_read_from_raw_value_field_when_value_is_empty():
     """Envoy 1.20+ populates HeaderValue.raw_value (bytes) and leaves the.
 
-    deprecated ``value`` string empty. Reading only ``value`` returns
-    ``""`` and an empty x-request-id loses join-key correlation across
-    audit records. Build a HeaderMap that only sets raw_value and
-    confirm the servicer reads it correctly.
+    deprecated ``value`` empty; the servicer must read raw_value (else an
+    empty x-request-id loses join-key correlation across audit records).
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -291,12 +276,9 @@ async def test_credential_headers_are_redacted_from_published_request_headers():
     """Strip credential-carrying headers before publishing audit records.
 
     ext_proc observes headers AFTER ext_authz rewrites ``Authorization`` to
-    the real upstream provider API key. Publishing that verbatim would
-    archive customer secrets to Firehose. Also strips ``x-api-key``
-    (Anthropic-style key location),
-    ``cookie`` / ``set-cookie`` (session credentials), ``proxy-authorization``
-    (forward-proxy bearer tokens), and ``x-amz-security-token`` (STS session
-    tokens forwarded by clients that signed requests upstream of us).
+    the real upstream provider API key, so publishing verbatim would archive
+    secrets. Also strips x-api-key, cookie/set-cookie, proxy-authorization,
+    and x-amz-security-token.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -347,10 +329,9 @@ async def test_credential_headers_are_redacted_from_published_request_headers():
 
 @pytest.mark.asyncio
 async def test_credential_headers_are_redacted_from_published_response_headers():
-    """Redaction also applies to the response side.
+    """Redaction also applies to the response side: upstreams set Set-Cookie.
 
-    Upstreams set ``Set-Cookie`` (and can echo any of the request-side
-    credential headers) — we must not archive those to Firehose verbatim.
+    (and can echo request-side credential headers) which must not be archived.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -422,8 +403,7 @@ async def test_http_response_body_chunks_are_published_with_their_bytes_intact()
 
 
 # ---------------------------------------------------------------------------
-# WS-frame helper. ext_proc does not observe post-101 frames; the invariant
-# below asserts that if such bytes did arrive, they aren't frame-decoded.
+# WS-frame helper and pre-101 buffering invariants.
 # ---------------------------------------------------------------------------
 
 
@@ -434,11 +414,10 @@ def _ws_frame(payload: bytes) -> bytes:
 
 
 def test_pre_101_buffer_overflow_poisons_stream_instead_of_truncating(caplog):
-    """An over-cap pre-101 chunk poisons the stream rather than truncating.
+    """An over-cap pre-101 chunk poisons the stream rather than truncating:.
 
-    Truncating raw WS bytes mid-frame would desync the frame parser + zlib
-    state on replay, silently corrupting every later frame. Poisoning instead
-    skips observation and records the loss via the truncated counter.
+    truncating mid-frame would desync the frame parser + zlib state on replay.
+    Poisoning skips observation and records the loss via the truncated counter.
     """
     servicer, _publish, _queue = _make_servicer()
     state = _StreamState(
@@ -486,15 +465,11 @@ async def test_pre_101_poisoned_stream_skips_replay_and_observation():
 
 @pytest.mark.asyncio
 async def test_body_chunks_are_dropped_when_publish_queue_is_full(monkeypatch):
-    """With per-chunk publishing, body submits use ``put_nowait`` and.
+    """Body submits drop when queue capacity is exceeded so a slow Firehose.
 
-    drop when capacity is exceeded — exactly so a slow Firehose can't
-    backpressure customer traffic. Tiny queue + no workers + a few
-    body chunks → drop_total increments.
-
-    Under ``observability_mode: true`` body events do not yield a
-    ProcessingResponse (Envoy ignores them); only the request_headers
-    event does. Drops continue to happen on the publish queue.
+    can't backpressure customer traffic. Under observability_mode only the
+    request_headers event yields a response; drops still register on the queue.
+    Setup: tiny queue + no workers so it stays full.
     """
     # Keep the drop-sentinel blocking submits from stalling the test on the
     # deliberately saturated queue.
@@ -514,34 +489,27 @@ async def test_body_chunks_are_dropped_when_publish_queue_is_full(monkeypatch):
 
     responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-    # Headers event yields one response; body events do not under
-    # observability_mode. Drops still register against the publish queue.
     assert len(responses) == 1
     assert queue.dropped_total >= 1
 
 
 @pytest.mark.asyncio
 async def test_body_drop_emits_dropped_sentinel_record():
-    """When a body chunk is dropped under queue pressure, a sentinel.
+    """A dropped body chunk enqueues a ``dropped=True`` empty-body sentinel.
 
-    record with ``dropped=True`` and empty body is enqueued so downstream
-    ETL sees an explicit gap marker rather than a silent chunk_id
-    discontinuity. The fallback signal (chunk_id gap) still exists; this
-    is an explicit ``dropped=True`` row keyed to the lost chunk_id.
+    keyed to the lost chunk_id, so ETL sees an explicit gap marker rather than
+    only a silent chunk_id discontinuity.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
     try:
-        # Two response body chunks; force-drop the second by saturating
-        # the queue between submits. Easier to assert in isolation than
-        # in the saturation test, which intentionally has no workers.
+        # Force-drop the second of two chunks via a fake submit.
         captured: list[bool] = []
 
         original_submit = queue.submit_droppable
 
         def _fake_submit(task):
-            # First call (the real chunk) succeeds; second (sentinel) too.
-            # Middle call (the next real chunk) is forced to drop.
+            # Real chunks and sentinels pass; the middle real chunk is dropped.
             label = task.label
             if "drop_sentinel" in label:
                 return original_submit(task)
@@ -568,10 +536,7 @@ async def test_body_drop_emits_dropped_sentinel_record():
         await _drain_queue(queue)
 
         bodies = publish.of_kind("response_body")
-        # One real chunk + one drop sentinel. The dropped chunk itself
-        # does not produce a record (it's the *real* record that was
-        # rejected); the sentinel takes its place keyed to the same
-        # chunk_id.
+        # One real chunk + one drop sentinel keyed to the dropped chunk_id.
         real = [b for b in bodies if not b.payload.get("dropped")]
         sentinels = [b for b in bodies if b.payload.get("dropped")]
         assert len(real) == 1
@@ -605,8 +570,7 @@ async def test_missing_proxy_key_aborts_the_stream_before_yielding_any_response(
         code, detail = ctx.aborted_with
         assert code == grpc.StatusCode.PERMISSION_DENIED
         assert "proxy identity" in detail.lower()
-        # And — no publish should have leaked through for a stream that
-        # never proved its identity.
+        # Nothing published for a stream that never proved its identity.
         assert publish.items == []
     finally:
         await queue.stop()
@@ -638,11 +602,10 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 @pytest.mark.asyncio
 async def test_body_events_yield_no_processing_response_under_observability_mode():
-    """envoy.yaml sets ``observability_mode: true``, so Envoy ignores any.
+    """Under observability_mode Envoy ignores yielded ProcessingResponses:.
 
-    ProcessingResponse the servicer yields. Pin the contract:
-    header events yield one response, body events yield nothing —
-    no wasted protobuf allocation or gRPC send per chunk.
+    header events yield one response, body events yield nothing (no wasted
+    protobuf/gRPC send per chunk).
     """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
@@ -657,8 +620,6 @@ async def test_body_events_yield_no_processing_response_under_observability_mode
 
         responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
 
-        # request_headers yields one response. Both body events yield
-        # nothing (Envoy ignores body responses in observability_mode).
         assert len(responses) == 1
         assert responses[0].HasField("request_headers")
     finally:
@@ -667,12 +628,10 @@ async def test_body_events_yield_no_processing_response_under_observability_mode
 
 @pytest.mark.asyncio
 async def test_headers_response_uses_headers_field_not_body_field():
-    """Yielding ``request_body=BodyResponse(...)`` for a request_headers.
+    """A headers message must be answered with a HeadersResponse on the.
 
-    message generates "Spurious response message 3" in Envoy and fails
-    the filter with a 500. The response for a headers message must use
-    the matching ``request_headers`` / ``response_headers`` oneof field
-    carrying a ``HeadersResponse``.
+    matching request_headers/response_headers oneof field; a BodyResponse
+    triggers Envoy "Spurious response message 3" and fails the filter with 500.
     """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
@@ -694,21 +653,17 @@ async def test_headers_response_uses_headers_field_not_body_field():
 
 # ---------------------------------------------------------------------------
 # Body chunking — each ext_proc body message lands as one Firehose record
-# with a monotonic chunk_id and ``num_chunks=0`` (sentinel). The akp Glue
-# job (process_raw_data.reassemble_body_chunks) aggregates these into one
-# body record per request_id in the joined-log output that aisitok reads.
+# with a monotonic chunk_id and ``num_chunks=0`` (sentinel); the Glue ETL
+# reassembles them per request_id.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_streamed_body_chunks_have_monotonic_ids_and_sentinel_num_chunks():
-    """Each ext_proc response_body message becomes its own Firehose record.
+    """Each response_body message becomes its own Firehose record with a.
 
-    with a sequential ``chunk_id`` per direction and ``num_chunks=0``.
-    The Glue ETL groups by request_id, sorts by chunk_id, and
-    concatenates body bytes — so we hold no body state on the
-    portunus side and streaming responses (Anthropic / OpenAI SSE)
-    reach Firehose as they arrive instead of being buffered to EOS.
+    sequential per-direction ``chunk_id`` and ``num_chunks=0``, so portunus
+    holds no body state and SSE responses reach Firehose as they arrive.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -736,9 +691,8 @@ async def test_streamed_body_chunks_have_monotonic_ids_and_sentinel_num_chunks()
         assert ids == [0, 1, 2]
         assert nums == [0, 0, 0]
         assert body_bytes == [b"chunk-a", b"chunk-b", b"chunk-c"]
-        # Only the terminal chunk (the one carrying end_of_stream) is marked —
-        # this is the end-of-body signal the num_chunks=0 sentinel format lacks,
-        # so the Glue ETL can tell a complete body from one missing its tail.
+        # Only the end_of_stream chunk is marked final — the end-of-body signal
+        # the num_chunks=0 sentinel lacks, letting ETL detect a missing tail.
         assert finals == [False, False, True]
     finally:
         await queue.stop()
@@ -766,9 +720,8 @@ async def test_large_body_message_is_split_into_monotonic_body_records():
         assert [b.payload["chunk_id"] for b in bodies] == list(range(len(bodies)))
         assert [b.payload["num_chunks"] for b in bodies] == [0] * len(bodies)
         assert b"".join(b.payload["body_bytes"] for b in bodies) == body
-        # A single end_of_stream HttpBody split across many Firehose records
-        # marks final_chunk on exactly the last record — not every sub-chunk —
-        # so the ETL's "marker on the max chunk_id" completeness check holds.
+        # One end_of_stream HttpBody split across records marks final_chunk on
+        # exactly the last record, so ETL's max-chunk_id completeness check holds.
         finals = [b.payload["final_chunk"] for b in bodies]
         assert finals == [False] * (len(bodies) - 1) + [True]
     finally:
@@ -777,11 +730,10 @@ async def test_large_body_message_is_split_into_monotonic_body_records():
 
 @pytest.mark.asyncio
 async def test_request_and_response_chunk_ids_are_independent_per_direction():
-    """Request-side and response-side ``chunk_id`` counters are separate so a.
+    """Request- and response-side ``chunk_id`` counters are separate, so both.
 
-    request-body chunk and a response-body chunk can both legitimately
-    be ``chunk_id=0`` — they're disambiguated by direction (which is
-    the stream the record is published to).
+    directions can legitimately start at ``chunk_id=0``, disambiguated by the
+    stream (direction) each record is published to.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -814,12 +766,10 @@ async def test_request_and_response_chunk_ids_are_independent_per_direction():
 
 @pytest.mark.asyncio
 async def test_aborted_stream_emits_records_for_chunks_seen_so_far():
-    """If the stream ends without an ``end_of_stream=true`` chunk (client.
+    """If the stream ends without an ``end_of_stream`` chunk (client.
 
-    disconnect, upstream reset), every chunk that did arrive is already
-    published — there's no portunus-side buffer to lose. Glue's
-    aggregation will produce a partial-body joined-log record from the
-    chunks present.
+    disconnect, upstream reset), every chunk that arrived is already published
+    (no portunus-side buffer to lose); ETL yields a partial-body record.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -839,8 +789,8 @@ async def test_aborted_stream_emits_records_for_chunks_seen_so_far():
         bodies = publish.of_kind("response_body")
         assert [b.payload["body_bytes"] for b in bodies] == [b"partial-", b"body"]
         assert [b.payload["chunk_id"] for b in bodies] == [0, 1]
-        # No chunk carried end_of_stream, so none is marked final — the ETL
-        # sees no terminal marker and (correctly) treats the body as truncated.
+        # No chunk carried end_of_stream, so none is final and ETL treats the
+        # body as truncated.
         assert [b.payload["final_chunk"] for b in bodies] == [False, False]
     finally:
         await queue.stop()
@@ -848,12 +798,10 @@ async def test_aborted_stream_emits_records_for_chunks_seen_so_far():
 
 @pytest.mark.asyncio
 async def test_final_chunk_marks_terminal_chunk_per_direction():
-    """The end_of_stream chunk of each direction is marked final independently.
+    """Each direction's end_of_stream chunk is marked ``final_chunk=True``.
 
-    Request and response bodies stream on separate chunk_id counters, so each
-    direction's terminal chunk carries its own ``final_chunk=True`` — the ETL
-    reassembles the two bodies separately and needs an end-of-body marker for
-    each.
+    independently, since request and response bodies stream on separate
+    chunk_id counters and ETL reassembles them separately.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -891,13 +839,11 @@ async def test_final_chunk_marks_terminal_chunk_per_direction():
 
 @pytest.mark.asyncio
 async def test_concurrent_streams_with_same_request_id_register_independently():
-    """Two concurrent streams that share an x-request-id must register.
+    """Two concurrent streams sharing an x-request-id must register.
 
-    independently. Envoy preserves a client-supplied ``x-request-id`` in
-    some trust configurations; keying the active-stream registry by
-    request_id would let stream B's registration overwrite stream A's,
-    losing its summary record on close. Keying by an internal stream_id
-    fixes this — both streams stay in the registry.
+    independently. Envoy can preserve a client-supplied x-request-id, so
+    keying the registry by request_id would let one overwrite the other
+    (losing a summary on close); keying by internal stream_id fixes it.
     """
     servicer, _publish, queue = _make_servicer()
     await queue.start()
@@ -925,8 +871,7 @@ async def test_concurrent_streams_with_same_request_id_register_independently():
         await ready_a.wait()
         await ready_b.wait()
 
-        # Both streams should be in the active registry under distinct
-        # internal stream_ids despite sharing a request_id.
+        # Both in the registry under distinct stream_ids despite the shared id.
         assert servicer.active_stream_count == 2
         stream_ids = list(servicer._active.keys())
         assert len(set(stream_ids)) == 2
@@ -956,10 +901,9 @@ def test_header_value_bytes_falls_back_to_value_when_only_legacy_field_set():
 
 
 def test_header_value_bytes_preserves_non_utf8_bytes_through_to_publish(caplog):
-    """Binary header values (e.g. Sec-WebSocket-Key) must survive raw.
+    """Binary header values (e.g. Sec-WebSocket-Key) pass through to base64.
 
-    Bytes pass through to base64 without UTF-8 decoding, so downstream
-    consumers can recover the original payload exactly.
+    without UTF-8 decoding, so consumers recover the exact original bytes.
     """
     raw = bytes(range(256))  # every byte 0x00..0xff
     # Use an allowlisted header name so it survives _headers_to_dict.
@@ -972,11 +916,10 @@ def test_header_value_bytes_preserves_non_utf8_bytes_through_to_publish(caplog):
 
 
 def test_header_value_bytes_warns_when_raw_and_legacy_diverge(caplog):
-    """A non-conforming Envoy that sets both fields differently is forensic.
+    """When a non-conforming Envoy sets raw_value and value differently,.
 
-    Log a warning so an operator can correlate the divergence with an
-    unexpected proxy build, rather than silently preferring ``raw_value``
-    and losing the fact that ``value`` was different.
+    raw_value wins but a warning is logged so an operator can spot the
+    divergence rather than losing it silently.
     """
     h = base_pb2.HeaderValue(
         key="x-strange",
@@ -992,11 +935,9 @@ def test_header_value_bytes_warns_when_raw_and_legacy_diverge(caplog):
 
 
 def test_header_value_str_remains_lossy_for_free_text_callers():
-    """``_header_value`` is the convenience str view; non-UTF-8 → U+FFFD.
+    """``_header_value`` is the lossy str view (non-UTF-8 → U+FFFD) for.
 
-    Callers that read string identifiers (e.g. ``_extract_request_id``)
-    are happy with replacement-on-garbage. The lossless path is
-    ``_header_value_bytes`` + base64 for publish.
+    string-identifier callers; the lossless path is ``_header_value_bytes``.
     """
     h = base_pb2.HeaderValue(key="x-bin", raw_value=b"\xff\xfe\xfd")
     decoded = _header_value(h)
@@ -1004,10 +945,8 @@ def test_header_value_str_remains_lossy_for_free_text_callers():
 
 
 # ---------------------------------------------------------------------------
-# WS frame observation — Envoy 1.36 ext_proc delivers post-101 body bytes in
-# both directions under FULL_DUPLEX_STREAMED. The servicer parses each WS
-# frame, publishes per-frame body records, and emits one summary record per
-# connection.
+# WS frame observation — the servicer parses post-101 WS frames, publishes
+# per-frame body records, and emits one summary record per connection.
 # ---------------------------------------------------------------------------
 
 
@@ -1026,8 +965,7 @@ async def test_ws_tagged_stream_emits_frame_and_summary_records():
                     request_id="ws-stream-1",
                 ),
                 _http_headers_message(headers={}, is_request=False),
-                # Server-side WS text frame — must be parsed by FrameObserver
-                # and emitted as a response_body record with the frame payload.
+                # Server-side WS text frame.
                 _http_body_message(body=_ws_frame(b"hello"), is_request=False),
             ]
         )
@@ -1036,12 +974,10 @@ async def test_ws_tagged_stream_emits_frame_and_summary_records():
             pass
         await _drain_queue(queue)
 
-        # One response_body record carrying the decoded frame payload.
         resp_body_items = publish.of_kind("response_body")
         assert any(
             item.payload.get("body_bytes") == b"hello" for item in resp_body_items
         ), f"expected decoded frame payload, got {resp_body_items}"
-        # A summary record on stream close.
         summaries = publish.of_kind("ws_summary")
         assert len(summaries) == 1, summaries
         record = summaries[0].payload["record"]
@@ -1053,12 +989,10 @@ async def test_ws_tagged_stream_emits_frame_and_summary_records():
 
 @pytest.mark.asyncio
 async def test_ws_frames_carry_monotonic_per_direction_frame_index():
-    """Each WS frame gets a distinct per-direction frame_index.
+    """Each WS frame gets a distinct per-direction frame_index. Glue keys.
 
-    Downstream Glue keys WS frames by (request_id, frame_index); without a
-    distinct index, identical same-timestamp frames collide on the body-hash
-    row key and get dropped by dedup (undercounting frames). Assert successive
-    frames in one direction get 0, 1, ... and HTTP bodies leave it None.
+    frames by (request_id, frame_index); without it, identical same-timestamp
+    frames collide on the row key and get dropped by dedup (undercounting).
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -1072,8 +1006,8 @@ async def test_ws_frames_carry_monotonic_per_direction_frame_index():
                     request_id="ws-fi-1",
                 ),
                 _http_headers_message(headers={}, is_request=False),
-                # Two server frames with IDENTICAL payloads — the exact case
-                # that would collide without frame_index.
+                # Two identical-payload frames — the case that collides
+                # without frame_index.
                 _http_body_message(body=_ws_frame(b"dup"), is_request=False),
                 _http_body_message(body=_ws_frame(b"dup"), is_request=False),
             ]
@@ -1084,8 +1018,6 @@ async def test_ws_frames_carry_monotonic_per_direction_frame_index():
 
         resp = publish.of_kind("response_body")
         frame_indices = [item.payload.get("frame_index") for item in resp]
-        # Two identical-payload frames must still get distinct, monotonic
-        # per-direction frame_index values (0, 1).
         assert frame_indices == [0, 1], frame_indices
     finally:
         await queue.stop()
@@ -1163,17 +1095,11 @@ async def test_ws_summary_uses_blocking_submit_on_normal_close():
 
 
 # ---------------------------------------------------------------------------
-# x-portunus-debug-id propagation — the load-test integrity checker scans
-# ``raw_headers["x-portunus-debug-id"]`` on portunus-stream-request-headers
-# to correlate a synthetic client-side debug id with the Envoy-assigned
-# request_id. The servicer must surface the header verbatim (base64-encoded
-# bytes) for every ext_proc stream shape — HTTP nosig, HTTP with the
-# signing-pass mutations already applied by ext_authz #2, and WS upgrade GET.
-# Envoy strips ``x-portunus-debug-id`` at ``request_headers_to_remove`` time
-# (route_config in proxy/envoy.yaml) so it never reaches upstream, but that
-# happens in the router (terminal) filter — ext_proc reads decodeHeaders
-# strictly before the router and is the audit trail's only chance to capture
-# the value.
+# x-portunus-debug-id propagation — the servicer must surface the header
+# verbatim (base64) for every ext_proc stream shape (HTTP nosig, signing-pass,
+# WS upgrade GET) so the integrity checker can correlate it with request_id.
+# Envoy strips it in the router (terminal) filter, after ext_proc runs, so
+# ext_proc is the audit trail's only chance to capture it.
 # ---------------------------------------------------------------------------
 
 
@@ -1214,12 +1140,10 @@ async def test_http_nosig_request_headers_carry_x_portunus_debug_id():
 
 @pytest.mark.asyncio
 async def test_signing_pass_request_headers_carry_x_portunus_debug_id():
-    """Signing-pass: ext_authz #2 has already mutated headers (content-digest,.
+    """Signing-pass: ext_authz has already added signing headers.
 
-    signature, signature-input, x-portunus-signing-required) by the time
-    decodeHeaders reaches ext_proc. The debug id sits alongside those
-    mutations and must survive into raw_headers — the integrity checker
-    can't correlate without it.
+    (content-digest, signature, signature-input, x-portunus-signing-required)
+    by the time ext_proc runs; the debug id must survive alongside them.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -1253,9 +1177,7 @@ async def test_signing_pass_request_headers_carry_x_portunus_debug_id():
         assert len(published) == 1
         raw = published[0].payload["headers"]
         assert _decoded_header(raw, "x-portunus-debug-id") == "DEBUG-B"
-        # The signing-pass mutations should sit alongside the debug id —
-        # if proc_servicer ever started dropping x-portunus-* it would
-        # most likely drop signing-required too, so anchor both.
+        # Anchor a signing-pass mutation too, to catch dropped x-portunus-*.
         assert _decoded_header(raw, "x-portunus-signing-required") == "true"
         assert _decoded_header(raw, "signature").startswith("sig1=")
     finally:
@@ -1264,12 +1186,10 @@ async def test_signing_pass_request_headers_carry_x_portunus_debug_id():
 
 @pytest.mark.asyncio
 async def test_ws_upgrade_request_headers_carry_x_portunus_debug_id():
-    """WS upgrade GET: the WS-tagged ext_proc stream still emits a normal.
+    """WS upgrade GET: the WS-tagged stream still emits a request_headers.
 
-    request_headers event for the upgrade GET. ``processing_mode`` is
-    overridden per-route in proxy/envoy.yaml for the WS route but keeps
-    ``request_header_mode: SEND``, so the debug id on the upgrade
-    request must land in raw_headers exactly as it does for plain HTTP.
+    event (the WS route keeps ``request_header_mode: SEND``), so the debug id
+    must land in raw_headers as it does for plain HTTP.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -1337,13 +1257,11 @@ def _header_map(headers: dict[str, str]) -> base_pb2.HeaderMap:
 def test_reference_denylist_headers_never_captured_under_any_api_key_header(
     monkeypatch, api_key_header
 ):
-    """The security-reviewed denylist holds under ANY ``API_KEY_HEADER``.
+    """The denylist holds under ANY configured ``api_key_header``:.
 
-    ``authorization`` must be a hardcoded literal (redacted even when the
-    deployment configures a different API-key header), the provider-specific
-    key headers (Azure ``api-key``, Google ``x-goog-api-key``, ElevenLabs
-    ``xi-api-key``, Hume ``x-hume-api-key``) must always be redacted, and
-    the configured header itself is redacted whatever it is set to.
+    ``authorization`` and the provider-specific key headers (Azure api-key,
+    Google/ElevenLabs/Hume keys) are always redacted, as is the configured
+    header itself whatever it is set to.
     """
     monkeypatch.setattr(portunus_config, "api_key_header", api_key_header)
 
@@ -1374,13 +1292,10 @@ def test_reference_denylist_headers_never_captured_under_any_api_key_header(
 
 
 def test_unknown_headers_are_dropped_by_the_capture_allowlist():
-    """Capture is allowlist-based: a header we haven't classified is NOT.
+    """Capture is allowlist-based: an unclassified header is NOT archived, so.
 
-    archived. This is the structural fix for the denylist-by-omission leak —
-    a newly onboarded provider's bespoke credential header (e.g.
-
-    ``x-newprovider-key``) can never leak just because nobody added it to a
-    blocklist.
+    a new provider's bespoke credential header can't leak just because nobody
+    added it to a blocklist (the structural fix for denylist-by-omission).
     """
     captured = _headers_to_dict(
         _header_map(
@@ -1392,10 +1307,8 @@ def test_unknown_headers_are_dropped_by_the_capture_allowlist():
                 ":method": "POST",
                 "x-portunus-debug-id": "DEBUG-1",
                 "x-portunus-signing-required": "true",
-                # A client-forged x-portunus-* header must NOT ride an
-                # x-portunus- prefix rule into the audit lake — only the
-                # two enumerated Portunus control-plane headers above are
-                # captured.
+                # A forged x-portunus-* header must NOT be captured: the
+                # allowlist enumerates specific names, it is not a prefix rule.
                 "x-portunus-forged-role": "admin",
                 "x-portunus-api-key": "sk-smuggled",
                 "anthropic-ratelimit-tokens-remaining": "1000",
@@ -1408,8 +1321,7 @@ def test_unknown_headers_are_dropped_by_the_capture_allowlist():
     assert "openai-organization" not in captured
     assert "x-portunus-forged-role" not in captured
     assert "x-portunus-api-key" not in captured
-    # Allowlisted analytics headers survive (exact names and prefixes —
-    # the x-portunus entries are ENUMERATED, not a prefix rule).
+    # Only the allowlisted (enumerated) headers survive.
     assert set(captured) == {
         "content-type",
         ":method",
@@ -1429,10 +1341,8 @@ def test_unknown_headers_are_dropped_by_the_capture_allowlist():
 async def test_drop_sentinel_survives_body_saturation_and_lands_in_publish():
     """Under body saturation the ``dropped=True`` marker must still enqueue.
 
-    A sentinel submitted on the same ``submit_droppable`` path would be
-    rejected at the very instant ``qsize >= body_capacity`` — dropped under
-    the exact condition it exists to signal. It must ride ``submit_blocking``
-    into the reserved headroom instead.
+    On the droppable path it would be rejected exactly when it is needed, so
+    it must ride ``submit_blocking`` into the reserved headroom instead.
     """
     servicer, publish, queue = _make_servicer(queue_maxsize=12)
     # Default body_capacity is 90% of maxsize = 10. Saturate the body tier,
@@ -1455,15 +1365,12 @@ async def test_drop_sentinel_survives_body_saturation_and_lands_in_publish():
     async for _ in servicer.Process(stream, _ctx_with_key()):
         pass
 
-    # The real chunk was dropped (queue at body capacity)...
+    # The real chunk was dropped, counted exactly once (sentinel not double-counted).
     assert queue.dropped_total == dropped_before + 1
-    # ...but exactly once for the logical chunk: the sentinel is accounted
-    # separately and must NOT double-count.
     assert queue.sentinel_dropped_total == 0
     # The sentinel landed in the blocking headroom above body_capacity.
     assert queue.qsize() == 12  # 10 fillers + headers record + sentinel
 
-    # Drain and confirm the marker reaches the publish layer.
     await queue.start()
     await _drain_queue(queue, timeout=2.0)
     await queue.stop()
@@ -1485,7 +1392,6 @@ async def test_sentinel_timeout_under_true_saturation_counts_sentinel_dropped(
     """
     monkeypatch.setattr(portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.05)
     servicer, _publish, queue = _make_servicer(queue_maxsize=2)
-    # Fill the queue completely (headers record takes one slot; fill the rest).
     stream = _stream_from(
         [
             _http_headers_message(headers={}, is_request=True, request_id="full"),
@@ -1496,9 +1402,8 @@ async def test_sentinel_timeout_under_true_saturation_counts_sentinel_dropped(
     async for _ in servicer.Process(stream, _ctx_with_key()):
         pass
 
-    # headers → slot 1 (blocking). chunk-a: body_capacity=1, qsize already 1
-    # → dropped; its sentinel lands in slot 2 (blocking headroom). chunk-b:
-    # dropped; its sentinel finds the queue full and times out.
+    # chunk-a: dropped, its sentinel takes the last (blocking headroom) slot.
+    # chunk-b: dropped, its sentinel finds the queue full and times out.
     assert queue.dropped_total == 2  # exactly one per logical lost chunk
     assert queue.sentinel_dropped_total == 1
 
@@ -1510,12 +1415,10 @@ async def test_sentinel_timeout_under_true_saturation_counts_sentinel_dropped(
 
 @pytest.mark.asyncio
 async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
-    """A malformed WS frame desyncs the parser for that direction.
+    """A malformed WS frame desyncs the parser for that direction; the desync.
 
-    An observer that just logs and goes silent leaves the WSSummaryRecord
-    reporting clean counts while the rest of the session goes unobserved.
-    The desync transition must bump the per-direction truncated counter
-    once, so the summary reflects the observation gap.
+    transition must bump the per-direction truncated counter exactly once, so
+    the summary reflects the observation gap rather than reporting clean counts.
     """
     servicer, publish, queue = _make_servicer()
     await queue.start()
@@ -1533,8 +1436,7 @@ async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
                 _http_headers_message(headers={}, is_request=False),
                 _http_body_message(body=_ws_frame(b"before"), is_request=False),
                 _http_body_message(body=malformed, is_request=False),
-                # After desync nothing in this direction is observable; this
-                # frame must neither crash nor emit records.
+                # Post-desync frame: must neither crash nor emit records.
                 _http_body_message(body=_ws_frame(b"after"), is_request=False),
             ]
         )
@@ -1543,7 +1445,7 @@ async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
             pass
         await _drain_queue(queue)
 
-        # The frame before the poison was observed; the one after was not.
+        # Frame before the desync observed; the one after is not.
         payloads = [
             b.payload.get("body_bytes") for b in publish.of_kind("response_body")
         ]
@@ -1553,8 +1455,8 @@ async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
         summaries = publish.of_kind("ws_summary")
         assert len(summaries) == 1
         record = summaries[0].payload["record"]
-        # The desync is visible downstream: exactly one truncation marker for
-        # the blinded direction (not one per subsequent frame).
+        # Exactly one truncation marker for the blinded direction (not one per
+        # subsequent frame).
         assert record.truncated_server_frames == 1
         assert record.truncated_client_frames == 0
     finally:
@@ -1563,13 +1465,11 @@ async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
 
 @pytest.mark.asyncio
 async def test_blocking_submits_time_out_instead_of_stalling_process(monkeypatch):
-    """A wedged sink must not pin the Process coroutine on a header submit.
+    """A wedged sink must not pin the Process coroutine on a header submit:.
 
-    With the queue completely full and no workers draining, the
-    header/metadata/trailer/summary submits are bounded by
-    ``publish_blocking_timeout_seconds`` — the stream completes promptly
-    and the timed-out records are counted as dropped (observable loss)
-    rather than wedging the stream (and, at stream end, the drain).
+    blocking submits are bounded by ``publish_blocking_timeout_seconds`` so
+    the stream completes promptly and timed-out records count as dropped.
+    Setup: queue full, no workers draining.
     """
     monkeypatch.setattr(portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05)
     monkeypatch.setattr(portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.02)
@@ -1592,8 +1492,7 @@ async def test_blocking_submits_time_out_instead_of_stalling_process(monkeypatch
 
     loop = asyncio.get_event_loop()
     t0 = loop.time()
-    # The whole stream (2 blocked header submits) must complete in ~2
-    # timeouts, not hang forever awaiting queue space.
+    # Two blocked header submits must complete in ~2 timeouts, not hang.
     async with asyncio.timeout(2.0):
         async for _ in servicer.Process(stream, _ctx_with_key()):
             pass
@@ -1606,10 +1505,10 @@ async def test_blocking_submits_time_out_instead_of_stalling_process(monkeypatch
 
 @pytest.mark.asyncio
 async def test_ws_summary_submit_times_out_on_wedged_queue(monkeypatch):
-    """The WS-summary submit in Process's ``finally`` is bounded too.
+    """The WS-summary submit in Process's ``finally`` is bounded too: it runs.
 
-    That submit runs at stream end — including during drain — so an
-    unbounded put on a wedged sink would pin the drain forever.
+    at stream end (including during drain), so an unbounded put on a wedged
+    sink would pin the drain forever.
     """
     monkeypatch.setattr(portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05)
     servicer, _publish, queue = _make_servicer(queue_maxsize=1)

@@ -1,9 +1,7 @@
-"""Tests for ``_decompress_b64_body``: plain, gzip/deflate/br, eventstream.
+"""Tests for ``_decompress_b64_body`` (plain, gzip/deflate/br, eventstream) and.
 
-Also covers that ``JoinedLogRecord.decompress_request_body`` /
-``decompress_response_body`` thread ``content_type`` into the decoder --
-the regression that silently broke Bedrock streaming token accounting when
-``models.py`` was rewritten without the eventstream path.
+that ``JoinedLogRecord`` callers thread ``content_type`` into the decoder --
+regression guard for Bedrock streaming token accounting.
 """
 
 import base64
@@ -41,8 +39,8 @@ def _build_eventstream_message(payload: bytes, headers: bytes = b"") -> bytes:
     """[12-byte prelude][headers][payload][4-byte CRC] with valid CRC32s.
 
     Mirrors the vnd.amazon.eventstream wire format botocore's
-    ``EventStreamBuffer`` parses: the prelude carries a CRC32 of its first
-    8 bytes, and the message ends with a CRC32 of everything preceding it.
+    ``EventStreamBuffer`` parses (prelude CRC32 over its first 8 bytes,
+    trailing CRC32 over everything preceding it).
     """
     total_len = 12 + len(headers) + len(payload) + 4
     prelude_head = struct.pack(">II", total_len, len(headers))
@@ -115,11 +113,9 @@ def test_corrupt_gzip_marks_failure():
 
 
 def test_gzip_with_corrupt_deflate_stream_marks_failure():
-    """Gzip body with a corrupt deflate stream maps to a decode failure.
+    """A valid gzip header wrapping corrupt deflate data raises zlib.error.
 
-    A valid gzip header wrapping corrupt deflate data raises zlib.error
-    (not BadGzipFile/OSError) and must map to (None, failed=True) rather
-    than escaping to the caller.
+    (not BadGzipFile/OSError) and must map to (None, failed=True), not escape.
     """
     valid = gzip.compress(b'{"hello": "world"}')
     corrupted = valid[:10] + b"\xff" * 20  # keep 10-byte gzip header, trash the stream
@@ -136,10 +132,9 @@ def test_corrupt_br_marks_failure():
 
 
 def test_br_without_library_marks_failure(monkeypatch):
-    """Missing ``brotli`` degrades to a decode-failure, not a crash.
+    """Missing ``brotli`` (not stdlib, absent from the Glue image) must.
 
-    Brotli is not stdlib and not in the base Glue image, so the branch must
-    tolerate ``ImportError`` rather than crash the job.
+    degrade to a decode-failure via ImportError, not crash the job.
     """
     real_import = builtins.__import__
 
@@ -346,13 +341,10 @@ def test_non_eventstream_content_types_use_utf8_path(content_type):
 
 # --- Truncated trailing frame: detected decode failure, not silent partial ---
 #
-# botocore's EventStreamBuffer ends iteration with a bare StopIteration the
-# moment the remaining bytes are too few for the next complete frame -- the
-# same way a clean end of stream ends. Without the residual-bytes guard, a
-# truncated trailing frame looks like success (failed=False) and silently
-# drops the token-bearing tail: Anthropic-on-Bedrock puts usage.output_tokens
-# in the near-final message_delta, so a cut-off stream undercounts tokens
-# with no error signal.
+# botocore's EventStreamBuffer ends iteration the same way on a truncated tail
+# as on a clean end of stream. Without the residual-bytes guard a cut-off frame
+# looks like success and silently drops the token-bearing tail (Anthropic-on-
+# Bedrock puts usage.output_tokens in the near-final message_delta).
 
 # Two-frame Bedrock stream whose final frame carries usage.output_tokens.
 _TEXT_DELTA = {
@@ -367,10 +359,9 @@ _MESSAGE_DELTA = {
 
 
 def test_eventstream_complete_stream_keeps_token_bearing_tail():
-    """A complete stream still succeeds and keeps the token-bearing tail.
+    """Baseline for the guard: a complete stream succeeds and retains the.
 
-    Baseline for the guard: the success path is byte-for-byte identical and
-    the final message_delta carrying usage.output_tokens is retained.
+    final message_delta carrying usage.output_tokens.
     """
     es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
     decoded, failed = _decompress_b64_body(
@@ -388,8 +379,7 @@ def test_eventstream_complete_stream_keeps_token_bearing_tail():
 def test_eventstream_truncated_trailing_frame_marks_failure(cut, caplog):
     """Cutting bytes off the final frame must surface as a decode failure.
 
-    The body returns failed=True / decoded=None, so downstream token
-    accounting never trusts the silently dropped tail.
+    (failed=True / decoded=None), so token accounting never trusts a dropped tail.
     """
     caplog.set_level(logging.WARNING, logger="api.access")
     frame_a = _bedrock_event(_TEXT_DELTA)
@@ -409,10 +399,9 @@ def test_eventstream_truncated_trailing_frame_marks_failure(cut, caplog):
 
 
 def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
-    """Cutting at an exact frame boundary leaves a complete (shorter) stream.
+    """Cutting at an exact frame boundary leaves a complete (shorter) stream:.
 
-    There is no incomplete tail, so the guard must NOT fire -- this protects
-    against over-flagging streams that simply end on fewer frames.
+    no incomplete tail, so the guard must NOT fire (no over-flagging).
     """
     frame_a = _bedrock_event(_TEXT_DELTA)
     full = frame_a + _bedrock_event(_MESSAGE_DELTA)
@@ -425,12 +414,9 @@ def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
 
 # --- JoinedLogRecord callers must thread content_type into the decoder ---
 #
-# Regression guard: a caller that never passes content_type sends Bedrock
-# eventstream bodies down the plain .decode("utf-8") path —
-# decode_failure=True for 100% of Bedrock streaming traffic (or silent
-# garbage when framing bytes happen to be valid UTF-8). These tests exercise
-# the real caller methods end-to-end so a rewrite that drops the threading
-# turns CI red.
+# Regression guard: a caller that omits content_type sends Bedrock eventstream
+# bodies down the plain .decode("utf-8") path, failing all Bedrock streaming
+# traffic. These exercise the real caller methods end-to-end.
 
 
 def _make_joined_record(**overrides: Any) -> JoinedLogRecord:

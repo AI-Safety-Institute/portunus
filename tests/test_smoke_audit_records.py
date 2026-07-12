@@ -2,17 +2,11 @@
 """Audit-pipeline smoke tests for the gRPC ext_authz/ext_proc model.
 
 Drives realistic client flows (signing-bearing HTTP POST, Codex-shaped
-Responses-API WS stream) through Portunus and asserts the expected
-audit records land in LocalStack S3. The transport-level behaviour tests
-live in ``test_ws_proxy_behaviour.py`` / ``test_http_proxy_behaviour.py``;
-this file's job is the audit arm — the pipeline that aisitok consumes.
+Responses-API WS stream) through Portunus and asserts the expected audit
+records land in LocalStack S3 — the pipeline aisitok consumes. Transport-level
+behaviour lives in ``test_ws_proxy_behaviour.py`` / ``test_http_proxy_behaviour.py``.
 
-These are the gating smoke tests for the blue/green cutover: a
-regression in the publish queue, frame observation, or signing-pass
-data path surfaces here as a missing or malformed record.
-
-Run with the docker-compose stack up (see ``test_ws_proxy_behaviour.py``
-for setup). Marked ``slow`` so CI lint/type-check skip them.
+Run with the docker-compose stack up. Marked ``slow`` so CI lint/type-check skip them.
 """
 
 from __future__ import annotations
@@ -57,14 +51,9 @@ async def _wait_for_s3_records(
 ) -> list[dict[str, Any]]:
     """Poll the Firehose→S3 audit prefix until ``predicate(records)`` holds.
 
-    The audit pipeline is Firehose direct-PUT → S3.
-    ``conftest._read_audit_s3_records`` reads one
-    logical stream's S3 prefix (e.g. ``response-body``) and parses the
-    newline-delimited JSON; LocalStack's 1s/1MiB buffer hints
-    (``scripts/localstack-init-firehose.sh``) land records within ~1-2s.
-    Each call re-reads the whole (cumulative, per-test-cleared) prefix, so
-    we poll until enough records have flushed rather than after a fixed
-    sleep.
+    LocalStack's 1s/1MiB buffer hints land records within ~1-2s; each call
+    re-reads the whole (cumulative, per-test-cleared) prefix, so poll until
+    enough records have flushed rather than sleeping a fixed time.
     """
     deadline = time.monotonic() + timeout
     records = _read_audit_s3_records(stream, timeout=0.1)
@@ -87,14 +76,11 @@ async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
     docker_setup,
     clean_audit_pipeline,
 ) -> None:
-    """End-to-end audit-pipeline smoke for the Codex WS flow.
+    """End-to-end audit smoke for the Codex WS flow (ws-echo ``/v1/responses``).
 
-    Drives ws-echo's ``/v1/responses`` mock, which emits a Responses-API
-    event stream. Asserts:
-      * Each server-emitted WS event lands in the response-body stream
-        as its own frame audit record.
-      * A per-connection summary record lands in the ws-summary stream
-        with a matching server_text_frames count.
+    Asserts each server WS event lands in the response-body stream as its own
+    frame record, and a per-connection ws-summary record lands with a matching
+    server_text_frames count.
     """
     client_msg = json.dumps({"input": "smoke", "model": "gpt-4o-mini", "stream": True})
 
@@ -208,10 +194,9 @@ def test_signed_request_publishes_digest_and_signature_headers_to_s3(
 ):
     """Signing-pass smoke: S3 audit carries Content-Digest + Signature headers.
 
-    Complements ``test_e2e_signing.py``, which validates the headers as
-    seen by the upstream. This validates the same headers reach the
-    Firehose→S3 audit pipeline — a publish-side regression in the
-    signing-pass flow surfaces here, not in the wire-level check.
+    Complements ``test_e2e_signing.py`` (upstream-seen headers); this validates
+    the same headers reach the Firehose→S3 audit pipeline, catching publish-side
+    regressions the wire-level check misses.
     """
     vector = _load_anthropic_signing_vector()
     body = vector["request"]["body"]

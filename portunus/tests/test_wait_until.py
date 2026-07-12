@@ -15,9 +15,7 @@ async def test_wait_until_timeout():
         test_time = test_time + 1
         return test_time
 
-    # mock.patch of ``time.time`` is the lightest-touch way to fast-forward
-    # ``wait_until`` past its timeout without an actual sleep; injecting a
-    # clock through every call site would be heavier than the test.
+    # Patch ``time.time`` to fast-forward past the timeout without a real sleep.
     with mock.patch("time.time", side_effect=pop_test_time):
 
         def condition():

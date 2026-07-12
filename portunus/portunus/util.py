@@ -1,9 +1,4 @@
-"""
-Utility functions for the Portunus.
-
-This module contains utility functions that are used throughout the Portunus,
-particularly for AWS interactions like getting temporary credentials.
-"""
+"""Portunus utilities: timestamps, body chunking, ARN/payload re-exports."""
 
 import asyncio
 import datetime
@@ -24,7 +19,6 @@ from portunus.services.payload_service import (
 
 logger = logging.getLogger("api.access")
 
-# This comment ensures these imports are marked as used
 __all__ = [
     "extract_arn_parts",
     "get_role_arn",

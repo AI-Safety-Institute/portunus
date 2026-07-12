@@ -1,21 +1,11 @@
 """request_id propagation across ext_authz + ext_proc.
 
-Replaces the removed FastAPI/uvicorn ``test_trace_propagation.py``. That test
-guarded a uvicorn-import-ordering bug that broke X-Ray trace-ids and collapsed
-every proxy log into a single ``request_id`` group, OOMing the joined-logs ETL
-(2026-07-02 outage). The FastAPI/uvicorn serving stack is gone; request_id now
-comes from Envoy's ``x-request-id`` (surfaced to ext_authz as
-``attributes.request.http.id`` and to ext_proc as the ``x-request-id`` header).
-
-The failure *mechanism* changed but the failure *class* didn't: if request_id
-stopped propagating — or worse, fell back to a shared constant — records would
-re-collapse into one group and re-OOM the ETL. These tests lock the two
-properties that prevent that:
-
-1. both servicers extract the *same* id Envoy assigned a request (so
-   ext_authz metadata and ext_proc body/header records correlate); and
-2. a request with no id gets a fresh, unique UUID per request — never a shared
-   placeholder (``""`` / ``"No-Trace-Id"`` / a fixed string).
+request_id comes from Envoy's ``x-request-id`` (ext_authz sees it as
+``attributes.request.http.id``; ext_proc as the ``x-request-id`` header).
+Regression guard: if it stops propagating or falls back to a shared constant,
+records collapse into one ``request_id`` group and OOM the joined-logs ETL. So
+both servicers must extract the same Envoy id, and a request with no id must
+mint a fresh, unique UUID per request, never a shared placeholder.
 """
 
 from __future__ import annotations

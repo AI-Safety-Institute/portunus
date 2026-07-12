@@ -14,17 +14,10 @@ services:
     networks:
       app_network:
     healthcheck:
-      # Portunus has no HTTP surface (FastAPI was removed; it serves only
-      # gRPC on :9000). Two probes, matching prod semantics:
-      #   /ping    — Envoy-liveness direct_response (auth/proc filters
-      #              disabled per-route); 200 as long as Envoy lives.
-      #   /healthz — the health_check filter gated on Envoy's ACTIVE gRPC
-      #              health check of Portunus (grpc.health.v1.Health "").
-      #              This is the ALB health-check target in prod; probing
-      #              it here validates the whole chain (Envoy hc filter →
-      #              active gRPC check → Portunus health servicer), so the
-      #              compose stack only reports healthy when Portunus is
-      #              actually SERVING — not merely when Envoy is up.
+      # Two probes matching prod: /ping is Envoy-liveness only, /healthz is
+      # gated on the active gRPC health check of Portunus. Probing /healthz
+      # validates the whole chain, so the stack reports healthy only when
+      # Portunus is SERVING, not merely when Envoy is up.
       test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/ping | grep -qE '^(200)$' && curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/healthz | grep -qE '^(200)$'"]
       interval: 15s
       timeout: 2s
@@ -37,9 +30,8 @@ services:
     networks:
       app_network:
     ports:
-      # Host publishes are a dev convenience only — the test suite drives
-      # LocalStack via ``docker exec localstack-main awslocal`` — so both
-      # are overridable for machines where something else holds 4566.
+      # Host publishes are a dev convenience only (tests drive LocalStack via
+      # docker exec awslocal); overridable when something else holds 4566.
       - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"                      # LocalStack Gateway
       - "127.0.0.1:${LOCALSTACK_HOST_SERVICES_PORTS:-4510-4559}:4510-4559"  # external services port range
     environment:
@@ -79,9 +71,7 @@ services:
     networks:
       app_network:
     # Publishes the Envoy listener (8888). Portunus shares this container's
-    # network namespace and serves only gRPC on loopback 127.0.0.1:9000
-    # (reached by Envoy's ext_authz/ext_proc filters) — there's no HTTP
-    # surface to publish since FastAPI was removed.
+    # network namespace and serves only gRPC on loopback 127.0.0.1:9000.
     ports:
       - "8888:8888"
     environment:
@@ -95,18 +85,13 @@ services:
       LISTEN_PORT: 8888
       TARGET_HOST: http-bun
       TARGET_PORT: 80
-      # Route WS upgrades to the dedicated ws-echo container, but keep
-      # plain HTTP at http-bun. Prod typically routes both at the same
-      # provider host (entrypoint.sh defaults WS_TARGET_HOST to
-      # TARGET_HOST); this override exists so the docker-compose
-      # behaviour tests can exercise WS round-trips without needing a
-      # provider that responds to both protocols.
+      # Route WS upgrades to ws-echo but keep plain HTTP at http-bun, so the
+      # behaviour tests can exercise WS without a provider that serves both.
       WS_TARGET_HOST: ws-echo
       WS_TARGET_PORT: 80
-      # ws-echo speaks HTTP/1.1 plaintext, so disable the cluster's TLS
-      # transport socket. h2 pinning is no longer env-var-driven —
-      # ws_upstream is fixed to HTTP/1.1 at config level via
-      # typed_extension_protocol_options.
+      # ws-echo is HTTP/1.1 plaintext, so disable the cluster's TLS transport
+      # socket. (h2 is pinned at config level via typed_extension_protocol_options,
+      # not env-var-driven.)
       WS_TARGET_HOST_TRANSPORT_SOCKET: "null"
       ENVOY_LOG_LEVEL: info
       AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
@@ -137,19 +122,14 @@ services:
     build: portunus/
     container_name: portunus
     init: true
-    # Share the proxy container's network namespace so this mirrors the
-    # prod Fargate-sidecar layout: Envoy dials portunus over loopback
-    # (``127.0.0.1:9000`` in ``proxy/envoy.yaml``), and there's exactly one
-    # network endpoint to think about. Because the namespace is shared,
-    # portunus cannot publish its own port mappings — the ``proxy`` service
-    # publishes 8080 on its behalf for the bridged ``health`` smoke probe.
+    # Share the proxy's network namespace, mirroring the prod Fargate-sidecar
+    # layout (Envoy dials portunus over loopback 127.0.0.1:9000). A shared
+    # namespace means portunus can't publish its own ports — the proxy service
+    # publishes on its behalf for the bridged health probe.
     network_mode: "service:proxy"
-    # x-ray console can automatically display relevant cloudwatch logs by querying
-    # the group for a matching trace id. If you want to log docker to cloudwatch,
-    # you must put credentials in /root/.aws/credentials default profile
-    # in order to override aninstance profile.
-    # It is not enough to paste them in as env vars.
-    # Comment this out you don't want to log to cloudwatch.
+    # To ship these logs to CloudWatch (so X-Ray can correlate them by trace
+    # id), uncomment below and put credentials in /root/.aws/credentials'
+    # default profile — env vars alone won't override an instance profile.
     #
     # logging:
     #   driver: awslogs
@@ -183,20 +163,17 @@ services:
       FIREHOSE_RESPONSE_BODY_STREAM: portunus-firehose-response-body
       FIREHOSE_RESPONSE_TRAILERS_STREAM: portunus-firehose-response-trailers
       FIREHOSE_WS_SUMMARY_STREAM: portunus-firehose-ws-summary
-      # Header prefix the proxy uses; pass it to portunus too so denied
-      # responses carry ``x-{prefix}-error: true`` matching the legacy
-      # Lua-filter contract.
+      # Header prefix; passed to portunus too so denied responses carry
+      # x-{prefix}-error: true.
       PORTUNUS_HEADER_PREFIX: aisi-proxy
-      # gRPC ext_authz + ext_proc server: required for the new Envoy filter
-      # chain to function. Without this, ext_authz connects-refused → 403.
+      # gRPC ext_authz + ext_proc server. Without it ext_authz is
+      # connection-refused → 403.
       GRPC_ENABLED: "true"
       GRPC_PORT: "9000"
-      # Empty proxy_api_key disables the proxy-identity check (test-only mode);
-      # docker-compose's proxy container reaches this server over the
-      # ``app_network`` bridge, not over Service Connect, so the SC-namespace
-      # identity gate that motivates the key in prod doesn't apply locally.
-      # ``GRPC_PROXY_API_KEY_OPTIONAL=true`` acknowledges the gate is
-      # disabled; without it the server fails closed on startup.
+      # Empty proxy_api_key disables the proxy-identity check (test-only; the
+      # SC-namespace gate that motivates it in prod doesn't apply on the bridge).
+      # GRPC_PROXY_API_KEY_OPTIONAL=true acknowledges this; without it the
+      # server fails closed on startup.
       GRPC_PROXY_API_KEY: ""
       GRPC_PROXY_API_KEY_OPTIONAL: "true"
 

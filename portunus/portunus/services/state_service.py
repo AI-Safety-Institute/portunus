@@ -1,9 +1,4 @@
-"""
-Redis state management service module.
-
-This module contains the StateService class, which is responsible for
-managing Redis connections and providing access to Redis clients.
-"""
+"""Redis and pooled-AWS-client state management (the StateService class)."""
 
 import asyncio
 import contextlib
@@ -38,13 +33,11 @@ class _ClientRetirement:
 
 
 class _PooledClientContext:
-    """Async context manager yielding a pooled AWS client.
+    """Async CM yielding a pooled AWS client.
 
-    Unlike the context manager returned by
-    ``aiobotocore.session.Session.create_client`` this does NOT close the
-    client on ``__aexit__`` — the client stays alive in the
-    :class:`StateService` credential-keyed pool for reuse. The pool closes
-    clients on LRU eviction (after a grace period) and on
+    Unlike ``aiobotocore``'s ``create_client`` CM, ``__aexit__`` does NOT close
+    the client — it stays in :class:`StateService`'s credential-keyed pool,
+    closed on LRU eviction (after a grace period) and on
     :meth:`StateService.close`.
     """
 
@@ -66,17 +59,13 @@ class _PooledClientContext:
 
 
 class PooledBotoSession:
-    """Duck-typed subset of an aiobotocore ``Session`` backed by the pool.
+    """Duck-typed ``aiobotocore.Session`` subset backed by the client pool.
 
-    Drop-in for call sites that do
-    ``async with session.create_client(...) as client:`` per request (STS in
-    ``AuthService.get_aws_identity``, Secrets Manager in
-    ``SecretsService.fetch_secret``). A plain session's ``create_client``
-    builds a fresh aiohttp connection pool + TLS context (~200ms cold) on
-    every call, paid twice per auth cache-miss — a latency spike on
-    cache-miss storms (deploy / TTL-expiry waves). With this adapter the
-    underlying client is created once per (service, credential set) and
-    reused, mirroring the Firehose singleton in :class:`StateService`.
+    Drop-in for per-request ``async with session.create_client(...)`` sites
+    (STS in ``AuthService.get_aws_identity``, Secrets Manager in
+    ``SecretsService.fetch_secret``). A plain session rebuilds an aiohttp pool
+    + TLS context (~200ms cold) on every call; this reuses one client per
+    (service, credential set), like the Firehose singleton.
     """
 
     def __init__(self, state_service: "StateService") -> None:
@@ -88,47 +77,36 @@ class PooledBotoSession:
 
 
 class StateService:
-    """
-    Service for managing Redis connections and state.
-
-    This service is responsible for creating and managing Redis clients,
-    handling connection pooling, and providing access to Redis for other
-    services.
+    """Manages Redis connections and pooled AWS clients.
 
     Attributes:
-        redis_client: The Redis client instance
+        redis_client: The Redis client instance.
     """
 
     def __init__(self) -> None:
         """Initialize the StateService."""
         self.redis_client: Optional[aioredis.Redis] = None
         self.boto_session = aiobotocore.session.get_session()
-        # aiobotocore clients are async context managers; entering them
-        # creates a fresh aiohttp connection pool + TLS context (~200ms
-        # cold start). Re-entering on every publish flattens throughput
-        # — instead we keep a singleton client per service, opened once
-        # via an AsyncExitStack and closed in ``close()`` on shutdown.
+        # Firehose client is a singleton per process: opened once via an
+        # AsyncExitStack (avoiding the ~200ms per-entry aiohttp+TLS setup)
+        # and closed in ``close()``.
         self._aws_stack: Optional[contextlib.AsyncExitStack] = None
         self._firehose_client: Optional[Any] = None
         self._aws_client_lock = asyncio.Lock()
-        # Credential-keyed AWS client pool (STS / Secrets Manager). Unlike
-        # Firehose (task-role creds, one client per process), these clients
-        # are built with the *caller's* temporary credentials, so we pool
-        # per (service, credential set) with a bounded LRU. Values are
-        # ``(ctx, client)`` where ``ctx`` is the aiobotocore context
-        # manager that must be exited to close the client.
+        # Credential-keyed AWS client pool (STS / Secrets Manager): built with
+        # the *caller's* temporary creds, so pooled per (service, credential
+        # set) with a bounded LRU. Values are ``(ctx, client)``; ``ctx`` must
+        # be exited to close the client.
         self._cred_client_pool: "OrderedDict[str, tuple[Any, Any]]" = OrderedDict()
-        # Grace-period close tasks for LRU-evicted clients: task -> ctx
-        # closer. Kept so ``close()`` can finish them deterministically
-        # (a cancelled task that never started skips its own cleanup).
+        # Grace-period close tasks for evicted clients, kept so ``close()``
+        # finishes them deterministically.
         self._retiring_clients: dict[asyncio.Task[None], "_ClientRetirement"] = {}
 
-    # Bounded LRU: each entry is an aiohttp pool + TLS context. 64 distinct
-    # live credential sets per service is generous for a single sidecar;
-    # beyond that the least-recently-used client is retired.
+    # Bounded LRU (each entry is an aiohttp pool + TLS context); beyond this
+    # the least-recently-used client is retired. 64 is generous per sidecar.
     _CRED_CLIENT_POOL_MAX = 64
-    # Grace before closing an LRU-evicted client, so an in-flight call on it
-    # can finish. Well above the 4s auth deadline bounding STS/Secrets calls.
+    # Grace before closing an evicted client so an in-flight call can finish;
+    # well above the 4s auth deadline on STS/Secrets calls.
     _CRED_CLIENT_EVICT_GRACE_S = 30.0
 
     def pooled_boto_session(self) -> PooledBotoSession:
@@ -139,9 +117,8 @@ class StateService:
     def _cred_pool_key(service_name: str, parts: tuple[Optional[str], ...]) -> str:
         """Digest a (service, credentials, endpoint) tuple into a pool key.
 
-        Components are length-prefixed before hashing so no concatenation of
-        differing components can collide, and the raw secret key material is
-        not retained as a dict key.
+        Components are length-prefixed so differing tuples can't collide, and
+        raw secret key material isn't retained as a dict key.
         """
         digest = hashlib.sha256()
         for part in (service_name, *parts):
@@ -161,10 +138,9 @@ class StateService:
     ) -> Any:
         """Get (or create) a pooled AWS client for a credential set.
 
-        Safe without a lock: all callers run on the single grpc.aio event
-        loop and there is no ``await`` between the pool lookup and return on
-        the hit path. On a same-key creation race the loser closes its own
-        client (which no caller has seen) and returns the winner's.
+        Lock-free: all callers share the single grpc.aio loop and no ``await``
+        separates lookup from return on the hit path. On a same-key race the
+        loser closes its own unshared client and returns the winner's.
         """
         key = self._cred_pool_key(
             service_name,
@@ -188,8 +164,8 @@ class StateService:
 
         raced = self._cred_client_pool.get(key)
         if raced is not None:
-            # Another coroutine created this client while we awaited; ours
-            # has no users yet, so close it immediately and share theirs.
+            # Raced: another coroutine created it while we awaited; close ours
+            # (unshared) and use theirs.
             with contextlib.suppress(Exception):
                 await ctx.__aexit__(None, None, None)
             return raced[1]
@@ -217,29 +193,17 @@ class StateService:
         task.add_done_callback(lambda t: self._retiring_clients.pop(t, None))
 
     async def get_redis_client(self) -> Optional[aioredis.Redis]:
-        """
-        Get async Redis client for non-blocking operations.
-
-        This method lazily initializes a Redis client the first time it's called,
-        and returns the same client on subsequent calls. It handles connection
-        errors gracefully and logs connection status.
-
-        The client uses a connection pool with the following features:
-        - Connection retry with exponential backoff
-        - Pool health checks to remove dead connections
-        - Connection limits based on configuration
+        """Lazily initialize and return a shared async Redis client.
 
         Returns:
-            Optional[aioredis.Redis]: Redis client if connection successful, None
-                                      otherwise
+            The Redis client, or None if the connection failed.
 
         Raises:
-            RedisError: If Redis configuration is invalid
+            RedisError: If Redis configuration is invalid.
         """
         if self.redis_client is None:
             try:
-                # Log Redis connection target. Password length is a side
-                # channel — emit a bool instead.
+                # Password length is a side channel — log a bool, not the value.
                 logger.info(
                     "Connecting to Redis at %s:%d (password_set=%s)",
                     config.redis.host,
@@ -247,7 +211,6 @@ class StateService:
                     bool(config.redis.password),
                 )
 
-                # Create Redis client with built-in connection pooling
                 self.redis_client = aioredis.Redis(
                     host=config.redis.host,
                     port=config.redis.port,
@@ -262,7 +225,6 @@ class StateService:
                     health_check_interval=5,
                 )
 
-                # Verify authentication with a simple command
                 ping_result = await self.redis_client.ping()
                 logger.info(
                     f"Successfully connected to Redis at "
@@ -270,21 +232,15 @@ class StateService:
                     f"ping result: {ping_result}"
                 )
             except Exception as e:
-                # Don't log full traceback — TLS / auth exceptions from
-                # aioredis can include sensitive bytes (rarely, but worth
-                # bounding).
+                # No traceback — aioredis TLS/auth exceptions can include
+                # sensitive bytes.
                 logger.error("Redis connection failure: %s", type(e).__name__)
-                self.redis_client = None  # Reset to None in case of error
+                self.redis_client = None
                 return None
         return self.redis_client
 
     async def close_redis_client(self) -> None:
-        """
-        Close the Redis client connection pool.
-
-        This method should be called during application shutdown to properly
-        close all Redis connections in the pool.
-        """
+        """Close the Redis client connection pool (call on shutdown)."""
         if self.redis_client is not None:
             try:
                 await self.redis_client.aclose()
@@ -295,21 +251,16 @@ class StateService:
                 self.redis_client = None
 
     async def acquire_redis_connection(self, max_retries=8):
-        """
-        Acquire a Redis connection with exponential backoff retry.
+        """Acquire a Redis connection with exponential-backoff retry.
 
-        This provides backpressure by making callers wait for a client
-        if the redis server is overloaded. Note that the ping() here
-        ALSO creates load, so we might want to rethink this.
+        Provides backpressure by making callers wait when Redis is overloaded.
+        (Caveat: the ping() here also adds load.)
 
         Args:
-            max_retries: Maximum number of retry attempts (default: 8)
+            max_retries: Maximum retry attempts (default: 8).
 
         Returns:
-            Redis client if successful, None otherwise
-        Note:
-            This method is intended for high-load scenarios where connections
-            may be temporarily exhausted.
+            Redis client if successful, None otherwise.
         """
         client = await self.get_redis_client()
         if not client:
@@ -318,11 +269,9 @@ class StateService:
         retry_count = 0
         while retry_count <= max_retries:
             try:
-                # Attempt a simple ping to test connection acquisition
                 await client.ping()
                 return client
             except (MaxConnectionsError, ConnectionError) as e:
-                # Check for "Too many connections" in the error message
                 if "Too many connections" in str(e) and retry_count < max_retries:
                     retry_count += 1
                     backoff = min(0.1 * (1.5**retry_count), 1.0) * (
@@ -338,12 +287,7 @@ class StateService:
         return None
 
     async def health_check(self) -> bool:
-        """
-        Check if Redis is available.
-
-        Returns:
-            bool: True if Redis is available, False otherwise
-        """
+        """Check if Redis is available."""
         client = await self.get_redis_client()
         if client is None:
             return False
@@ -377,14 +321,13 @@ class StateService:
 
     async def close(self) -> None:
         """Tear down cached AWS clients. Called on graceful shutdown."""
-        # Close every pooled credential-keyed client.
         while self._cred_client_pool:
             _, (ctx, _) = self._cred_client_pool.popitem(last=False)
             with contextlib.suppress(Exception):
                 await ctx.__aexit__(None, None, None)
-        # Cut grace-period timers short and close their clients. The
-        # explicit ``retirement.close()`` (idempotent) covers tasks that
-        # were cancelled before they ever ran.
+        # Cut grace timers short and close their clients; the explicit
+        # (idempotent) ``retirement.close()`` covers tasks cancelled before
+        # they ran.
         retiring = list(self._retiring_clients.items())
         for task, _ in retiring:
             task.cancel()

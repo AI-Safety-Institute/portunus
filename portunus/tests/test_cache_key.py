@@ -1,14 +1,10 @@
 """Tests for the auth-cache key structure + host normalisation.
 
-A naive key like ``sha256(f"{host or ''}:{payload}")`` has an unescaped
-``:`` delimiter, so ``(host="a:b", payload="c")`` and
-``(host="a", payload="b:c")`` hash identically. The scheme under test hashes
-the components independently (structure-proof) and normalises the host
-(lower-case, default ``:443`` stripped) so equivalent hosts share one entry.
-
-The fail-closed miss-path recheck (``validate_and_extract_api_key``) applies
-the SAME normalisation, so a cache hit can never admit a host variant the
-validator would reject.
+The key hashes components independently (no unescaped ``:`` delimiter, so
+delimiter-shift collisions are impossible) and normalises the host (lower-case,
+default ``:443`` stripped) so equivalent hosts share one entry. The miss-path
+recheck (``validate_and_extract_api_key``) applies the SAME normalisation, so a
+cache hit can never admit a host variant the validator would reject.
 """
 
 import json
@@ -115,9 +111,8 @@ class TestHostRestrictionRecheckStaysFailClosed:
     def test_cache_key_and_recheck_agree(self):
         """Cache-entry sharing and validation accept the same host set.
 
-        Any host sharing the secret-host cache entry passes validation; any
-        host with a different cache entry is denied — the invariant that
-        keeps normalised cache hits fail-closed.
+        A host passes validation iff it shares the secret-host cache entry —
+        the invariant that keeps normalised cache hits fail-closed.
         """
         cache_service = CacheService()
         payload = "bearer-payload"

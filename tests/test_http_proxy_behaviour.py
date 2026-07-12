@@ -86,14 +86,10 @@ _HTTPBUN_ECHO_MARKER = '"method"'
 
 
 def _read_localstack_metadata_records() -> list[dict]:
-    """Read all metadata records from LocalStack S3 (Firehose destination).
+    """Read all metadata records from LocalStack S3 (Firehose direct-PUT destination).
 
-    Portunus writes to ``portunus-firehose-metadata`` (direct-PUT). LocalStack
-    buffers to ``s3://portunus-logs-local/logs/metadata/*`` with a 1s/1MiB
-    hint configured in ``scripts/localstack-init-firehose.sh``.
-
-    Uses ``conftest._read_audit_s3_records`` so the polling/parsing logic
-    is shared across tests.
+    Buffers to ``s3://portunus-logs-local/logs/metadata/*`` with a 1s/1MiB
+    hint (``scripts/localstack-init-firehose.sh``).
     """
     return _read_audit_s3_records("metadata", timeout=0.1)
 
@@ -412,11 +408,8 @@ def test_request_response(
 ) -> None:
     """Walk one scenario from the request/response corpus end-to-end.
 
-    Scope: behaviours observable from a single HTTP request — status code,
-    whether the upstream received the request, and body substrings.
-    Behaviours with different assertion shapes (streaming, telemetry, WS,
-    cache TTL, drain) belong in their own test functions or files; see the
-    module docstring.
+    Scope: behaviours observable from a single HTTP request — status,
+    upstream reachability, body substrings.
     """
     try:
         response = _fire_scenario(
@@ -475,11 +468,10 @@ def test_request_response(
 def _wait_for_metadata_record_count(
     *, baseline: int, expected_delta: int, timeout: float = 8.0
 ) -> int:
-    """Poll LocalStack S3 (Firehose destination) for the expected record count.
+    """Poll LocalStack S3 for the expected record count.
 
-    Firehose direct-PUT in LocalStack is configured with 1s/1MiB buffer
-    hints so records land within ~1-2s; we still give a generous timeout
-    to absorb Firehose worker scheduling jitter.
+    Firehose direct-PUT lands records within ~1-2s (1s/1MiB buffer hints); the
+    generous timeout absorbs Firehose worker scheduling jitter.
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -495,10 +487,9 @@ def _wait_for_metadata_record_count(
 @pytest.mark.parametrize(
     "scenario",
     # Restrict to scenarios that *should* publish a metadata record. The
-    # "expected zero" case is a negative assertion against an
-    # asynchronously-flushed pipeline; covered by unit tests on the
-    # ext_authz / ext_proc servicers (faster, deterministic, no Firehose
-    # async involved).
+    # "expected zero" case is a negative assertion against an async pipeline;
+    # covered by faster deterministic unit tests on the ext_authz/ext_proc
+    # servicers.
     [s for s in SCENARIOS if (s.expected.expected_metadata_records or 0) > 0],
     ids=lambda s: s.name,
 )
@@ -511,11 +502,9 @@ def test_metadata_telemetry(
 ) -> None:
     """Each scenario produces *at least* the expected metadata records on S3.
 
-    End-to-end smoke: proves the audit pipeline lands records on S3 via
-    Firehose direct-PUT. Asserts ``observed >= expected`` rather than
-    strict equality — Firehose's async flush can carry one scenario's
-    record across the clean-S3 boundary into the next test's window.
-    Strict per-scenario record-count semantics are checked in
+    Asserts ``observed >= expected`` not strict equality — Firehose's async
+    flush can carry one scenario's record across the clean-S3 boundary into
+    the next test's window. Strict counts are checked in
     ``portunus/tests/test_grpc_proc_servicer.py``.
     """
     _fire_scenario(scenario, seeded_secrets, api_key_header, api_key_prefix)

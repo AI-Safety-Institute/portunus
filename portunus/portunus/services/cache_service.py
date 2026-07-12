@@ -1,9 +1,4 @@
-"""
-API authentication response caching service module.
-
-This module contains the CacheService class, which is responsible for caching
-and retrieving authentication responses in Redis.
-"""
+"""Auth-response caching in Redis (the CacheService class)."""
 
 import hashlib
 import json
@@ -21,20 +16,14 @@ logger = logging.getLogger("api.access")
 def normalise_target_host(host: Optional[str]) -> Optional[str]:
     """Canonicalise a target host for keying and host-restriction checks.
 
-    DNS names are case-insensitive and ``:443`` is the implicit HTTPS
-    default (every proxied provider is HTTPS-only), so ``API.Host:443`` and
-    ``api.host`` are the same endpoint and should share one cache entry and
-    pass the same host-restriction check. Only ``:443`` is stripped — any
-    other explicit port is preserved as a distinct endpoint.
+    DNS is case-insensitive and ``:443`` is the implicit HTTPS default (all
+    proxied providers are HTTPS), so ``API.Host:443`` and ``api.host`` are one
+    endpoint; only ``:443`` is stripped, any other port is kept distinct.
 
     Used by BOTH :meth:`CacheService.generate_cache_key` and
-    ``auth_service.validate_and_extract_api_key`` so the cache can never
-    admit a host variant the validator would reject (they must stay in
-    lockstep — normalising only the cache key would let a cache hit bypass
-    a stricter miss-path check).
-
-    ``None`` (and ``""``) pass through unchanged so "no host" keeps its
-    meaning.
+    ``validate_and_extract_api_key`` — they must stay in lockstep, else a cache
+    hit could admit a host the miss-path validator would reject. ``None``/``""``
+    pass through unchanged.
     """
     if not host:
         return host
@@ -45,15 +34,11 @@ def normalise_target_host(host: Optional[str]) -> Optional[str]:
 
 
 class CacheService:
-    """
-    Service for caching and retrieving authentication responses.
-
-    This service is responsible for managing the caching of authentication
-    responses, including API keys and principal information, in Redis.
+    """Caches and retrieves authentication responses in Redis.
 
     Attributes:
-        state_service: The service providing access to Redis
-        cache_duration: How long to cache entries (in seconds)
+        state_service: The service providing access to Redis.
+        cache_duration: How long to cache entries (seconds).
     """
 
     def __init__(self, state_service: Optional[StateService] = None):
@@ -66,21 +51,16 @@ class CacheService:
     ) -> str:
         """Hash payload + target_host into a Redis-safe cache key.
 
-        ``target_host`` MUST be included: the secret carries an optional
-        ``host`` restriction that ``validate_and_extract_api_key`` enforces
-        on cache-miss. Without ``target_host`` in the key, a bearer authorised
-        for provider A could re-use a cached api_key when sent through a
-        proxy fronting provider B — silently bypassing host enforcement.
+        ``target_host`` MUST be included: without it, a bearer authorised for
+        provider A could reuse a cached api_key through a proxy fronting
+        provider B, bypassing the host restriction
+        ``validate_and_extract_api_key`` enforces on miss.
 
-        The two components are hashed independently before the outer hash
-        (rather than joined with a delimiter) so no (host, payload) pair can
-        collide with another by shifting bytes across an unescaped separator
-        — e.g. ``("a:b", "c")`` vs ``("a", "b:c")`` under a naive
-        ``f"{host}:{payload}"`` scheme. The host is normalised (lower-case,
-        default ``:443`` stripped) so equivalent hosts share one entry; the
-        same normalisation is applied to the miss-path host-restriction
-        check in ``validate_and_extract_api_key``, keeping the fail-closed
-        recheck consistent with the key.
+        The two components are hashed independently (not joined with a
+        delimiter) so no (host, payload) pair can collide by shifting bytes
+        across a separator — e.g. ``("a:b","c")`` vs ``("a","b:c")``. Host is
+        normalised as in the miss-path check, keeping key and recheck
+        consistent.
         """
         host_component = normalise_target_host(target_host) or ""
         composite = (
@@ -124,9 +104,8 @@ class CacheService:
                 principal_info=principal_info,
             )
         except json.JSONDecodeError as e:
-            # JSONDecodeError repr includes the offending document snippet,
-            # which here is a cached auth response containing the upstream
-            # API key. Log only the exception class name.
+            # The repr includes the offending document — here a cached auth
+            # response with the upstream API key. Log only the class name.
             logger.error("Error decoding cached data: %s", type(e).__name__)
             return None
         except Exception as e:
@@ -152,7 +131,7 @@ class CacheService:
                 ttl_seconds if ttl_seconds is not None else self.cache_duration
             )
 
-            # Skip caching if TTL is 0 or negative (credentials already expired)
+            # Skip caching when TTL <= 0 (credentials already expired).
             if effective_ttl <= 0:
                 logger.info(
                     f"Skipping cache for principal {auth_result.principal_info.arn}: "
@@ -186,14 +165,13 @@ class CacheService:
             raise CacheError(f"Failed to store in cache: {type(e).__name__}")
 
     async def flush_all(self) -> bool:
-        """
-        Flush the entire auth cache.
+        """Flush the entire auth cache.
 
         Returns:
-            True if successfully flushed, False on error.
+            True if flushed, False on error.
 
         Raises:
-            CacheError: If there's an error flushing the cache.
+            CacheError: If flushing fails.
         """
         client = await self.state_service.acquire_redis_connection()
         if not client:
@@ -209,10 +187,5 @@ class CacheService:
             raise CacheError(f"Failed to flush cache: {type(e).__name__}")
 
     async def health_check(self) -> bool:
-        """
-        Check if Redis cache is available.
-
-        Returns:
-            True if Redis is available, False otherwise.
-        """
+        """Check if the Redis cache is available."""
         return await self.state_service.health_check()

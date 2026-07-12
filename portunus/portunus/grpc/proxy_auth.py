@@ -1,10 +1,9 @@
 """Pre-shared-key check for Envoy proxy → Portunus gRPC calls.
 
-Envoy injects ``x-portunus-proxy-key`` (and ``x-portunus-target-host``)
-via gRPC ``initial_metadata`` on each filter config. Reading from
-``invocation_metadata`` is forgery-resistant because clients cannot
-reach the gRPC channel. Empty expected key disables validation
-(tests only).
+Envoy injects ``x-portunus-proxy-key`` (and ``x-portunus-target-host``) via gRPC
+``initial_metadata``. Reading from ``invocation_metadata`` is forgery-resistant
+because clients cannot reach the gRPC channel. An empty expected key disables
+validation (tests only).
 """
 
 from __future__ import annotations

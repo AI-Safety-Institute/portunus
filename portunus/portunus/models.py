@@ -117,9 +117,9 @@ def _eventstream_payload_to_sse_line(payload: bytes) -> Optional[str]:
             "Skipping malformed eventstream message: %s", exc.__class__.__name__
         )
         return None
-    # Re-parse + dict check is the SSE-injection guard: rejects non-object
-    # inners, and inners whose strings contain literal control chars (RFC 8259
-    # forbids those). Re-serializing keeps each SSE event on one data line.
+    # SSE-injection guard: reject non-object inners and inners with literal
+    # control chars (forbidden by RFC 8259); re-serializing keeps each SSE
+    # event on one data line.
     try:
         inner = json.loads(inner_str)
     except json.JSONDecodeError:
@@ -132,27 +132,22 @@ def _eventstream_payload_to_sse_line(payload: bytes) -> Optional[str]:
 def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
     r"""Unwrap eventstream framing into SSE ``data: {...}\n`` lines.
 
-    Framing is parsed by botocore's ``EventStreamBuffer`` (the same code path
-    boto3 uses for Bedrock streaming), so prelude/header/CRC handling isn't
-    rolled by hand here. One SSE line per inner ``bytes`` event; non-``bytes``
-    messages are skipped (see ``_eventstream_payload_to_sse_line``).
+    Framing is parsed by botocore's ``EventStreamBuffer`` (the same path boto3
+    uses for Bedrock streaming). One SSE line per inner ``bytes`` event;
+    non-``bytes`` messages are skipped (see ``_eventstream_payload_to_sse_line``).
 
-    Returns None to signal a decode failure (the caller maps that to
-    ``response_body_decode_failure``). That happens when no complete message
-    could be parsed, *and* when the body ends in a truncated (incomplete)
-    trailing frame -- see the truncation guard below. A non-None result means
-    every input byte was accounted for by a complete frame.
+    Returns None on decode failure (caller maps to
+    ``response_body_decode_failure``): when no complete message parsed, or when
+    the body ends in a truncated trailing frame (see truncation guard below).
+    A non-None result means every input byte was in a complete frame.
 
-    Distinct from truncation: a ``ParserError`` from a corrupt frame *after*
-    at least one message has parsed (e.g. a mid-stream CRC mismatch) is
-    best-effort -- the events recovered before it are returned rather than
-    discarding the whole body. CRCs are validated by botocore; a mismatch
-    mid-stream is non-fatal for that reason.
+    A ``ParserError`` from a corrupt frame *after* at least one message parsed
+    (e.g. mid-stream CRC mismatch, which botocore validates) is best-effort:
+    events recovered before it are returned rather than discarding the body.
     """
-    # Lazy-loaded per this module's convention (see module docstring): keep
-    # `import portunus.models` free of third-party imports. botocore itself is
-    # always present in both run targets (the service depends on it; Glue
-    # preinstalls boto3).
+    # Lazy import per module convention: keep `import portunus.models` free of
+    # third-party imports. botocore is present in both run targets (service
+    # depends on it; Glue preinstalls boto3).
     from botocore.eventstream import EventStreamBuffer, ParserError
 
     buffer = EventStreamBuffer()
@@ -164,10 +159,9 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         for message in buffer:
             parsed_any = True
             # total_length spans the whole on-wire frame (prelude + headers +
-            # payload + both CRCs), so accumulating it tracks exactly how many
-            # input bytes complete frames have consumed -- the basis for the
-            # truncation guard below. (botocore-stubs mistypes ``prelude`` as
-            # ``int`` rather than ``MessagePrelude``; hence the attr ignore.)
+            # payload + both CRCs), so the running sum tracks bytes consumed by
+            # complete frames — the basis for the truncation guard below.
+            # (botocore-stubs mistypes ``prelude`` as ``int``; hence the ignore.)
             consumed += message.prelude.total_length  # type: ignore[attr-defined]
             line = _eventstream_payload_to_sse_line(message.payload)
             if line is not None:
@@ -176,10 +170,10 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         if not parsed_any:
             logger.warning("eventstream parse failed: %s", exc.__class__.__name__)
             return None
-        # A corrupt frame after a valid prefix (e.g. CRC mismatch): keep the
-        # events decoded so far. This is NOT the truncation path -- the guard
-        # below must not run here, since an unparsed corrupt frame also leaves
-        # a residual but is deliberately recovered as a partial success.
+        # Corrupt frame after a valid prefix (e.g. CRC mismatch): keep events
+        # decoded so far. NOT the truncation path — a corrupt frame also leaves
+        # a residual, but is deliberately recovered as a partial success, so
+        # the guard below must not run here.
         logger.warning(
             "eventstream corrupt after %d message(s), keeping partial: %s",
             len(sse_lines),
@@ -188,15 +182,13 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         return "".join(sse_lines)
     if not parsed_any:
         return None
-    # Truncation guard (silent-failure fix). botocore's EventStreamBuffer ends
-    # iteration with a bare StopIteration the instant the remaining bytes are
-    # too few to form the next complete frame -- indistinguishable, to the
-    # `for` loop, from a clean end of stream. So a truncated trailing frame
-    # (client disconnect, upstream reset, idle timeout, body-size cap) looked
-    # like success and silently dropped the token-bearing tail (Anthropic's
-    # usage.output_tokens live in the near-final message_delta). Detect it via
-    # the one observable difference: complete frames account for every input
-    # byte, so any residual is an incomplete tail -> mark a decode failure.
+    # Truncation guard. botocore's EventStreamBuffer ends iteration with a bare
+    # StopIteration the instant the remaining bytes are too few for the next
+    # complete frame — indistinguishable from a clean end of stream. So a
+    # truncated trailing frame (disconnect, reset, timeout, body-size cap) looks
+    # like success and silently drops the token-bearing tail (Anthropic's
+    # usage.output_tokens live in the near-final message_delta). Complete frames
+    # account for every input byte, so any residual is an incomplete tail.
     residual = len(body_bytes) - consumed
     if residual > 0:
         logger.warning(
@@ -241,10 +233,9 @@ def _decompress_b64_body(
             except (zlib.error, EOFError):
                 return None, True
         elif "br" in encoding:
-            # Brotli is not stdlib (unlike gzip/zlib). The service declares
-            # it as a dependency, but this module also ships standalone to
-            # Glue, whose base image may lack it — degrade to a
-            # decode-failure rather than crash.
+            # Brotli is not stdlib; the service depends on it, but this module
+            # also ships standalone to Glue whose base image may lack it —
+            # degrade to a decode-failure rather than crash.
             try:
                 import brotli  # type: ignore[import-untyped,import-not-found]
             except ImportError:
@@ -268,15 +259,7 @@ def _decompress_b64_body(
 
 @dataclass
 class AwsCredentials:
-    """AWS credential object containing access keys and optional session token.
-
-    Attributes:
-        access_key_id (str): AWS access key ID
-        secret_access_key (str): AWS secret access key
-        session_token (Optional[str]): Optional AWS session token for temporary
-                                       credentials
-        expiration (Optional[datetime]): When credentials expire (UTC)
-    """
+    """AWS credentials: access keys, optional session token, expiration (UTC)."""
 
     access_key_id: str
     secret_access_key: str
@@ -309,15 +292,13 @@ class AwsCredentials:
             return None
 
         try:
-            # Parse ISO-8601 timestamp (handles various formats including Z suffix)
             dt = datetime.fromisoformat(expiration_str.replace("Z", "+00:00"))
-            # Ensure it's in UTC
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except (ValueError, TypeError):
-            # ``expiration_str`` is customer-controlled (from the base64-JSON
-            # bearer payload). Don't log its content — log-injection vector.
+            # ``expiration_str`` is customer-controlled (base64-JSON bearer
+            # payload); don't log its content — log-injection vector.
             logger.warning("Could not parse credential expiration string")
             return None
 
@@ -380,14 +361,7 @@ class AwsCredentials:
 
 @dataclass
 class AuthPayload:
-    """Authorization payload containing AWS credentials and a secret ARN.
-
-    Attributes:
-        raw (str): JSON string of AWS credentials
-        credentials (AwsCredentials): Parsed AWS credentials
-        secret_arn (str): ARN of the secret to retrieve
-        target_host (Optional[str]): Expected target host for validation
-    """
+    """Authorization payload containing AWS credentials and a secret ARN."""
 
     raw: str
     "Used for cache key generation to allow for forward compatible cache busting"
@@ -406,12 +380,10 @@ class AuthPayload:
     def from_contents(
         cls, raw_payload: str, target_host: Optional[str] = None
     ) -> "AuthPayload":
-        """
-        Create an AuthPayload from a base64 encoded payload.
+        """Create an AuthPayload from a base64-encoded payload.
 
-        The proxy removes the Bearer prefix before sending this payload. The payload
-        is expected to be a base64-encoded JSON string containing "credentials" and
-        "secret_arn" fields.
+        The proxy removes the Bearer prefix first. The payload is a base64-encoded
+        JSON string with "credentials" and "secret_arn" fields.
 
         Args:
             raw_payload (str): Base64-encoded payload string
@@ -428,7 +400,6 @@ class AuthPayload:
 
         try:
             decoded_payload = decode_payload(raw_payload)
-            # Check for required fields
             if not isinstance(decoded_payload, dict):
                 raise PayloadError("Invalid payload format")
 
@@ -442,23 +413,19 @@ class AuthPayload:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
         except Exception as e:
-            # Never include raw_payload in the message: the base64 blob
-            # contains temporary AWS credentials and would surface in error
-            # responses, structured logs, and Envoy access logs. The `from e`
-            # chain preserves the underlying decode error for debugging.
+            # Never include raw_payload in the message: the base64 blob holds
+            # temporary AWS credentials that would surface in error responses,
+            # logs, and Envoy access logs. `from e` keeps the decode error for
+            # debugging.
             msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
 
 
 @dataclass
 class PrincipalInfo:
-    """Principal identity information extracted from AWS ARN.
+    """Principal identity extracted from an AWS ARN.
 
-    Attributes:
-        account_id (str): The AWS account ID
-        principal (Optional[str]): The principal type and name
-        session_name (Optional[str]): The session name if present
-        project (str): The project name extracted from UserProfile_ roles
+    ``project`` is derived from ``UserProfile_`` roles.
     """
 
     arn: str = "unknown"
@@ -501,11 +468,10 @@ class PrincipalInfo:
 
 
 class SecretsManagerAuthPayload(BaseModel):
-    """
-    AWS SecretsManager payload for our proxy api keys.
+    """AWS SecretsManager payload for our proxy API keys.
 
-    Each api key secret is either a simple string consisting entirely of the api key,
-    or a json payload in this format
+    Each secret is either a plain string (the whole API key) or a JSON payload
+    in this shape.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -526,8 +492,8 @@ class SecretsManagerAuthPayload(BaseModel):
             return cls.model_validate(secret_data)
         except ValidationError:
             # Do NOT pass exc_info — pydantic ValidationError formats the
-            # offending input fields verbatim, which on this path is the
-            # raw secret JSON (upstream provider API key).
+            # offending input verbatim, which here is the raw secret JSON
+            # (upstream provider API key).
             logger.info("JSON secret with unrecognised schema, using JSON as API key")
             return cls(api_key=input)
 
@@ -547,12 +513,7 @@ class SigningKey:
 
 @dataclass
 class AuthResult:
-    """Result of an authentication operation.
-
-    Attributes:
-        api_key (str): The API key retrieved from Secrets Manager
-        principal_info (PrincipalInfo): Information about the authenticated principal
-    """
+    """Result of an authentication operation."""
 
     api_key: str
     signing_key: Optional[SigningKey]
@@ -690,29 +651,24 @@ class RequestHeadersRecord:
 class RequestBodyRecord:
     """One chunk of a request body. ``body`` is base64; ETL concatenates by chunk_id.
 
-    ``num_chunks=0`` is the per-chunk wire format where Glue derives the
-    total at aggregation time via ``count_("*")``.
+    ``num_chunks=0`` is the per-chunk wire format where Glue derives the total
+    at aggregation via ``count(*)``.
 
-    ``dropped=True`` is a sentinel record marking a chunk that the
-    publish queue could not accept under backpressure — ``body`` and
-    ``body_size`` are empty / zero. Downstream ETL must treat the
-    reassembled body as incomplete when any sentinel is present rather
-    than treating chunk_id gaps as absence-of-data.
+    ``dropped=True`` is a sentinel for a chunk the publish queue rejected under
+    backpressure (``body``/``body_size`` empty/zero). ETL must treat a
+    reassembled body with any sentinel as incomplete, not read chunk_id gaps as
+    absence-of-data.
 
-    ``truncated=True`` marks a chunk whose payload was capped by an
-    upstream safety limit (currently only the WS deflate decompression
-    cap in ``frame_observer.py``). The body bytes present are real but
-    incomplete vs. the wire.
+    ``truncated=True`` marks a chunk capped by an upstream safety limit
+    (currently only the WS deflate decompression cap in ``frame_observer.py``):
+    the bytes present are real but incomplete vs. the wire.
 
     ``final_chunk=True`` marks the terminal chunk of a streamed
-    (``num_chunks=0``) ext_proc body — the chunk emitted with Envoy's
-    ``end_of_stream`` set. It is the explicit end-of-body marker the
-    sentinel wire format otherwise lacks: without it the ETL derives the
-    total as ``count(*)``, so a dropped/late *trailing* chunk is invisible
-    (the surviving ids stay contiguous and match the count) and a
-    silently-partial body gets written. The declared (buffered) path
-    stamps the real total on every chunk and doesn't need this, so it
-    leaves it ``False``.
+    (``num_chunks=0``) ext_proc body (Envoy's ``end_of_stream``) — the explicit
+    end-of-body marker the ``count(*)`` scheme otherwise lacks, so a lost
+    *trailing* chunk (surviving ids stay contiguous and match the count) can be
+    detected. The declared/buffered path stamps the real total per chunk and
+    leaves this ``False``.
     """
 
     request_id: str
@@ -724,13 +680,9 @@ class RequestBodyRecord:
     published_at: str
     dropped: bool = False
     truncated: bool = False
-    # True only on the terminal chunk of a streamed (``num_chunks=0``)
-    # ext_proc body — the chunk carrying Envoy's ``end_of_stream``. Lets the
-    # ETL detect a lost trailing chunk that would otherwise be undetectable.
     final_chunk: bool = False
-    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS
-    # frames by (request_id, frame_index) to reassemble per-frame and to
-    # disambiguate otherwise-identical frames.
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS frames
+    # by (request_id, frame_index) to reassemble and disambiguate frames.
     frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -871,13 +823,9 @@ class ResponseBodyRecord:
     published_at: str
     dropped: bool = False
     truncated: bool = False
-    # True only on the terminal chunk of a streamed (``num_chunks=0``)
-    # ext_proc body — the chunk carrying Envoy's ``end_of_stream``. Lets the
-    # ETL detect a lost trailing chunk that would otherwise be undetectable.
     final_chunk: bool = False
-    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS
-    # frames by (request_id, frame_index) to reassemble per-frame and to
-    # disambiguate otherwise-identical frames.
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS frames
+    # by (request_id, frame_index) to reassemble and disambiguate frames.
     frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -972,10 +920,9 @@ class WSSummaryRecord:
     server_ping_frames: int = 0
     server_pong_frames: int = 0
     server_close_frames: int = 0
-    # Audit-integrity counters: how many frames were lost to publish-queue
-    # backpressure or capped by the deflate decompression limit. Per-frame
-    # records also carry ``dropped`` / ``truncated`` sentinels; these are
-    # the cheap aggregate view downstream analytics can join on without
+    # Audit-integrity counters: frames lost to publish-queue backpressure or
+    # capped by the deflate decompression limit. A cheap aggregate of the
+    # per-frame ``dropped`` / ``truncated`` sentinels, joinable without
     # scanning the body stream.
     dropped_client_frames: int = 0
     dropped_server_frames: int = 0
@@ -1038,27 +985,23 @@ class WSSummaryRecord:
 
 @dataclass
 class JoinedLogRecord:
-    """Joined log record combining all streams for analysis.
+    """Joined log record: output of the Glue ETL job (process_raw_data.py).
 
-    This record represents the output of the Glue ETL job (process_raw_data.py) that
-    joins all log streams (metadata, request headers/body, response headers/body)
-    by request_id using INNER joins. Only complete transactions with all streams
-    present are included in the output.
+    INNER-joins all streams (metadata, request/response headers/body) by
+    request_id, so only complete transactions appear. Schema is generated
+    dynamically from the source schemas: metadata timestamp is the canonical
+    (unprefixed) timestamp, other streams get ``<stream>_`` prefixes, internal
+    fields (record_type, non-metadata published_at) are dropped, and ETL
+    metadata (etl_processed_at, partition columns) is added.
 
-    The schema is generated dynamically from the source record schemas by:
-    1. Using metadata timestamp as the canonical timestamp (unprefixed)
-    2. Adding stream-specific prefixes (metadata_, request_headers_, request_body_...)
-    3. Dropping internal fields (record_type, published_at from non-metadata streams)
-    4. Adding ETL metadata (etl_processed_at, partition columns)
+    Limitations:
+    - Incomplete transactions (missing any stream) are excluded.
+    - Trailers are not included.
+    - Responses arriving more than MINUTES_TO_PROCESS after the request may be
+      filtered out, yielding incomplete transactions.
 
-    IMPORTANT LIMITATIONS:
-    - Incomplete transactions (missing any stream) are excluded
-    - Trailers are currently not included in the joined data
-    - Response timing: responses arriving more than MINUTES_TO_PROCESS after requests
-      may be filtered out and cause incomplete transactions
-
-    All body data remains base64-encoded. Raw header dictionaries remain as maps of
-    base64-encoded values. Individual header fields are decoded for convenience.
+    Body data and raw header maps stay base64-encoded; individual header fields
+    are decoded for convenience.
     """
 
     # Core request metadata (from MetadataRecord)
@@ -1250,11 +1193,7 @@ class JoinedLogRecord:
 
     @classmethod
     def partition_keys(cls) -> List[Dict[str, str]]:
-        """Return Glue partition key schema for partitioning by timestamp.
-
-        These columns are derived from the timestamp field during ETL processing
-        and used for efficient Athena queries. They are kept separate from the
-        main data schema since they are computed fields used for data organization.
+        """Return Glue partition key schema (columns derived from timestamp during ETL).
 
         Returns:
             List of partition key definitions (name, type pairs) in Glue format
@@ -1270,8 +1209,6 @@ class JoinedLogRecord:
     def partition_key_names(cls) -> List[str]:
         """Return just the partition column names.
 
-        Convenience method for filtering, SQL generation, Spark operations, etc.
-
         Returns:
             List of partition column names
         """
@@ -1279,24 +1216,17 @@ class JoinedLogRecord:
 
     @classmethod
     def partition_path_from_datetime(cls, dt, zero_pad: bool = False) -> str:
-        """Build S3 partition path string from a datetime.
+        """Build an S3 partition path (year=/month=/day=/hour=) from a datetime.
 
-        Returns path in format: year=YYYY/month=M/day=D/hour=H/ (or zero-padded if
-        requested)
-
-        IMPORTANT: Two different systems use different padding formats:
-        - Spark (OUTPUT): Non-zero-padded (month=4) - default for this method
-        - Kinesis Firehose (INPUT): Zero-padded (month=04) - use zero_pad=True
-
-        Kinesis Firehose uses zero-padding because it extracts partition values from
-        ISO timestamp strings. Spark uses integer columns which write without padding.
+        Padding differs by system and must match the writer:
+        - Spark (OUTPUT, default): non-padded (month=4) — integer columns.
+        - Kinesis Firehose (INPUT, zero_pad=True): zero-padded (month=04) —
+          extracted from ISO timestamp strings.
 
         Args:
             dt: Datetime to extract partition values from
-            zero_pad: If True, zero-pad month/day/hour to 2 digits
-                      (for Kinesis Firehose).
-                      If False (default), use Spark's non-padded format
-                      (for OUTPUT data).
+            zero_pad: Zero-pad month/day/hour to 2 digits (Firehose) if True;
+                      else Spark's non-padded format (default).
 
         Returns:
             S3 partition path string
@@ -1321,9 +1251,7 @@ class JoinedLogRecord:
 
     @classmethod
     def partition_column_expression(cls, column: str) -> str:
-        """Return Spark SQL expression to extract partition column from timestamp.
-
-        Used in ETL jobs to derive partition columns from the main timestamp field.
+        """Return Spark SQL expression to extract a partition column from timestamp.
 
         Args:
             column: Partition column name (year, month, day, hour)

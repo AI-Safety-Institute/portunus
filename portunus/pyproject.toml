@@ -30,8 +30,7 @@ dependencies = [
     "grpcio-health-checking>=1.66.0,<2",
     "grpcio-reflection>=1.66.0,<2",
     # orjson on the publish hot path — every Firehose record goes through
-    # ``orjson.dumps`` (3-5x faster than stdlib json on dict-heavy payloads),
-    # which adds up at 5+ records per HTTP request × N req/s/pod.
+    # ``orjson.dumps``.
     "orjson>=3.10.0,<4",
     # wsproto: sans-IO WebSocket frame parsing in the ext_proc Process
     # service. ``FrameObserver`` wraps ``wsproto.Connection`` to recover
@@ -59,8 +58,7 @@ dev = [
 
 [project.scripts]
 portunus = "portunus.cli:main"
-# Process entrypoint for the gRPC server (the whole Portunus runtime now that
-# FastAPI is gone). Used by the container CMD.
+# Process entrypoint for the gRPC server. Used by the container CMD.
 portunus-server = "portunus.grpc.server:main"
 
 [tool.hatch.build.targets.sdist]

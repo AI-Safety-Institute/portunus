@@ -44,21 +44,19 @@ class ObservedFrame:
     truncated: bool = False
 
 
-# Zip-bomb cap: permessage-deflate can hit 1000:1 ratios on repetitive
-# text. 16 MiB is comfortably above realistic WS payloads.
+# Zip-bomb cap: permessage-deflate can hit 1000:1 ratios on repetitive text.
+# 16 MiB is comfortably above realistic WS payloads.
 MAX_DECOMPRESSED_PAYLOAD_BYTES = 16 * 1024 * 1024
 
 
 class _CappedPerMessageDeflate(PerMessageDeflate):
     """``PerMessageDeflate`` with a per-message inflated-byte cap.
 
-    Stock wsproto calls ``zlib.decompressobj.decompress(data)`` with no
-    ``max_length`` — a hostile frame at a 1000:1 ratio can allocate
-    hundreds of megabytes before the post-hoc ``_capped`` check fires.
-    This subclass uses ``max_length`` on every decompress call and
-    tracks cumulative inflated bytes for the current message; when the
-    cap is exceeded, it returns ``CloseReason.MESSAGE_TOO_BIG`` so
-    wsproto aborts the frame rather than buffering more.
+    Stock wsproto calls ``decompress(data)`` with no ``max_length``, so a
+    hostile 1000:1 frame can allocate hundreds of MB before any post-hoc check
+    fires. This subclass passes ``max_length`` on every decompress call and
+    tracks cumulative inflated bytes; over the cap it returns
+    ``CloseReason.MESSAGE_TOO_BIG`` so wsproto aborts the frame.
     """
 
     def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -78,8 +76,8 @@ class _CappedPerMessageDeflate(PerMessageDeflate):
             return CloseReason.INVALID_FRAME_PAYLOAD_DATA
         self._inflated_in_message += len(inflated)
         if self._decompressor.unconsumed_tail:
-            # Cap fired — wsproto would otherwise re-feed this on the
-            # next call, ballooning memory. Abort the connection.
+            # Cap fired; wsproto would re-feed the tail next call, ballooning
+            # memory. Abort the connection.
             return CloseReason.MESSAGE_TOO_BIG
         return inflated
 
@@ -100,11 +98,10 @@ def _negotiated_deflate(extensions_header: Optional[str]) -> bool:
 def _make_finalized_deflate(extensions_header: str) -> "PerMessageDeflate":
     """Build a capped :class:`PerMessageDeflate` already in the enabled state.
 
-    Workaround for a wsproto quirk: when we instantiate ``Connection``
-    directly in OPEN state, the handshake state machine never runs, so
-    ``PerMessageDeflate._enabled`` stays False and every RSV1 frame is
-    rejected as "Reserved bit set unexpectedly". Calling ``finalize()``
-    with the negotiated params flips ``_enabled`` true.
+    Workaround for a wsproto quirk: instantiating ``Connection`` directly in
+    OPEN state skips the handshake, so ``PerMessageDeflate._enabled`` stays
+    False and every RSV1 frame is rejected ("Reserved bit set unexpectedly").
+    Calling ``finalize()`` with the negotiated params flips ``_enabled`` true.
     """
     ext = _CappedPerMessageDeflate()
     ext.finalize(extensions_header)
@@ -117,7 +114,7 @@ def build_observer(
 ) -> "FrameObserver":
     """Construct a :class:`FrameObserver` for the negotiated extensions."""
     deflate = _negotiated_deflate(response_extensions_header)
-    # zlib state is per-direction; each direction owns its own extension.
+    # zlib state is per-direction; each direction gets its own extension.
     extensions_req: list = (
         [_make_finalized_deflate(response_extensions_header or "")] if deflate else []
     )
@@ -145,12 +142,10 @@ class FrameObserver:
     ) -> None:
         self._request = request_conn
         self._response = response_conn
-        # Once a direction's parser fails (malformed frame, deflate-cap
-        # CloseReason surfacing as ParseFailed), its wsproto state is
-        # desynced: nothing later in that direction can be parsed. The flag
-        # lets the caller record the loss ONCE (per-direction truncated
-        # counter on the WS summary) instead of silently reporting clean
-        # counts for a session that stopped being observed.
+        # Once a direction's parser fails (malformed frame, or deflate-cap
+        # CloseReason surfacing as ParseFailed) its wsproto state is desynced and
+        # nothing later in that direction parses. The flag lets the caller record
+        # the loss ONCE (per-direction truncated counter on the WS summary).
         self._desynced: dict[Direction, bool] = {
             Direction.REQUEST: False,
             Direction.RESPONSE: False,
@@ -161,8 +156,8 @@ class FrameObserver:
         return self._desynced[direction]
 
     def _mark_desynced(self, direction: Direction, detail: str) -> None:
-        # wsproto error messages can echo offending frame bytes —
-        # log exception class names / short reasons only.
+        # wsproto error messages can echo frame bytes — log class names / short
+        # reasons only.
         self._desynced[direction] = True
         logger.warning(
             "WS frame parser failed on %s direction (%s); remaining "
@@ -179,10 +174,10 @@ class FrameObserver:
     ) -> Iterator[ObservedFrame]:
         """Feed a raw byte chunk in one direction and yield observed frames.
 
-        A parse error (or the deflate zip-bomb cap firing) stops observation
-        for that direction rather than killing the stream; frames decoded
-        before the poison byte are still yielded. Callers should check
-        :meth:`desynced` after the call to account the loss.
+        A parse error (or the deflate zip-bomb cap firing) stops observation for
+        that direction rather than killing the stream; frames decoded before the
+        failure are still yielded. Callers should check :meth:`desynced`
+        afterwards to account the loss.
         """
         if self._desynced[direction]:
             return
@@ -193,17 +188,14 @@ class FrameObserver:
             self._mark_desynced(direction, type(e).__name__)
             return
 
-        # ``conn.events()`` swallows ParseFailed (malformed frame or the
-        # deflate-cap CloseReason) and SYNTHESIZES a CloseConnection event —
-        # without transitioning the connection state, unlike a genuine wire
-        # close frame which moves it to REMOTE_CLOSING before yielding.
-        # A CloseConnection while the state is still OPEN is therefore a
-        # parse failure, not a peer close: mark the direction desynced and
-        # do NOT emit it as an observed close frame (it never existed on the
-        # wire — recording it would corrupt close_code/close-count audit).
-        # Other errors (and future wsproto changes) could still raise here,
-        # so the iterator is stepped manually and a mid-stream failure still
-        # yields the frames parsed before it.
+        # ``conn.events()`` swallows ParseFailed (malformed frame or deflate-cap
+        # CloseReason) and SYNTHESIZES a CloseConnection without transitioning
+        # state — unlike a genuine wire close, which moves to REMOTE_CLOSING
+        # first. So a CloseConnection while state is still OPEN is a parse
+        # failure, not a peer close: mark desynced and do NOT emit it as a close
+        # frame (it never existed on the wire; recording it would corrupt
+        # close_code / close-count audit). Step the iterator manually so other
+        # errors still raise and frames parsed before a failure are yielded.
         events_iter = conn.events()
         while True:
             try:

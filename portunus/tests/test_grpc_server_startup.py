@@ -10,11 +10,9 @@ from portunus.grpc.server import start_grpc_server
 
 
 def _configured_firehose() -> FirehoseConfig:
-    """A FirehoseConfig with every required stream set.
+    """A FirehoseConfig with every required stream set, so the audit guard.
 
-    These tests exercise the proxy-key / message-limit checks, so the audit
-    fail-fast guard must pass; the Firehose guard itself is covered in
-    ``test_firehose_config_guard.py``.
+    passes and these tests can exercise the proxy-key / message-limit checks.
     """
     return FirehoseConfig(
         metadata_stream_name="metadata",
@@ -32,9 +30,8 @@ class _FakeAuthService:
 
 
 class _FakePublishService:
-    """Minimal stand-in for PublishService.
+    """Minimal stand-in: ``put_record_batch`` is wired as the queue's.
 
-    ``start_grpc_server`` wires ``put_record_batch`` as the queue's
     batch_sender, so it must exist.
     """
 
@@ -49,12 +46,7 @@ def test_grpc_message_limit_has_signed_body_headroom():
 
 @pytest.mark.asyncio
 async def test_enabled_with_empty_key_and_optional_unset_raises_runtimeerror():
-    """Production guard: empty key with optional=False refuses to start.
-
-    The check fires before the server binds a port, so callers learn
-    of the misconfiguration immediately rather than later when a real
-    Envoy fails ``PERMISSION_DENIED`` on every call.
-    """
+    """Empty key with optional=False refuses to start, before binding a port."""
     config = GrpcConfig(
         enabled=True,
         proxy_api_key="",
@@ -73,9 +65,8 @@ async def test_enabled_with_empty_key_and_optional_unset_raises_runtimeerror():
 async def test_enabled_with_short_key_raises_runtimeerror():
     """A configured-but-trivial key (< 16 bytes) fails the boot floor.
 
-    ``GRPC_PROXY_API_KEY="x"`` passes the empty-key guard while providing
-    no real channel-identity gate — a fat-fingered placeholder must fail
-    at boot, not in a security review.
+    Such a key passes the empty-key guard but is no real identity gate, so a
+    fat-fingered placeholder must fail at boot.
     """
     config = GrpcConfig(
         enabled=True,

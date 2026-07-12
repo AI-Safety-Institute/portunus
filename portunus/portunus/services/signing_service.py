@@ -25,12 +25,11 @@ class SignableRequest(BaseModel):
     """Request model for signature generation.
 
     Attributes:
-        url: Full URL of the request to be signed.
-             If the sent request is different in any way, including query or hash
-             parameters, the signature will be rejected.
-        method: HTTP method of the request to be signed
-        content_type: Content-Type of the request body
-        content_digest: Digest of the request body
+        url: Full URL to sign; any difference (incl. query/fragment) in the
+            sent request rejects the signature.
+        method: HTTP method to sign.
+        content_type: Content-Type of the request body.
+        content_digest: Digest of the request body.
     """
 
     type: Literal["anthropic"]
@@ -52,10 +51,9 @@ SignatureHeaders = TypedDict(
 class SigningOverloadedError(Exception):
     """Raised when the signing concurrency cap stayed saturated too long.
 
-    Callers should fail closed (deny the request — ideally 503) rather than
-    queue further: each waiting signing request pins its buffered body (up
-    to 32 MiB, Envoy ``with_request_body``) in memory, so shedding promptly
-    is what keeps a signing burst from exhausting memory.
+    Callers must fail closed (deny, ideally 503) rather than queue: each waiter
+    pins its buffered body (up to 32 MiB, Envoy ``with_request_body``), so
+    prompt shedding is what stops a signing burst exhausting memory.
     """
 
 
@@ -73,12 +71,10 @@ def _signing_settings() -> tuple[int, int, float]:
     )
 
 
-# Dedicated executor for KMS.Sign so signing throughput is bounded by an
-# explicit knob, not the process-default ``asyncio.to_thread`` pool
-# (~min(32, cpu+4) threads shared with every other to_thread user): with a
-# slow KMS tail, signing bursts queue behind that tiny shared pool and
-# stack latency toward the 15s ext_authz signing timeout (customer 504s).
-# Threads are process-wide; the semaphore below is per event loop.
+# Dedicated executor for KMS.Sign so signing throughput has an explicit knob,
+# not the shared process-default to_thread pool (~min(32, cpu+4) threads) that
+# a slow KMS tail would back up toward the 15s ext_authz timeout. Threads are
+# process-wide; the semaphore below is per event loop.
 _kms_executor: Optional[ThreadPoolExecutor] = None
 _signing_semaphores: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Semaphore
@@ -124,23 +120,15 @@ async def sign_request_async(
 ) -> SignatureHeaders:
     """Bounded, off-loop signing: the async entrypoint for the signing pass.
 
-    Wraps a synchronous signer (:func:`sign_request` by default; servicer
-    tests inject fakes via ``sign_fn``) with the two bounds a signing burst
-    needs:
-
-    1. A per-event-loop semaphore capping concurrent signing requests.
-       Waiters that can't acquire within the timeout are shed with
-       :class:`SigningOverloadedError` (fail closed) instead of piling up —
-       each waiter pins its buffered request body (32 MiB Envoy buffer +
-       the CheckRequest copy here), so unbounded waiting is a memory
-       exhaustion vector.
-    2. A dedicated ``ThreadPoolExecutor`` for the blocking KMS round-trip,
-       so signing throughput is sized explicitly rather than by the shared
-       process-default pool.
+    Wraps a synchronous signer (:func:`sign_request`; tests inject via
+    ``sign_fn``) with two bounds: a per-event-loop semaphore capping concurrent
+    signings (waiters over the timeout are shed with
+    :class:`SigningOverloadedError`, see there for why) and a dedicated
+    ``ThreadPoolExecutor`` for the blocking KMS call.
 
     Raises:
-        SigningOverloadedError: concurrency cap saturated for longer than
-            the acquire timeout; the caller must deny the request.
+        SigningOverloadedError: concurrency cap saturated past the acquire
+            timeout; the caller must deny the request.
     """
     signer = sign_fn if sign_fn is not None else sign_request
     _, _, acquire_timeout = _signing_settings()
@@ -163,16 +151,7 @@ async def sign_request_async(
 
 
 def _get_region_from_arn(arn: str) -> str:
-    """Extract the region from an AWS ARN.
-
-    ARN format: arn:aws:service:region:account:resource
-
-    Args:
-        arn: An AWS ARN string
-
-    Returns:
-        The region component of the ARN
-    """
+    """Extract the region from an AWS ARN (``arn:aws:service:region:...``)."""
     parts = arn.split(":")
     return parts[3]
 
@@ -183,22 +162,19 @@ def sign_request(
     api_key: str,
     user_credentials: AwsCredentials,
 ) -> SignatureHeaders:
-    """
-    Sign an API request using AWS KMS according to RFC 9421 (HTTP Message Signatures).
+    """Sign an API request using AWS KMS per RFC 9421 (HTTP Message Signatures).
 
     Args:
-        req: request details used to create the signature
+        req: Request details to sign.
         signing_key: The signing key for this api key.
-        api_key: The provider API key
-        user_credentials: User's AWS credentials to use for KMS signing.
+        api_key: The provider API key.
+        user_credentials: User's AWS credentials for KMS signing.
 
     Returns:
-        Dictionary containing RFC 9421 compliant signature headers:
-        - "Signature-Input": Metadata about the signature
-        - "Signature": The actual signature
+        RFC 9421 signature headers: "Signature-Input" and "Signature".
 
     Raises:
-        CredentialsError: If the user's AWS credentials are invalid or expired
+        CredentialsError: If the user's AWS credentials are invalid or expired.
     """
     created: int = int(datetime.now().timestamp())
     algorithm: str = "ecdsa-p256-sha256"
@@ -263,7 +239,7 @@ def _build_signature_params_and_base(
     created: int,
     algorithm: str,
 ) -> tuple[str, bytes]:
-    # OrderedDict to ensure the signing order and the signature parameters order match
+    # OrderedDict: signing order must match the signature-params order.
     covered_components: OrderedDict[str, str] = OrderedDict()
     covered_components["@method"] = req.method
     covered_components["@target-uri"] = str(req.url)

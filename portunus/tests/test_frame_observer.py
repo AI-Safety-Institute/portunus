@@ -1,10 +1,7 @@
 """Tests for ``FrameObserver``'s defensive caps.
 
-The observer wraps wsproto so per-frame WS payloads (post-deflate)
-have a bounded size. Without the cap, a hostile client can use
-permessage-deflate's high compression ratio to send a tiny frame
-that decompresses to many MB — that would OOM the process and
-cascade fail-closed on every in-flight stream's ext_authz call.
+The observer bounds per-frame decompressed WS payload size; without the cap a
+tiny permessage-deflate frame can decompress to many MB and OOM the process.
 """
 
 from __future__ import annotations
@@ -31,11 +28,9 @@ def test_capped_passes_through_payloads_under_the_cap():
 
 
 def test_capped_truncates_oversize_payloads_and_sets_the_flag():
-    """Anything above ``MAX_DECOMPRESSED_PAYLOAD_BYTES`` is sliced.
+    """Anything above ``MAX_DECOMPRESSED_PAYLOAD_BYTES`` is sliced and the.
 
-    Reading the original ``len(payload)`` after this call is the only
-    way downstream can know the payload was capped — hence the
-    ``truncated`` flag on ``ObservedFrame``.
+    ``truncated`` flag set (downstream's only signal it was capped).
     """
     payload = b"X" * (MAX_DECOMPRESSED_PAYLOAD_BYTES + 1024)
     frame = _capped(Direction.RESPONSE, "binary", payload)
@@ -54,17 +49,10 @@ def test_observed_frame_default_truncated_is_false():
 
 
 def test_finalized_deflate_observer_accepts_compressed_frames():
-    """Regression: ``_make_finalized_deflate`` must drive the wsproto.
+    """Regression: ``_make_finalized_deflate`` must drive the wsproto extension.
 
-    extension through ``finalize()`` so RSV1 frames (the deflate flag)
-    aren't rejected as "Reserved bit set unexpectedly". Without
-    ``finalize`` the extension stays in ``_enabled=False`` and every
-    deflate-compressed text frame trips the reserved-bit check.
-
-    Build a sender with the same finalized deflate extension wsproto
-    uses internally for permessage-deflate, encode a real compressed
-    frame, then feed those bytes to the observer and confirm the text
-    payload comes out decompressed.
+    through ``finalize()`` so RSV1 deflate frames aren't rejected as "Reserved
+    bit set unexpectedly" (without it the extension stays ``_enabled=False``).
     """
     extensions_header = "permessage-deflate; client_no_context_takeover"
 
@@ -91,8 +79,8 @@ def _ws_text_frame(payload: bytes) -> bytes:
 def _masked_ws_text_frame(payload: bytes) -> bytes:
     """Single-fragment, masked WS text frame (client->server direction).
 
-    The REQUEST-direction connection is ``ConnectionType.SERVER`` and
-    rejects unmasked client frames per RFC 6455.
+    The REQUEST-direction connection is ``ConnectionType.SERVER`` and rejects
+    unmasked client frames per RFC 6455.
     """
     mask = b"\x01\x02\x03\x04"
     masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
@@ -100,16 +88,12 @@ def _masked_ws_text_frame(payload: bytes) -> bytes:
 
 
 def test_parse_error_desyncs_its_direction_only_and_flags_lost_frames():
-    """A malformed frame desyncs its direction; the loss is flagged, once.
+    """A malformed frame desyncs its direction; the loss is flagged once.
 
-    wsproto swallows the ``ParseFailed`` internally and synthesizes a
-    CloseConnection event (without moving off the OPEN state — the
-    discriminator from a genuine wire close); after that it silently
-    discards every further byte in that direction. The ``desynced`` flag is
-    the caller's only signal that observation stopped — without it the WS
-    summary reports clean counts for a blinded session. The synthesized
-    close must NOT surface as an observed close frame — it never existed
-    on the wire.
+    wsproto swallows the ``ParseFailed`` and synthesizes a CloseConnection
+    without leaving OPEN (the discriminator from a genuine close), then drops
+    every further byte in that direction. ``desynced`` is the caller's only
+    signal; the synthesized close must NOT surface as an observed close frame.
     """
     observer = build_observer(response_extensions_header=None)
 
@@ -139,9 +123,8 @@ def test_parse_error_desyncs_its_direction_only_and_flags_lost_frames():
 def test_genuine_close_frame_is_still_observed_not_treated_as_desync():
     """A real wire close frame must still surface as a close ObservedFrame.
 
-    The parse-failure detection keys on wsproto yielding CloseConnection
-    while the state is still OPEN; a genuine close moves the state first,
-    so it must keep flowing through as an observed frame.
+    Parse-failure detection keys on CloseConnection yielded while still OPEN; a
+    genuine close moves the state first, so it must keep flowing through.
     """
     observer = build_observer(response_extensions_header=None)
     # Unmasked close frame (server->client): FIN+opcode 0x8, 2-byte code
@@ -156,10 +139,9 @@ def test_genuine_close_frame_is_still_observed_not_treated_as_desync():
 
 
 def test_frames_parsed_before_the_poison_byte_are_still_yielded():
-    """A chunk carrying [valid frame][garbage] yields the valid frame.
+    """A chunk of [valid frame][garbage] yields the valid frame, and flags.
 
-    Partial observation is better than dropping the whole chunk; the
-    desync is flagged in the same call.
+    the desync in the same call.
     """
     observer = build_observer(response_extensions_header=None)
     chunk = _ws_text_frame(b"good") + bytes([0x8F, 0x00])

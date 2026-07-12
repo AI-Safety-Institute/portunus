@@ -23,12 +23,9 @@ os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 # Set default region for tests (config validation requires it)
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
-# AISI dev VMs set these env vars to wire ``inspect_ai`` into internal
-# telemetry / key-override hooks (``aisitools.*``). The hooks aren't
-# packaged with this repo, so importing them inside ``ia.eval`` aborts
-# the run with a ``PrerequisiteError``. Strip them at collection time so
-# the suite is hermetic regardless of who's running it; users opting
-# into the hooks set them per-invocation.
+# AISI dev VMs set these to wire ``inspect_ai`` into ``aisitools.*`` hooks
+# that aren't packaged here, so ``ia.eval`` aborts with ``PrerequisiteError``.
+# Strip them at collection time to keep the suite hermetic.
 for _hook_env in (
     "INSPECT_TELEMETRY",
     "INSPECT_API_KEY_OVERRIDE",
@@ -49,12 +46,7 @@ def pytest_runtest_makereport(item, call):
 
 @pytest.fixture(autouse=True)
 def _dump_container_logs_on_failure(request):
-    """Dump the most-relevant container tails to stderr when a test fails.
-
-    Auth/relay debugging relies on the portunus + proxy logs that disappear
-    once docker-compose tears down. We capture them here on failure so CI
-    output is actionable without having to re-run with a custom command.
-    """
+    """Dump container tails to stderr on failure; logs vanish on compose teardown."""
     yield
     if not os.environ.get("DUMP_DOCKER_LOGS_ON_FAILURE"):
         return
@@ -139,12 +131,10 @@ def _list_firehose_streams() -> set[str]:
 
 
 def _wait_for_localstack_init_complete(timeout: int = 60) -> None:
-    """Poll LocalStack until ready.d init scripts have finished.
+    """Poll until all audit Firehose streams exist.
 
-    Specifically, until every Firehose delivery stream the audit
-    pipeline writes to exists. LocalStack's own healthcheck answers
-    before its ready.d/ scripts run, so polling Firehose is the
-    cheapest "init done" probe.
+    LocalStack's healthcheck answers before its ready.d/ init scripts run,
+    so polling Firehose is the cheapest "init done" probe.
     """
     deadline = time.monotonic() + timeout
     needed = set(_REQUIRED_FIREHOSE_STREAMS)
@@ -161,10 +151,9 @@ def _wait_for_localstack_init_complete(timeout: int = 60) -> None:
 
 
 def _clear_audit_s3_prefix(prefix: str = "logs/") -> None:
-    """Remove every object under the audit S3 prefix.
+    """Remove every object under the audit S3 prefix, isolating each test.
 
-    So the next test sees only the records it itself produced. Firehose
-    direct-PUT lands records in ``s3://portunus-logs-local/logs/<stream>/...``.
+    Firehose direct-PUT lands records in ``s3://portunus-logs-local/logs/<stream>/...``.
     """
     subprocess.run(
         [
@@ -183,12 +172,11 @@ def _clear_audit_s3_prefix(prefix: str = "logs/") -> None:
 
 
 def _read_audit_s3_records(stream: str, *, timeout: float = 5.0) -> list[dict]:
-    """Poll the audit S3 prefix for ``stream`` and parse the records.
+    """Poll the audit S3 prefix for ``stream`` and parse its records.
 
-    Firehose direct-PUT in LocalStack is configured with 1s/1MiB buffer
-    hints (see ``scripts/localstack-init-firehose.sh``), so a published
-    record lands on S3 within ~1-2s. Each S3 object is a newline-
-    delimited stream of JSON records.
+    LocalStack Firehose direct-PUT uses 1s/1MiB buffer hints
+    (``scripts/localstack-init-firehose.sh``), so records land within ~1-2s.
+    Each S3 object is newline-delimited JSON.
     """
     prefix = f"logs/{stream}/"
     deadline = time.monotonic() + timeout
@@ -244,11 +232,9 @@ def _read_audit_s3_records(stream: str, *, timeout: float = 5.0) -> list[dict]:
 
 @pytest.fixture
 def clean_audit_pipeline(docker_setup):
-    """Function-scoped: clear the S3 audit prefix between tests.
+    """Clear the S3 audit prefix between tests so each sees only its own records.
 
-    Each test sees only its own records. ``docker_setup`` stays
-    session-scoped to keep LocalStack / Portunus boot cost out of the
-    per-test path.
+    ``docker_setup`` stays session-scoped to keep boot cost off the per-test path.
     """
     _clear_audit_s3_prefix()
     yield
@@ -290,12 +276,9 @@ def docker_setup(request, compose_file):
         capture_output=True,
     )
 
-    # docker compose's ``--wait`` returns once container healthchecks
-    # pass, but LocalStack's healthcheck only waits for its API to
-    # answer — not for ``ready.d/`` init scripts (KMS key, Firehose
-    # streams, S3 bucket) to finish running. Tests that touch those
-    # resources race the init scripts otherwise (Firehose
-    # ResourceNotFoundException, KMS alias missing).
+    # ``--wait`` returns on healthcheck pass, but LocalStack's healthcheck
+    # answers before its ready.d/ init scripts (KMS, Firehose, S3) finish —
+    # tests touching those resources race the init otherwise.
     _wait_for_localstack_init_complete(timeout=60)
 
     if result.returncode != 0:

@@ -1,10 +1,4 @@
-"""
-Logging module for the Portunus.
-
-This module centralizes all logging functionality for the Portunus service.
-It configures structured logging with consistent formatting, correlation IDs,
-and contextual information across all log messages.
-"""
+"""Structured JSON logging configuration for Portunus."""
 
 import json
 import logging
@@ -17,12 +11,7 @@ logger = logging.getLogger("api.access")
 
 
 class StructuredLogFormatter(logging.Formatter):
-    """Formatter that outputs logs as structured JSON.
-
-    This formatter includes the trace ID, request ID, and principal ID
-    from the context variables, as well as timestamp, log level, and
-    any other contextual information provided in the log record.
-    """
+    """Formatter that outputs logs as structured JSON, with trace ID."""
 
     def format(self, record: logging.LogRecord) -> str:
         """Format the log record as a JSON string.
@@ -33,7 +22,6 @@ class StructuredLogFormatter(logging.Formatter):
         Returns:
             str: The formatted log message as a JSON string
         """
-        # Start with basic log record information
         log_data = {
             "timestamp": self.formatTime(record, self.datefmt),
             "level": record.levelname,
@@ -51,11 +39,9 @@ class StructuredLogFormatter(logging.Formatter):
         if trace_id:
             log_data["trace_id"] = trace_id
 
-        # Add exception info if present
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
 
-        # Add any extra attributes from the log record
         for key, value in record.__dict__.items():
             if key not in {
                 "args",
@@ -88,16 +74,9 @@ class StructuredLogFormatter(logging.Formatter):
 
 
 def configure_logging():
-    """Configure logging for the application.
-
-    This function sets up the root logger and all application loggers
-    with appropriate handlers, formatters, and log levels based on
-    the application configuration.
-    """
-    # Set the log level from configuration
+    """Configure root and application loggers from config."""
     log_level = getattr(logging, config.log_level)
 
-    # Configure the root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
 
@@ -106,18 +85,14 @@ def configure_logging():
         for handler in root_logger.handlers:
             root_logger.removeHandler(handler)
 
-    # Create console handler with structured formatter
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
 
-    # Use structured JSON formatter in production
     formatter = StructuredLogFormatter()
     console_handler.setFormatter(formatter)
 
-    # Add handler to root logger
     root_logger.addHandler(console_handler)
 
-    # Configure app-specific logger
     app_logger = logging.getLogger("api")
     app_logger.setLevel(log_level)
     app_logger.propagate = True

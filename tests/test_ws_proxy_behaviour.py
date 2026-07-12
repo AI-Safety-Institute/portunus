@@ -1,19 +1,15 @@
 """WebSocket behaviour tests driven through Portunus.
 
-Companion to ``test_http_proxy_behaviour.py`` for the HTTP path. Per-test fixture
-rather than corpus-driver because WS behaviours have heterogeneous
-assertion shapes (close code observation, abrupt-disconnect detection,
-malformed-frame surfacing) that don't batch usefully into a single
-parameterised test.
+Companion to ``test_http_proxy_behaviour.py``; per-test (not corpus-driven)
+because WS behaviours have heterogeneous assertion shapes.
 
-Each test exercises one failure mode added to ``ws-echo/server.py``:
+Each test exercises one ``ws-echo/server.py`` route:
   /close-after/N → server-initiated close with code 1000
   /echo-then-die → abrupt TCP reset after one echoed message
   /malformed     → invalid WS frame bytes after the handshake
 
-All tests run against the local docker-compose stack (Envoy proxy +
-Portunus + ws-echo + LocalStack). No real AWS or upstream-provider
-access is required.
+Runs against the local docker-compose stack (Envoy + Portunus + ws-echo +
+LocalStack); no real AWS or upstream access required.
 """
 
 # ruff: noqa: E501, E402
@@ -70,25 +66,19 @@ def _close_code(exc: ConnectionClosed) -> int:
 def _do_raw_upgrade(
     path: str, *, upgrade_token: str = "websocket"
 ) -> tuple[bytes, dict[str, str]]:
-    """Send a raw WS upgrade request to the proxy and parse the response.
+    """Send a raw WS upgrade to the proxy and parse the response.
 
-    Bypasses the Python ``websockets`` client so we observe the wire
-    response Envoy emits regardless of client tolerance. Returns the
-    HTTP status line and a dict of lowercase response header names →
-    values. Used to assert wire-protocol invariants on the 101 like
-    "no Transfer-Encoding: chunked" (RFC 7230 §3.3.1 forbids any
-    message framing header on a 1xx response).
-
-    ``upgrade_token`` lets callers vary the case of the ``Upgrade``
-    header value to exercise the case-insensitive route match.
+    Bypasses the ``websockets`` client to observe the wire response Envoy
+    emits regardless of client tolerance. Returns the HTTP status line and
+    lowercase response headers — used to assert wire-protocol invariants on
+    the 101 (e.g. no Transfer-Encoding, RFC 7230 §3.3.1). ``upgrade_token``
+    varies the ``Upgrade`` value's case to exercise the case-insensitive match.
     """
     sock = socket.create_connection(("localhost", 8888), timeout=5)
     sock.settimeout(5)
     try:
-        # Minimal RFC 6455 §1.3 upgrade request. ``Sec-WebSocket-Key``
-        # is the dGhlIHNhbXBsZSBub25jZQ== example from RFC 6455 §1.3
-        # (its associated Accept value is well-known but we don't need
-        # to verify it here — we only care about headers on the 101).
+        # Minimal RFC 6455 §1.3 upgrade request. ``Sec-WebSocket-Key`` is the
+        # RFC 6455 §1.3 example nonce; we only assert on headers of the 101.
         auth = _auth_header()
         request = (
             f"GET {path} HTTP/1.1\r\n"
@@ -142,11 +132,9 @@ def test_ws_route_matches_upgrade_header_case_insensitively(
 ):
     """RFC 6455 §4.2.1: ``Upgrade`` tokens are case-insensitive.
 
-    Clients legitimately send ``Upgrade: WebSocket``. The Envoy
-    ``string_match`` route header is set to ``ignore_case: true`` so
-    every case variant routes through the ws_upstream cluster (which
-    answers the 101) rather than falling through to the plain HTTP
-    cluster (which would 400 / 426 / hang).
+    Envoy's route header uses ``ignore_case: true`` so every case variant
+    routes to the ws_upstream cluster (answers 101) rather than the plain HTTP
+    cluster (would 400 / 426 / hang).
     """
     status, _ = _do_raw_upgrade("/echo", upgrade_token=upgrade_token)
     assert (
@@ -160,21 +148,13 @@ def test_ws_upgrade_101_response_has_no_transfer_encoding_chunked_header(
 ):
     """101 Switching Protocols must not carry Transfer-Encoding: chunked.
 
-    RFC 7230 §3.3.1 forbids message-framing headers (Content-Length,
-    Transfer-Encoding) on any 1xx response — the response has no body
-    by definition. Envoy 1.36 in ext_proc ``FULL_DUPLEX_STREAMED`` body
-    mode mis-frames the 101: the HTTP/1 codec is put in
-    streaming-body mode for the whole stream, so on serialization the
-    upstream's ``Content-Length: 0`` is stripped and ``Transfer-Encoding:
-    chunked`` is appended. Python ``websockets`` v13+ refuses to parse
-    that 101 (NotImplementedError).
-
-    The fix is ``ExtProcPerRoute.overrides.processing_mode`` on the
-    WS-match route overriding the body modes to STREAMED (not FDS) so
-    the codec doesn't enter bidirectional streaming-body mode at 101
-    serialization time. We assert the wire-level absence via a raw
-    socket because asserting on the websockets client's exception
-    would mask the regression behind a library upgrade.
+    RFC 7230 §3.3.1 forbids message-framing headers on any 1xx response.
+    Envoy 1.36 in ext_proc ``FULL_DUPLEX_STREAMED`` body mode mis-frames the
+    101 — it strips ``Content-Length: 0`` and appends ``Transfer-Encoding:
+    chunked``, which ``websockets`` v13+ refuses to parse. Fixed by
+    ``ExtProcPerRoute.overrides.processing_mode`` forcing STREAMED (not FDS)
+    on the WS route. Asserted via raw socket so a library upgrade can't mask
+    the regression.
     """
     status, headers = _do_raw_upgrade("/echo")
     assert (
@@ -223,9 +203,8 @@ async def test_upstream_close_after_n_messages_propagates_to_client_with_code_10
 ):
     """Upstream close-after-N propagates the close code through Portunus.
 
-    ws-echo's /close-after/2 echoes two messages then closes with code
-    1000. The client should observe the same close code, not a hang or a
-    transport-level error.
+    ws-echo's /close-after/2 echoes two messages then closes with 1000; the
+    client should observe the same code, not a hang or transport error.
     """
     headers = {"Authorization": _auth_header()}
     async with _ws_connect(
@@ -253,12 +232,10 @@ async def test_upstream_close_after_n_messages_propagates_to_client_with_code_10
 async def test_abrupt_upstream_tcp_reset_surfaces_to_client_as_connection_error(
     docker_setup,
 ):
-    """Abrupt upstream TCP reset surfaces to the client.
+    """Abrupt upstream TCP reset surfaces to the client, not a hang.
 
-    /echo-then-die echoes one message then drops the TCP socket without
-    a close frame. The client must see a connection error (not a hang)
-    within a couple of seconds — Portunus should propagate the broken
-    upstream rather than holding the client open.
+    /echo-then-die echoes once then drops the socket with no close frame;
+    Portunus must propagate the broken upstream rather than hold the client open.
     """
     headers = {"Authorization": _auth_header()}
     async with _ws_connect(
@@ -284,9 +261,8 @@ async def test_upstream_malformed_frame_terminates_session_within_timeout(
 ):
     """Malformed upstream frame bytes terminate the session.
 
-    /malformed accepts the handshake then writes invalid frame bytes.
-    The client must see the session terminate within a reasonable window
-    rather than the corrupt bytes being relayed through verbatim.
+    /malformed writes invalid frame bytes after the handshake; the client must
+    see the session terminate rather than the corrupt bytes relayed verbatim.
     """
     headers = {"Authorization": _auth_header()}
     async with _ws_connect(
@@ -337,11 +313,9 @@ async def test_codex_responses_api_streaming_events_arrive_in_order(
 ) -> None:
     """Drive a Responses-API-shaped stream through Portunus and assert ordering.
 
-    Smoke test for the codex_cli / openai-python WS path: the mock emits
-    ``response.created`` -> N ``response.output_text.delta`` -> ``response.completed``.
-    A regression in the WS audit pipeline (e.g. dropped frames under load,
-    incorrect frame ordering after ext_proc observation) shows up here as
-    a missing or reordered event.
+    Smoke for the codex_cli / openai-python WS path: the mock emits
+    ``response.created`` → N ``response.output_text.delta`` → ``response.completed``.
+    A WS-pipeline regression (dropped or reordered frames) shows up here.
     """
     async with _ws_connect(
         f"{PROXY_WS_BASE}/v1/responses",

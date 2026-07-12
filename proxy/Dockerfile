@@ -1,26 +1,20 @@
-# Envoy 1.38 LTS (>= 1.36 required for the maturity of the ext_proc
-# observability_mode + STREAMED body-mode combination this proxy uses,
-# and for HttpRequestHeaderMatchInput in the composite-filter signing
-# gate). Also carries the fix for the 1.31 shutdown SIGSEGV under
-# in-flight AsyncClient streams that #34/#35 were raised to eliminate —
-# do NOT resolve any merge conflict on this line back to v1.31.x (the
-# version assertion below turns that mistake into a build failure).
-# Digest-pinned (supply-chain posture from #31, re-resolved for 1.38.3).
+# Envoy 1.38 LTS. >= 1.36 required for the ext_proc observability_mode +
+# STREAMED body-mode combination and HttpRequestHeaderMatchInput in the
+# composite signing gate; also carries the fix for the 1.31 shutdown SIGSEGV
+# under in-flight AsyncClient streams. Do NOT drop back to v1.31.x. Digest-pinned.
 FROM envoyproxy/envoy:v1.38.3@sha256:5f7c43e1147412fdb3af578c651c67478a3df818eae89d2261e707e06c209cdb
 
-# Assert the resolved base image really is the Envoy this config was
-# qualified against. Catches a careless #31↔#34 FROM-line conflict
-# resolution (1.31 boots this config cleanly and passes every health
-# check — the regression only shows up as the nondeterministic shutdown
-# SIGSEGV). entrypoint.sh re-asserts at runtime.
+# Assert the base image is the Envoy this config was qualified against: 1.31
+# boots cleanly and passes health checks, so the regression only shows up as
+# the nondeterministic shutdown SIGSEGV. entrypoint.sh re-asserts at runtime.
 RUN envoy --version && envoy --version | grep -q '/1\.38\.'
 
 # gettext for envsubst (used in entrypoint.sh), wget for the yq binary.
 RUN apt update && apt install -y gettext wget
 
-# yq (YAML processor) — entrypoint.sh uses it to synthesise transport
-# socket configs as JSON-encoded env vars. Checksummed: a release
-# download with no integrity check is a supply-chain hole (#31 posture).
+# yq — entrypoint.sh uses it to synthesise transport socket configs as
+# JSON-encoded env vars. Checksummed: an unverified release download is a
+# supply-chain hole.
 RUN wget https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_amd64 -O /usr/bin/yq && \
     echo "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0  /usr/bin/yq" | sha256sum -c - && \
     chmod +x /usr/bin/yq
@@ -30,10 +24,8 @@ COPY xray.json /envoy/xray.json
 
 RUN chown -R envoy:envoy /envoy
 
-# Defaults for envsubst variables. These can be overridden via the
-# container's environment (docker-compose, ECS task definition, etc.).
-# envsubst itself doesn't support ``${X:-default}`` syntax, so defaults
-# live here rather than in entrypoint.sh or envoy.yaml.
+# Defaults for envsubst variables (overridable via the container env).
+# envsubst doesn't support ${X:-default}, so defaults live here.
 ENV ENVOY_LOG_LEVEL=info \
     LISTEN_PORT=8888 \
     RATE_LIMIT_REQUESTS_PER_INTERVAL=1 \

@@ -1,9 +1,7 @@
 """Tests for the credential-keyed AWS client pool.
 
-Rebuilding STS + Secrets Manager clients per auth cache-miss costs ~200ms
-cold each (fresh aiohttp pool + TLS). ``StateService`` pools them per
-(service, credential set, endpoint) behind a session-like adapter
-(``pooled_boto_session()``), which ``AuthService`` wires in by default.
+``StateService`` pools STS/Secrets Manager clients per (service, credential set,
+endpoint) to avoid ~200ms cold rebuilds; ``AuthService`` wires it in by default.
 """
 
 import asyncio
