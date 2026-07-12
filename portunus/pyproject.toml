@@ -54,9 +54,6 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "fakeredis>=2.26.0,<3",
     "freezegun>=1.5.0,<2",
-    # prek: fast pre-commit runner. Hooks defined in ../.pre-commit-config.yaml;
-    # CI runs the same set (see .github/workflows/lint.yml).
-    "prek>=0.4.0",
     "grpcio-tools>=1.66.0,<2",
 ]
 
