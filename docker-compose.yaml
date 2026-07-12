@@ -170,6 +170,8 @@ services:
       # connection-refused → 403.
       GRPC_ENABLED: "true"
       GRPC_PORT: "9000"
+      # Fast metrics ticks locally so the EMF lines are visible in short runs.
+      GRPC_METRICS_INTERVAL_SECONDS: "${GRPC_METRICS_INTERVAL_SECONDS:-10}"
       # Empty proxy_api_key disables the proxy-identity check (test-only; the
       # SC-namespace gate that motivates it in prod doesn't apply on the bridge).
       # GRPC_PROXY_API_KEY_OPTIONAL=true acknowledges this; without it the

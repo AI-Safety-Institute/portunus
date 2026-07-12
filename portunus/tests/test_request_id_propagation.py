@@ -155,13 +155,13 @@ async def test_check_binds_request_id_contextvar(monkeypatch):
 
     async def fake_auth_pass(request, context, request_id):
         seen["ctxvar"] = request_id_var.get()
-        return "handled"
+        return external_auth_pb2.CheckResponse()
 
     monkeypatch.setattr(servicer, "_auth_pass", fake_auth_pass)
     result = await servicer.Check(
         _auth_request_with_headers("req-ctx-1", {}), _FakeGrpcContext()
     )
-    assert result == "handled"
+    assert not result.HasField("denied_response")
     assert seen["ctxvar"] == "req-ctx-1"
 
 
@@ -193,7 +193,7 @@ async def test_check_opens_xray_segment_from_envoy_trace_header(monkeypatch):
     servicer = _make_auth_servicer()
 
     async def fake_auth_pass(request, context, request_id):
-        return "handled"
+        return external_auth_pb2.CheckResponse()
 
     monkeypatch.setattr(servicer, "_auth_pass", fake_auth_pass)
     trace_header = (
@@ -203,7 +203,7 @@ async def test_check_opens_xray_segment_from_envoy_trace_header(monkeypatch):
         _auth_request_with_headers("req-ctx-2", {"x-amzn-trace-id": trace_header}),
         _FakeGrpcContext(),
     )
-    assert result == "handled"
+    assert not result.HasField("denied_response")
     assert calls == [
         dict(
             trace_id="1-6800aa2c-abcdef012345678912345678",
@@ -224,7 +224,7 @@ async def test_check_sets_trace_id_var_even_with_xray_disabled(monkeypatch):
 
     async def fake_auth_pass(request, context, request_id):
         seen["trace"] = trace_id_var.get()
-        return "handled"
+        return external_auth_pb2.CheckResponse()
 
     monkeypatch.setattr(servicer, "_auth_pass", fake_auth_pass)
     await servicer.Check(

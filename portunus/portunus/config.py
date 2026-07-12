@@ -180,6 +180,14 @@ class GrpcConfig(BaseModel):
         description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
     )
+    metrics_interval_seconds: float = Field(
+        default=60.0,
+        description=(
+            "Interval for the CloudWatch EMF metrics reporter (publish-queue "
+            "counters, active ext_proc streams, Check outcomes). 0 disables."
+        ),
+        ge=0.0,
+    )
     drain_flush_reserve_seconds: float = Field(
         default=5.0,
         description=(
@@ -433,6 +441,9 @@ def get_config() -> PortunusConfig:
         ),
         graceful_shutdown_seconds=int(
             os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
+        ),
+        metrics_interval_seconds=float(
+            os.environ.get("GRPC_METRICS_INTERVAL_SECONDS", "60.0")
         ),
         drain_flush_reserve_seconds=float(
             os.environ.get("GRPC_DRAIN_FLUSH_RESERVE_SECONDS", "5.0")

@@ -27,6 +27,7 @@ from grpc_reflection.v1alpha import reflection
 from portunus.config import FirehoseConfig, GrpcConfig
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
+from portunus.metrics import emit_metrics
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
@@ -74,6 +75,8 @@ class GrpcRuntime:
     # Background Redis-ping task driving the readiness health status — None when
     # the monitor is disabled or no state service is available.
     health_monitor: Optional[asyncio.Task] = field(default=None)
+    # Background CloudWatch EMF reporter — None when disabled (interval 0).
+    metrics_reporter: Optional[asyncio.Task] = field(default=None)
 
 
 async def _dependency_health_loop(
@@ -143,6 +146,70 @@ async def _dependency_health_loop(
                 )
 
         await asyncio.sleep(interval_seconds)
+
+
+def _counter_snapshot(
+    publish_queue: BoundedPublishQueue,
+    auth_servicer: PortunusAuthServicer,
+) -> dict[str, int]:
+    """Cumulative counters, keyed by their CloudWatch metric names."""
+    return {
+        "SubmittedRecords": publish_queue.submitted_total,
+        "PublishedRecords": publish_queue.published_total,
+        "DroppedRecords": publish_queue.dropped_total,
+        "BuildFailedRecords": publish_queue.build_failed_total,
+        "DeliveryFailedRecords": publish_queue.delivery_failed_total,
+        "SkippedUnconfiguredRecords": publish_queue.skipped_unconfigured_total,
+        "SentinelDroppedRecords": publish_queue.sentinel_dropped_total,
+        "CheckAllowed": auth_servicer.check_allowed_total,
+        "CheckDenied": auth_servicer.check_denied_total,
+    }
+
+
+def _collect_metrics(
+    publish_queue: BoundedPublishQueue,
+    proc_servicer: PortunusProcessServicer,
+    auth_servicer: PortunusAuthServicer,
+    last: dict[str, int],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """One reporter tick: per-interval counter deltas + point-in-time gauges.
+
+    Returns ``(metrics_to_emit, new_snapshot)``. Deltas (not cumulative
+    values) so CloudWatch Sum over any period is the true count for that
+    period regardless of process restarts.
+    """
+    current = _counter_snapshot(publish_queue, auth_servicer)
+    metrics: dict[str, int] = {name: current[name] - last[name] for name in current}
+    metrics["PublishQueueDepth"] = publish_queue.qsize()
+    metrics["PublishQueueBytes"] = publish_queue.queued_bytes
+    metrics["ActiveExtProcStreams"] = proc_servicer.active_stream_count
+    return metrics, current
+
+
+async def _metrics_reporter_loop(
+    publish_queue: BoundedPublishQueue,
+    proc_servicer: PortunusProcessServicer,
+    auth_servicer: PortunusAuthServicer,
+    *,
+    interval_seconds: float,
+) -> None:
+    """Emit CloudWatch EMF metrics every ``interval_seconds``.
+
+    Metrics must never take the server down: anything but cancellation is
+    logged and the loop continues.
+    """
+    last = _counter_snapshot(publish_queue, auth_servicer)
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            metrics, last = _collect_metrics(
+                publish_queue, proc_servicer, auth_servicer, last
+            )
+            emit_metrics(metrics, units={"PublishQueueBytes": "Bytes"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("Metrics emission failed: %s", type(e).__name__)
 
 
 async def start_grpc_server(
@@ -317,6 +384,18 @@ async def start_grpc_server(
         listen_addr,
         config.max_concurrent_streams,
     )
+    metrics_reporter: Optional[asyncio.Task] = None
+    if config.metrics_interval_seconds > 0:
+        metrics_reporter = asyncio.create_task(
+            _metrics_reporter_loop(
+                publish_queue,
+                proc_servicer,
+                auth_servicer,
+                interval_seconds=config.metrics_interval_seconds,
+            ),
+            name="metrics-reporter",
+        )
+
     return GrpcRuntime(
         server=server,
         proc_servicer=proc_servicer,
@@ -324,6 +403,7 @@ async def start_grpc_server(
         publish_service=publish_service,
         health_servicer=health_servicer,
         health_monitor=health_monitor,
+        metrics_reporter=metrics_reporter,
     )
 
 
@@ -364,6 +444,11 @@ async def stop_grpc_server(
         runtime.health_monitor.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runtime.health_monitor
+
+    if runtime.metrics_reporter is not None:
+        runtime.metrics_reporter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runtime.metrics_reporter
 
     # Flip BOTH health services to NOT_SERVING so an in-flight probe sees the
     # drain immediately: readiness stops routing new connections, and liveness

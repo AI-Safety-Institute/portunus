@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Live CloudWatch metrics (EMF)**: a periodic reporter
+  (`GRPC_METRICS_INTERVAL_SECONDS`, default 60, 0 disables) emits
+  Embedded Metric Format lines to stdout — CloudWatch Logs extracts them
+  into the `portunus-proxy` namespace with no agent or infra MetricFilter.
+  Per-interval deltas of every publish-queue counter (published, dropped,
+  build/delivery failures, skipped-unconfigured, sentinel drops) and
+  ext_authz Check allow/deny outcomes, plus point-in-time gauges for
+  queue depth, retained queue bytes, and active ext_proc streams. Before
+  this, the counters were logged once at drain — queue saturation and
+  audit drops were invisible while happening.
 - `/healthz` Envoy endpoint for the ALB health check, served by the
   `envoy.filters.http.health_check` filter and gated on an **active gRPC
   health check** of Portunus's **`"readiness"`** health service

@@ -80,6 +80,9 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
     ) -> None:
         self._auth = auth_service
         self._sign = sign_request_fn
+        # Cumulative Check outcomes, read by the server's metrics reporter.
+        self.check_allowed_total = 0
+        self.check_denied_total = 0
 
     async def Check(  # noqa: N802 — proto-defined method name
         self,
@@ -90,6 +93,18 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
 
         Never raises — failures are reported as ``denied_response``.
         """
+        response = await self._check_inner(request, context)
+        if response.HasField("denied_response"):
+            self.check_denied_total += 1
+        else:
+            self.check_allowed_total += 1
+        return response
+
+    async def _check_inner(
+        self,
+        request: external_auth_pb2.CheckRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> external_auth_pb2.CheckResponse:
         request_id = self._extract_request_id(request)
         # Task-local under grpc.aio: every log line in this RPC carries the id.
         request_id_var.set(request_id)
