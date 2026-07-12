@@ -367,9 +367,7 @@ async def test_saturation_drops_bodies_keeps_metadata_and_drains_sentinels() -> 
 
 
 def _sized_task(size: int, label: str = "body") -> PublishTask:
-    return PublishTask(
-        build=lambda: ("body", b"{}\n"), label=label, size_bytes=size
-    )
+    return PublishTask(build=lambda: ("body", b"{}\n"), label=label, size_bytes=size)
 
 
 @pytest.mark.asyncio

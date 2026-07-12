@@ -122,9 +122,7 @@ async def test_monitor_drives_readiness_only_and_never_touches_liveness():
     task = _monitor(health, dependency, failure_threshold=2)
     try:
         # Healthy boot: first probe flips readiness SERVING.
-        await _wait_for(
-            lambda: SERVING in health.for_service(READINESS_SERVICE_NAME)
-        )
+        await _wait_for(lambda: SERVING in health.for_service(READINESS_SERVICE_NAME))
 
         # Outage past the debounce threshold.
         dependency.ok = False
@@ -222,9 +220,7 @@ async def test_hung_or_raising_probe_counts_as_a_failure():
             await asyncio.sleep(60)
             return True
 
-    task = _monitor(
-        health, _HangingDependency(), failure_threshold=2, timeout=0.02
-    )
+    task = _monitor(health, _HangingDependency(), failure_threshold=2, timeout=0.02)
     try:
         await _wait_for(
             lambda: NOT_SERVING in health.for_service(READINESS_SERVICE_NAME)

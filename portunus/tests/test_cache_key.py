@@ -95,8 +95,8 @@ class TestHostRestrictionRecheckStaysFailClosed:
         assert api_key == "sk-real"
 
     @pytest.mark.parametrize(
-        "bad_host", ["evil.example.com", "api.anthropic.com.evil.com",
-                     "api.anthropic.com:8443"]
+        "bad_host",
+        ["evil.example.com", "api.anthropic.com.evil.com", "api.anthropic.com:8443"],
     )
     def test_non_equivalent_host_fails_closed(self, bad_host):
         with pytest.raises(AuthenticationError):

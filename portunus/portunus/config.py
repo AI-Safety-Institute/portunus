@@ -514,9 +514,7 @@ def get_config() -> PortunusConfig:
     )
 
     signing = SigningConfig(
-        kms_executor_workers=int(
-            os.environ.get("SIGNING_KMS_EXECUTOR_WORKERS", "16")
-        ),
+        kms_executor_workers=int(os.environ.get("SIGNING_KMS_EXECUTOR_WORKERS", "16")),
         max_concurrent=int(os.environ.get("SIGNING_MAX_CONCURRENT", "32")),
         acquire_timeout_s=float(os.environ.get("SIGNING_ACQUIRE_TIMEOUT_S", "2.0")),
     )

@@ -1144,9 +1144,10 @@ async def test_signing_pass_cache_hit_issues_sts_and_secrets_once_not_twice():
 
     # The crux: STS and Secrets Manager were each touched exactly ONCE
     # across both passes — the signing pass rode the cache.
-    assert counters == {"sts": 1, "secrets": 1}, (
-        f"signing pass did a fresh AWS round-trip instead of a cache hit: {counters}"
-    )
+    assert counters == {
+        "sts": 1,
+        "secrets": 1,
+    }, f"signing pass did a fresh AWS round-trip instead of a cache hit: {counters}"
 
 
 @pytest.mark.asyncio

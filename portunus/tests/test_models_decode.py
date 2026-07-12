@@ -14,6 +14,7 @@ import json
 import logging
 import struct
 import zlib
+from typing import Any
 
 import pytest
 
@@ -432,8 +433,8 @@ def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
 # turns CI red.
 
 
-def _make_joined_record(**overrides) -> JoinedLogRecord:
-    fields = dict(
+def _make_joined_record(**overrides: Any) -> JoinedLogRecord:
+    fields: dict[str, Any] = dict(
         request_id="req-1",
         timestamp="2026-07-09T00:00:00Z",
         metadata_published_at="2026-07-09T00:00:00Z",

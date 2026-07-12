@@ -498,9 +498,7 @@ async def test_body_chunks_are_dropped_when_publish_queue_is_full(monkeypatch):
     """
     # Keep the drop-sentinel blocking submits from stalling the test on the
     # deliberately saturated queue.
-    monkeypatch.setattr(
-        portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.02
-    )
+    monkeypatch.setattr(portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.02)
     servicer, _publish, queue = _make_servicer(queue_maxsize=2)
     # Workers deliberately not started so the queue stays full.
 
@@ -1573,9 +1571,7 @@ async def test_blocking_submits_time_out_instead_of_stalling_process(monkeypatch
     and the timed-out records are counted as dropped (observable loss)
     rather than wedging the stream (and, at stream end, the drain).
     """
-    monkeypatch.setattr(
-        portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05
-    )
+    monkeypatch.setattr(portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05)
     monkeypatch.setattr(portunus_config.grpc, "drop_sentinel_timeout_seconds", 0.02)
     servicer, _publish, queue = _make_servicer(queue_maxsize=1)
     # Fill the queue completely; workers deliberately not started.
@@ -1615,9 +1611,7 @@ async def test_ws_summary_submit_times_out_on_wedged_queue(monkeypatch):
     That submit runs at stream end — including during drain — so an
     unbounded put on a wedged sink would pin the drain forever.
     """
-    monkeypatch.setattr(
-        portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05
-    )
+    monkeypatch.setattr(portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05)
     servicer, _publish, queue = _make_servicer(queue_maxsize=1)
     state = _StreamState(
         stream_id="ws-wedged",

@@ -113,8 +113,11 @@ async def test_concurrent_signing_is_capped(
     tasks = [
         asyncio.ensure_future(
             sign_request_async(
-                signable_request, signing_key, credentials.session_token or "",
-                credentials, sign_fn=signer,
+                signable_request,
+                signing_key,
+                credentials.session_token or "",
+                credentials,
+                sign_fn=signer,
             )
         )
         for _ in range(6)

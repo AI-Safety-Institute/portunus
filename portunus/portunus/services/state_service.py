@@ -175,7 +175,9 @@ class StateService:
             self._cred_client_pool.move_to_end(key)
             return entry[1]
 
-        ctx = self.boto_session.create_client(
+        # type-ignore: types-aiobotocore keys create_client overloads on
+        # literal service names; service_name here is dynamic.
+        ctx = self.boto_session.create_client(  # type: ignore[call-overload]
             service_name,
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,

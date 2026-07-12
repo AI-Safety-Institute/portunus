@@ -80,9 +80,9 @@ def _signing_settings() -> tuple[int, int, float]:
 # stack latency toward the 15s ext_authz signing timeout (customer 504s).
 # Threads are process-wide; the semaphore below is per event loop.
 _kms_executor: Optional[ThreadPoolExecutor] = None
-_signing_semaphores: (
-    "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]"
-) = weakref.WeakKeyDictionary()
+_signing_semaphores: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Semaphore
+] = weakref.WeakKeyDictionary()
 
 
 def _get_kms_executor() -> ThreadPoolExecutor:

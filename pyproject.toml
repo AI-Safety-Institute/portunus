@@ -80,6 +80,9 @@ module = [
     "envoy.*",
     "google.rpc.*",
     "wsproto.*",
+    "grpc_health.*",
+    "grpc_reflection.*",
+    "brotli",
 ]
 ignore_missing_imports = true
 
