@@ -38,6 +38,11 @@ from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.models import WSSummaryRecord
 from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 from portunus.services.publish_service import PublishService
+from portunus.services.xray_service import (
+    parse_trace_header,
+    request_id_var,
+    set_trace_id,
+)
 from portunus.util import chunk_body_data, generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
@@ -170,8 +175,18 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     await self._emit_ws_summary(state, droppable=False)
 
     def _initialise_stream(self, first: proc_pb2.ProcessingRequest) -> _StreamState:
-        """Inspect the first ProcessingRequest and build per-stream state."""
+        """Inspect the first ProcessingRequest and build per-stream state.
+
+        Also binds the correlation contextvars: each ext_proc stream is one
+        grpc.aio task, so setting them here covers every log line the stream
+        emits. No X-Ray segment is opened — ext_proc is fire-and-forget
+        observability; a per-stream segment would only add trace noise.
+        """
         request_id = _extract_request_id(first)
+        request_id_var.set(request_id)
+        trace_root, _, _ = parse_trace_header(_extract_header(first, "x-amzn-trace-id"))
+        if trace_root:
+            set_trace_id(trace_root)
         mode = _extract_mode(first)
         try:
             meta_keys = list(first.metadata_context.filter_metadata.keys())
@@ -256,6 +271,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                             secret_arn=secret_arn,
                         ),
                         label="metadata",
+                        request_id=state.request_id,
                     ),
                     timeout=config.grpc.publish_blocking_timeout_seconds,
                 )
@@ -270,6 +286,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="request_headers",
+                request_id=state.request_id,
             ),
             timeout=config.grpc.publish_blocking_timeout_seconds,
         )
@@ -289,6 +306,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="request_trailers",
+                request_id=state.request_id,
             ),
             timeout=config.grpc.publish_blocking_timeout_seconds,
         )
@@ -324,6 +342,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="response_headers",
+                request_id=state.request_id,
             ),
             timeout=config.grpc.publish_blocking_timeout_seconds,
         )
@@ -343,6 +362,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                 ),
                 label="response_trailers",
+                request_id=state.request_id,
             ),
             timeout=config.grpc.publish_blocking_timeout_seconds,
         )
@@ -583,6 +603,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     frame_index=frame_index,
                 ),
                 label=label,
+                request_id=state.request_id,
                 # The closure retains the raw chunk until the worker flushes
                 # it — charge it against the queue's byte budget.
                 size_bytes=len(body_bytes),
@@ -623,6 +644,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                         frame_index=frame_index,
                     ),
                     label=f"{label}_drop_sentinel",
+                    request_id=state.request_id,
                 ),
                 timeout=config.grpc.drop_sentinel_timeout_seconds,
                 sentinel=True,
@@ -661,6 +683,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         task = PublishTask(
             build=lambda: self._publish.build_ws_summary(record=record),
             label="ws_summary",
+            request_id=state.request_id,
         )
         if droppable:
             self._queue.submit_droppable(task)
@@ -679,13 +702,21 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
 
 def _extract_request_id(req: proc_pb2.ProcessingRequest) -> str:
     """Read x-request-id from the first headers message, or mint one."""
+    value = _extract_header(req, "x-request-id")
+    if value:
+        return value
+    return str(uuid.uuid4())
+
+
+def _extract_header(req: proc_pb2.ProcessingRequest, name: str) -> str:
+    """Read a request header from a headers message; "" if absent."""
     if req.HasField("request_headers"):
         for h in req.request_headers.headers.headers:
-            if h.key.lower() == "x-request-id":
+            if h.key.lower() == name:
                 value = _header_value(h)
                 if value:
                     return value
-    return str(uuid.uuid4())
+    return ""
 
 
 def _header_value_bytes(h) -> bytes:

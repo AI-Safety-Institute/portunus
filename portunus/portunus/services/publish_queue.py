@@ -44,6 +44,19 @@ logger = logging.getLogger("api.access")
 # NOT accept. Matches PublishService.put_record_batch.
 BatchSender = Callable[[str, List[bytes]], Awaitable[int]]
 
+# Cap on request_ids named in one delivery-failure log line (a batch spans
+# up to max_batch records; the count still reports the full loss).
+_MAX_LOGGED_IDS = 20
+
+
+def _format_ids(ids: Optional[set[str]]) -> str:
+    """Render a bounded, sorted sample of the request_ids in a failed batch."""
+    if not ids:
+        return "none-recorded"
+    listed = sorted(ids)[:_MAX_LOGGED_IDS]
+    suffix = f" +{len(ids) - len(listed)} more" if len(ids) > len(listed) else ""
+    return ",".join(listed) + suffix
+
 
 @dataclass
 class PublishTask:
@@ -65,6 +78,10 @@ class PublishTask:
     build: Callable[[], Optional[tuple[str, bytes]]]
     label: str  # for logging — e.g. "request_body", "ws_frame"
     size_bytes: int = 0
+    # Correlation id for failure logs. Workers run outside any request
+    # context (they snapshot an empty contextvar context at startup), so the
+    # id must travel with the task to be loggable when its record fails.
+    request_id: Optional[str] = None
 
 
 class BoundedPublishQueue:
@@ -445,11 +462,17 @@ class BoundedPublishQueue:
         # Build records (sync serialization) and group by stream. A build
         # returning None means the stream isn't configured — count the skip.
         by_stream: dict[str, list[bytes]] = {}
+        ids_by_stream: dict[str, set[str]] = {}
         for task in tasks:
             try:
                 result = task.build()
             except Exception as e:
-                logger.error("Build failed for %s: %s", task.label, type(e).__name__)
+                logger.error(
+                    "Build failed for %s (request_id=%s): %s",
+                    task.label,
+                    task.request_id,
+                    type(e).__name__,
+                )
                 self._build_failed_total += 1
                 continue
             if result is None:
@@ -457,6 +480,8 @@ class BoundedPublishQueue:
                 continue
             stream_name, data = result
             by_stream.setdefault(stream_name, []).append(data)
+            if task.request_id:
+                ids_by_stream.setdefault(stream_name, set()).add(task.request_id)
 
         unconfirmed = sum(len(records) for records in by_stream.values())
         try:
@@ -468,7 +493,10 @@ class BoundedPublishQueue:
                 except Exception as e:
                     # batch_sender is contracted not to raise, but guard anyway.
                     logger.error(
-                        "Batch send to %s raised: %s", stream_name, type(e).__name__
+                        "Batch send to %s raised: %s (request_ids=%s)",
+                        stream_name,
+                        type(e).__name__,
+                        _format_ids(ids_by_stream.get(stream_name)),
                     )
                     failed = len(records)
                 self._published_total += len(records) - failed

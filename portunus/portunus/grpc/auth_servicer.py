@@ -54,6 +54,12 @@ from portunus.services.signing_service import (
     SigningOverloadedError,
     sign_request_async,
 )
+from portunus.services.xray_service import (
+    XRayContext,
+    parse_trace_header,
+    request_id_var,
+    set_trace_id,
+)
 
 logger = logging.getLogger("api.access")
 
@@ -85,6 +91,8 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         Never raises — failures are reported as ``denied_response``.
         """
         request_id = self._extract_request_id(request)
+        # Task-local under grpc.aio: every log line in this RPC carries the id.
+        request_id_var.set(request_id)
 
         received_proxy_key = extract_proxy_key(context)
         if not is_valid_proxy_key(received_proxy_key, config.grpc.proxy_api_key):
@@ -96,8 +104,28 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
 
         pass_name = _extract_pass(context)
         if pass_name == "signing":
-            return await self._signing_pass(request, context, request_id)
-        return await self._auth_pass(request, context, request_id)
+            handler = self._signing_pass
+        else:
+            handler = self._auth_pass
+
+        trace_root, parent_id, sampled = parse_trace_header(
+            _http_headers(request).get("x-amzn-trace-id", "")
+        )
+        if config.aws.xray_enabled and trace_root:
+            # Join the trace Envoy/ALB started so this Check (and the patched
+            # STS/SecretsManager/KMS calls under it) appear as a child of the
+            # customer request's trace.
+            async with XRayContext(
+                trace_root,
+                segment_name="portunus-ext-authz",
+                parent_id=parent_id,
+                sampled=sampled,
+            ):
+                return await handler(request, context, request_id)
+        if trace_root:
+            # X-Ray disabled: still surface the trace id on log lines.
+            set_trace_id(trace_root)
+        return await handler(request, context, request_id)
 
     async def _auth_pass(
         self,

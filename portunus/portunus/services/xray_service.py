@@ -17,6 +17,13 @@ from portunus.config import config
 # Context variable for trace ID
 trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
 
+# Envoy's x-request-id for the request/stream being served. Set at each gRPC
+# entry point (ext_authz Check, ext_proc stream init); task-local under
+# grpc.aio, so concurrent RPCs don't leak ids into each other's logs. Lives
+# here (not portunus.logging) because importing that module configures
+# logging as a side effect, which the servicers must not trigger.
+request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+
 
 class XRayContext:
     """Context manager for setting and resetting trace ID in context vars."""
@@ -45,13 +52,22 @@ class XRayContext:
     async def __aenter__(self):
         self.token = set_trace_id(self.trace_id)
 
-        # Enter the nested async context manager
-        self.xray_segment = await xray_recorder.in_segment_async(  # type: ignore[unresolved-attribute]  # missing from stubs
-            name=self.segment_name,
-            traceid=self.trace_id,
-            parent_id=self.parent_id,
-            sampling=self.sampled if self.sampled is not None else True,
-        ).__aenter__()
+        # Tracing must never fail the request it traces: swallow segment-open
+        # failures (recorder unconfigured, daemon unreachable) and continue
+        # with just the trace-id contextvar set for log correlation.
+        try:
+            self.xray_segment = await xray_recorder.in_segment_async(  # type: ignore[unresolved-attribute]  # missing from stubs
+                name=self.segment_name,
+                traceid=self.trace_id,
+                parent_id=self.parent_id,
+                sampling=self.sampled if self.sampled is not None else True,
+            ).__aenter__()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "X-Ray segment open failed; request continues untraced",
+                exc_info=True,
+            )
+            self.xray_segment = None
 
         return self
 
@@ -67,9 +83,12 @@ class XRayContext:
         # First exit the nested context manager
         # We need to tell the xray_recorder to end the current segment
         if self.xray_segment is not None:
-            # The segment is automatically ended when exiting the context manager
-            # We don't need to explicitly close it
-            xray_recorder.end_segment()
+            try:
+                xray_recorder.end_segment()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "X-Ray segment close failed", exc_info=True
+                )
 
         # Then reset our token
         if self.token:
@@ -134,9 +153,11 @@ def get_trace_id() -> str:
     """Get the current trace ID from context.
 
     Returns:
-        str: The current trace ID or an empty string if not set
+        str: The current trace ID, or an empty string if not set. Callers
+        must treat empty as "no trace" — never substitute a shared
+        placeholder, which would collapse log correlation groups.
     """
-    return trace_id_var.get() or "No-Trace-Id"
+    return trace_id_var.get() or ""
 
 
 def set_trace_id(trace_id: str) -> Token:
@@ -166,12 +187,15 @@ class XRayService:
         # Patch all supported libraries for X-Ray tracing
         patch_all()
 
-        # Configure X-Ray recorder
+        # Configure X-Ray recorder. context_missing=IGNORE_ERROR: patched AWS
+        # clients also run outside any segment (publish-queue workers, startup,
+        # drain) — those calls must not log an error per call.
         xray_recorder.configure(
             service="portunus",
             context=AsyncContext(),
             daemon_address=config.aws.xray_daemon_address,
             sampling=True,
+            context_missing="IGNORE_ERROR",
         )
 
         # Set up X-Ray log groups

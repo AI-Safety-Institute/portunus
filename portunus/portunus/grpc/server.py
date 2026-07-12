@@ -502,6 +502,14 @@ async def run() -> None:
     from portunus.services.publish_service import PublishService
     from portunus.services.state_service import StateService
 
+    if config.aws.xray_enabled:
+        # Configures the global recorder + patches AWS clients; ext_authz
+        # Check opens a segment per request joined from x-amzn-trace-id.
+        from portunus.services.xray_service import XRayService
+
+        XRayService()
+        logger.info("X-Ray tracing enabled (daemon=%s)", config.aws.xray_daemon_address)
+
     state_service = StateService()
     cache_service = CacheService(state_service=state_service)
     publish_service = PublishService(state_service=state_service)

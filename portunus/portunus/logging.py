@@ -11,7 +11,7 @@ import logging
 import sys
 
 from portunus.config import config
-from portunus.services.xray_service import get_trace_id
+from portunus.services.xray_service import request_id_var, trace_id_var
 
 logger = logging.getLogger("api.access")
 
@@ -41,8 +41,13 @@ class StructuredLogFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        # Add trace ID from context if available
-        trace_id = get_trace_id()
+        # Correlation ids, omitted (not placeholder-filled) when unset so
+        # their absence is queryable. request_id joins log lines to Firehose
+        # audit records; trace_id joins them to X-Ray traces.
+        request_id = request_id_var.get()
+        if request_id and "request_id" not in record.__dict__:
+            log_data["request_id"] = request_id
+        trace_id = trace_id_var.get()
         if trace_id:
             log_data["trace_id"] = trace_id
 
