@@ -1,4 +1,4 @@
-name: Lint using Ruff
+name: Check format using Ruff
 
 on:
   workflow_call:
@@ -8,7 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Lint with Ruff
+      - name: Check format with Ruff
         uses: astral-sh/ruff-action@0ce1b0bf8b818ef400413f810f8a11cdbda0034b # v4.0.0
         with:
+          args: 'format --check'
           version: 0.6.0
