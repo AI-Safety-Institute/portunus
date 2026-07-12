@@ -30,33 +30,18 @@ flush once the TTL lapses.
 > Secrets Manager on its next request, briefly raising latency and AWS API load
 > on the hot path. Use it deliberately, not as routine hygiene.
 
-## ⚠️ Blast radius: `FLUSHDB` is cross-fleet during the cutover window
-
-For as long as the **legacy (REST) fleet and the blue (gRPC sidecar) fleet
-coexist** (from akp #136 until the akp #159 teardown), both fleets share the
-same ElastiCache **database**. Their cache *keys* are disjoint (legacy keys on
-`sha256(payload)`, blue on `sha256(target_host:payload)`), so the fleets never
-read each other's entries — but `FLUSHDB` does not respect key schemes: **a
-"blue" flush also cold-starts the legacy fleet's auth cache** (and vice versa),
-producing an STS + Secrets Manager re-auth burst across *all* providers on
-*both* fleets at once.
-
-That is usually acceptable for the scenarios above (key compromise wants
-everything gone anyway), but during a cutover incident, remember a flush hits
-the fleet you are rolling *back to* as well. If a scoped flush becomes a
-recurring need, the right fix is per-fleet cache namespacing (separate logical
-Redis DB index or a key prefix + `SCAN`-based deletion) — tracked as a
-follow-up; do not improvise a `KEYS`-pattern delete against the production
-cache on the hot path.
+If a scoped (per-provider or per-tenant) flush becomes a recurring need, the
+right fix is cache namespacing (a key prefix + `SCAN`-based deletion) — do not
+improvise a `KEYS`-pattern delete against the production cache on the hot path.
 
 ## Prerequisites
 
 - **ECS Exec enabled** on the Portunus service (`enableExecuteCommand: true`).
-  This is configured in the akp infrastructure — see api-key-proxy **#136**.
+  This is configured in the api-key-proxy infrastructure.
 - The **Session Manager plugin** installed locally (`session-manager-plugin`);
   the AWS CLI uses it to open the exec channel.
 - IAM permission to run `ecs:ExecuteCommand` against the cluster/task (and the
-  task role must carry the `ssmmessages:*` channel actions — also from akp #136).
+  task role must carry the `ssmmessages:*` channel actions).
 - AWS credentials for the correct account/region (the Portunus fleet's).
 
 ## Procedure
@@ -85,7 +70,8 @@ see the fallback below). A non-zero exit / `CacheError` traceback means the
 `FLUSHDB` itself failed; re-run, and if it persists use the fallback.
 
 > The `--container` name must match the container in the task definition. It is
-> `portunus` in the akp CDK; adjust if your task definition names it differently.
+> `portunus` in the api-key-proxy CDK; adjust if your task definition names it
+> differently.
 
 ## Why this form
 

@@ -5,7 +5,7 @@
 This repo implements a secure API key proxy with two cooperating components:
 
 - **Proxy**: Envoy-based reverse proxy whose filter chain delegates auth and audit to Portunus over gRPC.
-- **Portunus**: FastAPI service hosting two gRPC servicers (Envoy ext_authz `Check` and ext_proc `Process`) plus operator-facing HTTP endpoints. Manages API keys from Secrets Manager, Redis-cached auth state, and Firehose publication.
+- **Portunus**: gRPC server hosting two servicers (Envoy ext_authz `Check` and ext_proc `Process`) plus the standard gRPC health service. Manages API keys from Secrets Manager, Redis-cached auth state, and Firehose publication.
 
 ## Key functionality
 
@@ -80,7 +80,7 @@ CI runs both lanes (`.github/workflows/ci.yml`); lint and type-check skip the Do
 
 ## Important files
 
-- `/portunus/portunus/app.py` — FastAPI app (operator endpoints) and gRPC server lifecycle.
+- `/portunus/portunus/grpc/server.py` — gRPC server lifecycle: health, reflection, drain.
 - `/portunus/portunus/grpc/auth_servicer.py` — ext_authz `Check` implementation; auth + signing.
 - `/portunus/portunus/grpc/proc_servicer.py` — ext_proc `Process` implementation; HTTP body and WS frame audit.
 - `/portunus/portunus/grpc/frame_observer.py` — wsproto-driven WS frame parsing.
