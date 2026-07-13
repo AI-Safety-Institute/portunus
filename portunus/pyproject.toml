@@ -28,6 +28,7 @@ dependencies = [
     # uvicorn is ignored in .github/dependabot.yml so it isn't bumped
     # automatically — update that ignore rule if this pin changes.
     "uvicorn>=0.29.0,<0.47",
+    "Brotli>=1.1.0,<2",
 ]
 
 [dependency-groups]

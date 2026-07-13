@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.5]
+
+### Fixed
+- Decode `Content-Encoding: br` (Brotli) response bodies. Previously fell
+  through to UTF-8 decode on compressed bytes, marking the row as
+  `response_body_decode_failure` and dropping it from token usage. (#26)
+
+## [0.5.4]
+
 ### Fixed
 - `_decompress_b64_body` now catches `zlib.error` in the gzip branch. A valid
   gzip header wrapping a corrupt deflate stream raises `zlib.error` (e.g.

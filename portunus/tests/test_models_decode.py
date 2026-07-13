@@ -1,4 +1,4 @@
-"""Tests for ``_decompress_b64_body``: plain, gzip/deflate, eventstream."""
+"""Tests for ``_decompress_b64_body``: plain, gzip/deflate/br, eventstream."""
 
 import base64
 import binascii
@@ -8,6 +8,7 @@ import logging
 import struct
 import zlib
 
+import brotli
 import pytest
 
 from portunus.models import (
@@ -73,6 +74,16 @@ def test_deflate_content_encoding_decompresses():
     assert decoded == body
 
 
+@pytest.mark.parametrize("encoding", ["br", "BR"])
+def test_br_content_encoding_decompresses(encoding):
+    body = '{"hello": "world"}'
+    decoded, failed = _decompress_b64_body(
+        _b64(brotli.compress(body.encode())), encoding
+    )
+    assert not failed
+    assert decoded == body
+
+
 def test_invalid_base64_marks_failure():
     decoded, failed = _decompress_b64_body("!!!not-base64!!!", None)
     assert failed
@@ -95,6 +106,12 @@ def test_gzip_with_corrupt_deflate_stream_marks_failure():
     valid = gzip.compress(b'{"hello": "world"}')
     corrupted = valid[:10] + b"\xff" * 20  # keep 10-byte gzip header, trash the stream
     decoded, failed = _decompress_b64_body(_b64(corrupted), "gzip")
+    assert failed
+    assert decoded is None
+
+
+def test_corrupt_br_marks_failure():
+    decoded, failed = _decompress_b64_body(_b64(b"\x00not brotli"), "br")
     assert failed
     assert decoded is None
 

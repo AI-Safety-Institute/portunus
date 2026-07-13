@@ -242,7 +242,7 @@ def _decompress_b64_body(
 ) -> tuple[Optional[str], bool]:
     """Base64-decode, optionally decompress, and decode a body to text.
 
-    Plain UTF-8 by default; gzip/deflate via ``content_encoding``;
+    Plain UTF-8 by default; gzip/deflate/Brotli via ``content_encoding``;
     AWS event-stream binary via ``content_type`` (see
     ``_parse_vnd_amazon_eventstream``). Returns ``(text, failed)``;
     ``text`` is None when ``failed``.
@@ -268,6 +268,13 @@ def _decompress_b64_body(
             try:
                 body_bytes = zlib.decompress(body_bytes)
             except (zlib.error, EOFError):
+                return None, True
+        elif "br" in encoding:
+            import brotli
+
+            try:
+                body_bytes = brotli.decompress(body_bytes)
+            except brotli.error:
                 return None, True
 
     if content_type and _EVENTSTREAM_CONTENT_TYPE in content_type.lower():
