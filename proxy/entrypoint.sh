@@ -63,6 +63,8 @@ EOF
 fi
 
 # DOWNSTREAM_TLS_TRANSPORT_SOCKET
+# NB: the container runs as uid 101 (envoy), so cert.crt/cert.key must be
+# readable by that user when terminating TLS here — see proxy/README.md.
 if [ -z "$DOWNSTREAM_TLS_TRANSPORT_SOCKET" ]; then
   export DOWNSTREAM_TLS_TRANSPORT_SOCKET=$(yq -o json <<EOF
 name: envoy.transport_sockets.tls
