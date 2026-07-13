@@ -13,6 +13,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   record as a decode failure — one such body in the 2026-06-11 00:00–12:00
   raw logs repeatedly killed whole `portunus-log-analysis-backfill` windows
   during the July 2026 regen.
+- Decode `Content-Encoding: br` (Brotli) response bodies. Previously fell
+  through to UTF-8 decode on compressed bytes, marking the row as
+  `response_body_decode_failure` and dropping it from token usage. (#26)
 
 ### Added
 - Constrain `uvicorn>=0.29.0,<0.47`: portunus is incompatible with

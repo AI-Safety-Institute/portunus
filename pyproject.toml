@@ -65,6 +65,11 @@ exclude = [
     "^\\.venv/.*",
 ]
 
+[[tool.mypy.overrides]]
+# Brotli ships no type stubs.
+module = ["brotli"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = [
     "tests",
