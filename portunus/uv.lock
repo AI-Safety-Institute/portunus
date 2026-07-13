@@ -1211,7 +1211,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5.0.0,<6" },
     { name = "rsa", specifier = "~=4.9" },
     { name = "uvicorn", specifier = ">=0.29.0,<0.47" },
-    { name = "websockets", specifier = ">=13.0,<17" },
+    { name = "websockets", specifier = ">=16,<17" },
 ]
 
 [package.metadata.requires-dev]
