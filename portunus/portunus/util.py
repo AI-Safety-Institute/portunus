@@ -11,7 +11,6 @@ import logging
 import time
 
 import boto3
-from aws_xray_sdk.core import xray_recorder
 
 # Import function for implementation
 # Re-export these functions for backwards compatibility
@@ -23,6 +22,7 @@ from portunus.services.arn_service import (
 from portunus.services.payload_service import (
     decode_payload,
 )
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -50,7 +50,7 @@ def get_current_session_arn() -> str:
     return response["Arn"]
 
 
-@xray_recorder.capture_async()  # type: ignore
+@capture_async()
 async def wait_until(
     condition_func, timeout=3.0, interval=0.05, error_message=None
 ) -> None:

@@ -11,8 +11,6 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from aws_xray_sdk.core import xray_recorder
-
 from portunus.config import config
 from portunus.exceptions import ServiceError
 from portunus.models import (
@@ -25,6 +23,7 @@ from portunus.models import (
     ResponseTrailersRecord,
 )
 from portunus.services.state_service import StateService
+from portunus.services.xray_service import capture_async
 from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
@@ -107,7 +106,7 @@ class PublishService:
             )
             raise ServiceError(f"Failed to publish to Kinesis Data Stream: {e}")
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def publish_metadata(
         self,
         request_id: str,
@@ -145,7 +144,7 @@ class PublishService:
             data_stream_name, record.to_dict(), request_id
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def publish_request_headers(
         self,
         request_id: str,
@@ -176,7 +175,7 @@ class PublishService:
             data_stream_name, record.to_dict(), request_id
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def publish_request_body(
         self,
         request_id: str,
@@ -218,7 +217,7 @@ class PublishService:
             data_stream_name, record.to_dict(), request_id
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def publish_request_trailers(
         self,
         request_id: str,
@@ -249,7 +248,7 @@ class PublishService:
             data_stream_name, record.to_dict(), request_id
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def publish_response_headers(
         self,
         request_id: str,
@@ -280,7 +279,7 @@ class PublishService:
             data_stream_name, record.to_dict(), request_id
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def publish_response_body(
         self,
         request_id: str,
@@ -322,7 +321,7 @@ class PublishService:
             data_stream_name, record.to_dict(), request_id
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def publish_response_trailers(
         self,
         request_id: str,

@@ -6,8 +6,9 @@ including trace context extraction, segment management, and logging integration.
 """
 
 import logging
+from collections.abc import Callable, Coroutine
 from contextvars import ContextVar, Token
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, TypeVar, cast
 
 from aws_xray_sdk.core import patch_all, xray_recorder
 from aws_xray_sdk.core.async_context import AsyncContext
@@ -16,6 +17,29 @@ from portunus.config import config
 
 # Context variable for trace ID
 trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
+
+_AsyncCallable = TypeVar(
+    "_AsyncCallable", bound=Callable[..., Coroutine[Any, Any, Any]]
+)
+
+
+def capture_async(
+    name: Optional[str] = None,
+) -> Callable[[_AsyncCallable], _AsyncCallable]:
+    """Typed passthrough for ``xray_recorder.capture_async``.
+
+    The aws-xray-sdk stubs type the object returned by ``capture_async`` as an
+    ``AsyncSubsegmentContextManager`` whose ``__call__`` uses wrapt's internal
+    ``(wrapped, instance, args, kwargs)`` form, so decorated coroutine methods
+    are seen as a bare ``Coroutine`` (not callable) at every call site. At
+    runtime it is a wrapt proxy that decorates with an identity signature, so
+    we cast it to the decorator type it actually behaves as. Runtime behaviour
+    is identical to calling ``xray_recorder.capture_async`` directly.
+    """
+    return cast(
+        Callable[[_AsyncCallable], _AsyncCallable],
+        xray_recorder.capture_async(name),
+    )
 
 
 class XRayContext:

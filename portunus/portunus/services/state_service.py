@@ -12,10 +12,10 @@ from typing import Optional
 
 import aiobotocore.session
 import redis.asyncio as aioredis
-from aws_xray_sdk.core import xray_recorder
 from redis.exceptions import ConnectionError, MaxConnectionsError
 
 from portunus.config import config
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -110,7 +110,7 @@ class StateService:
             finally:
                 self.redis_client = None
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def acquire_redis_connection(self, max_retries=8):
         """
         Acquire a Redis connection with exponential backoff retry.
