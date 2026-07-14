@@ -16,7 +16,7 @@ import time
 
 import pytest
 import websockets
-from websockets.exceptions import ConnectionClosed, InvalidStatusCode
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 # Add portunus to the Python path
 portunus_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "portunus")
@@ -140,8 +140,8 @@ class TestWebSocketAuth:
                 pytest.fail("Expected close, got message")
             except ConnectionClosed as e:
                 assert get_close_code(e) in (4001, 4003)
-        except InvalidStatusCode as e:
-            assert e.status_code in (400, 401, 403)
+        except InvalidStatus as e:
+            assert e.response.status_code in (400, 401, 403)
 
     @pytest.mark.asyncio
     async def test_ws_with_invalid_auth_rejected(self, ws_docker_setup):
@@ -149,7 +149,7 @@ class TestWebSocketAuth:
         try:
             ws = await websockets.connect(
                 PROXY_WS_URL,
-                extra_headers={"Authorization": "Bearer invalid_payload"},
+                additional_headers={"Authorization": "Bearer invalid_payload"},
                 open_timeout=5,
             )
             try:
@@ -157,8 +157,8 @@ class TestWebSocketAuth:
                 pytest.fail("Expected close, got message")
             except ConnectionClosed as e:
                 assert get_close_code(e) in (4001, 4003)
-        except InvalidStatusCode as e:
-            assert e.status_code in (401, 403)
+        except InvalidStatus as e:
+            assert e.response.status_code in (401, 403)
 
 
 @pytest.mark.slow
@@ -171,7 +171,7 @@ class TestWebSocketRelay:
         auth_header = make_auth_header()
         ws = await websockets.connect(
             PROXY_WS_URL,
-            extra_headers={"Authorization": auth_header},
+            additional_headers={"Authorization": auth_header},
             open_timeout=5,
         )
         try:
@@ -193,7 +193,7 @@ class TestWebSocketRelay:
         auth_header = make_auth_header()
         ws = await websockets.connect(
             PROXY_WS_URL,
-            extra_headers={"Authorization": auth_header},
+            additional_headers={"Authorization": auth_header},
             open_timeout=5,
         )
         try:
@@ -239,9 +239,9 @@ class TestWebSocketRelay:
             if r["record_type"] == "response_body"
             and base64.b64decode(r["body"]).decode() == test_msg
         ]
-        assert (
-            len(echo_msgs) >= 1
-        ), f"Echo of '{test_msg}' not found in response-body stream."
+        assert len(echo_msgs) >= 1, (
+            f"Echo of '{test_msg}' not found in response-body stream."
+        )
 
     @pytest.mark.asyncio
     async def test_metadata_published_on_ws_connect(self, ws_docker_setup):
@@ -249,7 +249,7 @@ class TestWebSocketRelay:
         auth_header = make_auth_header()
         ws = await websockets.connect(
             PROXY_WS_URL,
-            extra_headers={"Authorization": auth_header},
+            additional_headers={"Authorization": auth_header},
             open_timeout=5,
         )
         await ws.close()
@@ -278,20 +278,20 @@ class TestEnvoyWebSocketRouting:
         try:
             ws = await websockets.connect(
                 PROXY_WS_URL,
-                extra_headers={"Authorization": "Bearer invalid"},
+                additional_headers={"Authorization": "Bearer invalid"},
                 open_timeout=5,
             )
             try:
                 await asyncio.wait_for(ws.recv(), timeout=3)
             except ConnectionClosed as e:
-                assert (
-                    get_close_code(e) == 4001
-                ), f"Unexpected close code: {get_close_code(e)}"
-        except InvalidStatusCode as e:
-            assert e.status_code in (
+                assert get_close_code(e) == 4001, (
+                    f"Unexpected close code: {get_close_code(e)}"
+                )
+        except InvalidStatus as e:
+            assert e.response.status_code in (
                 401,
                 403,
-            ), f"Expected auth rejection, got {e.status_code}"
+            ), f"Expected auth rejection, got {e.response.status_code}"
 
     @pytest.mark.asyncio
     async def test_non_ws_path_still_routes_to_target(self, ws_docker_setup):

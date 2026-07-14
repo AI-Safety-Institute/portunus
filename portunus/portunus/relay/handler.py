@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import websockets
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from websockets.asyncio.client import ClientConnection
+from websockets.asyncio.client import connect as ws_connect
 
 from portunus.config import config
 from portunus.relay import WsCloseCode
@@ -112,7 +114,7 @@ async def _connect_upstream(
     api_key: str,
     request_id: str,
     max_message_size: int,
-) -> websockets.WebSocketClientProtocol | None:
+) -> ClientConnection | None:
     """Connect to the upstream WebSocket.
 
     Returns None if the connection fails.
@@ -121,9 +123,9 @@ async def _connect_upstream(
     headers = _build_upstream_headers(websocket, api_key)
 
     try:
-        upstream = await websockets.connect(
+        upstream = await ws_connect(
             uri,
-            extra_headers=headers,
+            additional_headers=headers,
             max_size=max_message_size,
             open_timeout=10,
         )
@@ -169,7 +171,7 @@ async def _publish_connection_metadata(
 
 async def _relay(
     websocket: WebSocket,
-    upstream: websockets.WebSocketClientProtocol,
+    upstream: ClientConnection,
     publish_service: PublishService,
     request_id: str,
     max_lifetime: int,
@@ -258,7 +260,7 @@ async def _relay(
     except TimeoutError:
         close_code = WsCloseCode.GOING_AWAY
         logger.info(
-            f"WS {request_id}: Connection lifetime limit reached " f"({max_lifetime}s)"
+            f"WS {request_id}: Connection lifetime limit reached ({max_lifetime}s)"
         )
     except asyncio.CancelledError:
         close_code = WsCloseCode.GOING_AWAY
@@ -301,9 +303,7 @@ async def handle_ws_connection(
     # Accept and connect upstream
     await websocket.accept()
     connection_start = time.monotonic()
-    logger.info(
-        f"WS {request_id}: Connection accepted, connecting upstream " f"to /{path}"
-    )
+    logger.info(f"WS {request_id}: Connection accepted, connecting upstream to /{path}")
 
     await _publish_connection_metadata(
         publish_service, websocket, ws_auth, request_id, target.host

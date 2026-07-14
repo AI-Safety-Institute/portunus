@@ -268,9 +268,9 @@ def test_sign_request_with_anthropic_test_cases(
     local_signature2 = _sign_with_private_key(
         test_keys["private_key_pem"], message_digest
     )
-    assert (
-        local_signature == local_signature2
-    ), "RFC 6979 deterministic ECDSA should produce identical signatures"
+    assert local_signature == local_signature2, (
+        "RFC 6979 deterministic ECDSA should produce identical signatures"
+    )
 
     # Verify signature headers match expected from test vector
     assert headers["Signature-Input"] == expected["signature_input"]
@@ -278,9 +278,9 @@ def test_sign_request_with_anthropic_test_cases(
 
     # Signature header format: `sig1=:{base64}:`
     signature_match = re.match(r"^sig1=:(.+):$", headers["Signature"])
-    assert (
-        signature_match is not None
-    ), f"Signature header format invalid: {headers['Signature']}"
+    assert signature_match is not None, (
+        f"Signature header format invalid: {headers['Signature']}"
+    )
     signature_b64 = signature_match.group(1)
     signature_bytes = base64.b64decode(signature_b64)
 
