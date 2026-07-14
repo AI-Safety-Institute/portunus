@@ -63,6 +63,19 @@ RATE_LIMIT_INTERVAL_SECONDS=60
 
 See `entrypoint.sh` for full list of environment variables and defaults.
 
+### Terminating TLS at the proxy
+
+By default the proxy listener is plain HTTP and TLS is expected to terminate in
+front of it (e.g. a load balancer). To terminate TLS at the proxy itself,
+provide `/envoy/cert.crt` and `/envoy/cert.key` (see the `DOWNSTREAM_TLS_TRANSPORT_SOCKET`
+block in `entrypoint.sh`).
+
+The container runs as the non-root `envoy` user (uid 101), so those cert files
+**must be readable by uid 101**. When mounting them at runtime, set the source
+permissions/ownership accordingly — e.g. Kubernetes `securityContext.fsGroup: 101`,
+or `--chown` on a bind mount. If the key is unreadable, Envoy fails to start with
+a cert-load error.
+
 ## Lua Library
 
 The `lib/` directory contains a testable Lua library that extracts complex logic from `lua.lua`:
