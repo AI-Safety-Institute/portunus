@@ -137,9 +137,9 @@ def test_ws_route_matches_upgrade_header_case_insensitively(
     cluster (would 400 / 426 / hang).
     """
     status, _ = _do_raw_upgrade("/echo", upgrade_token=upgrade_token)
-    assert (
-        b"101" in status
-    ), f"expected 101 Switching Protocols for {upgrade_token!r}, got {status!r}"
+    assert b"101" in status, (
+        f"expected 101 Switching Protocols for {upgrade_token!r}, got {status!r}"
+    )
 
 
 @pytest.mark.slow
@@ -157,9 +157,9 @@ def test_ws_upgrade_101_response_has_no_transfer_encoding_chunked_header(
     the regression.
     """
     status, headers = _do_raw_upgrade("/echo")
-    assert (
-        b"101" in status
-    ), f"expected 101 Switching Protocols, got status line {status!r}"
+    assert b"101" in status, (
+        f"expected 101 Switching Protocols, got status line {status!r}"
+    )
     assert "transfer-encoding" not in headers, (
         "RFC 7230 §3.3.1 forbids Transfer-Encoding on 1xx responses; "
         f"got: {headers.get('transfer-encoding')!r}"

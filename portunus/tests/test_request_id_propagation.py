@@ -197,7 +197,7 @@ async def test_check_opens_xray_segment_from_envoy_trace_header(monkeypatch):
 
     monkeypatch.setattr(servicer, "_auth_pass", fake_auth_pass)
     trace_header = (
-        "Root=1-6800aa2c-abcdef012345678912345678;" "Parent=53995c3f42cd8ad8;Sampled=1"
+        "Root=1-6800aa2c-abcdef012345678912345678;Parent=53995c3f42cd8ad8;Sampled=1"
     )
     result = await servicer.Check(
         _auth_request_with_headers("req-ctx-2", {"x-amzn-trace-id": trace_header}),

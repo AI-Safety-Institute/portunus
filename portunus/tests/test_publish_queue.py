@@ -232,9 +232,9 @@ async def test_stop_with_queue_full_cancels_workers_without_raising(caplog) -> N
 
     # Workers cancelled, registry cleared; warning signals the slow path.
     assert queue._workers == []  # noqa: SLF001 — direct inspection of cleared state
-    assert any(
-        "did not drain" in record.message for record in caplog.records
-    ), "expected the slow-shutdown warning to be emitted"
+    assert any("did not drain" in record.message for record in caplog.records), (
+        "expected the slow-shutdown warning to be emitted"
+    )
 
 
 @pytest.mark.asyncio

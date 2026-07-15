@@ -208,9 +208,9 @@ def test_inflight_http_request_during_portunus_restart_does_not_hang(
             if last_status == 200:
                 break
         time.sleep(1)
-    assert (
-        last_status == 200
-    ), f"did not recover to 200 after restart (last={last_status})"
+    assert last_status == 200, (
+        f"did not recover to 200 after restart (last={last_status})"
+    )
 
 
 def test_portunus_restart_keeps_same_topology_and_recovers(
@@ -359,15 +359,15 @@ def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_prox
         f"({(received[-1] - stop_started):.1f}s after SIGTERM was issued)"
     )
     # The stream must have kept flowing well into the drain, not raced it.
-    assert (
-        received[-1] - stop_started > 3
-    ), "stream finished before the drain was meaningfully exercised"
+    assert received[-1] - stop_started > 3, (
+        "stream finished before the drain was meaningfully exercised"
+    )
     assert stop.returncode == 0
     # Drain exits when connections hit zero — not at the 90s SIGKILL.
     assert stop_elapsed < 45, f"drain held Envoy for {stop_elapsed:.1f}s"
-    assert (
-        _exit_code(proxy) == "0"
-    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    assert _exit_code(proxy) == "0", (
+        f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    )
 
 
 @pytest.mark.asyncio
@@ -422,9 +422,9 @@ async def test_envoy_sigterm_keeps_websocket_flowing_during_drain(
     stop_elapsed = time.monotonic() - stop_started
     assert stop.returncode == 0
     assert stop_elapsed < 45, f"drain held Envoy for {stop_elapsed:.1f}s"
-    assert (
-        _exit_code(proxy) == "0"
-    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    assert _exit_code(proxy) == "0", (
+        f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    )
 
 
 def test_envoy_sigterm_quiescent_exits_fast_and_clean(docker_setup, restore_proxy):
@@ -446,6 +446,6 @@ def test_envoy_sigterm_quiescent_exits_fast_and_clean(docker_setup, restore_prox
 
     assert result.returncode == 0, result.stderr
     assert elapsed < 20, f"quiescent drain took {elapsed:.1f}s"
-    assert (
-        _exit_code(proxy) == "0"
-    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    assert _exit_code(proxy) == "0", (
+        f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    )

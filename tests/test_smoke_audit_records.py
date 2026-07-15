@@ -122,9 +122,9 @@ async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
     )
 
     request_ids = {r.get("request_id") for r in response_body_records}
-    assert request_ids and all(
-        request_ids
-    ), f"Frame records missing or empty request_ids: {request_ids}"
+    assert request_ids and all(request_ids), (
+        f"Frame records missing or empty request_ids: {request_ids}"
+    )
     assert len(request_ids) == 1, (
         f"Frame records span multiple request_ids (unexpected for a single "
         f"WS connection): {request_ids}"
@@ -149,9 +149,9 @@ async def test_codex_responses_flow_emits_per_frame_audit_and_summary(
         f"ws_summary undercount: server_text_frames={summary['server_text_frames']} "
         f"vs observed {server_frame_count}"
     )
-    assert (
-        summary["client_text_frames"] >= 1
-    ), f"ws_summary missing client frame: {summary['client_text_frames']}"
+    assert summary["client_text_frames"] >= 1, (
+        f"ws_summary missing client frame: {summary['client_text_frames']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +252,6 @@ def test_signed_request_publishes_digest_and_signature_headers_to_s3(
         f"{decoded_digest} vs {vector['expected_values']['content_digest']}"
     )
     decoded_sig = base64.b64decode(raw_headers["signature"]).decode("utf-8")
-    assert re.match(
-        r"^sig1=:[A-Za-z0-9+/=]+:$", decoded_sig
-    ), f"Signature in the audit record malformed: {decoded_sig!r}"
+    assert re.match(r"^sig1=:[A-Za-z0-9+/=]+:$", decoded_sig), (
+        f"Signature in the audit record malformed: {decoded_sig!r}"
+    )

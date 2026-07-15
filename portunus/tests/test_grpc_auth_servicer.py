@@ -378,9 +378,9 @@ async def test_missing_proxy_key_metadata_is_rejected_with_401_and_does_not_call
     assert response.HasField("denied_response")
     assert response.denied_response.status.code == 401
     assert "proxy identity" in response.denied_response.body.lower()
-    assert (
-        auth.auth_calls == []
-    ), "Auth backend should never be reached without a valid proxy key"
+    assert auth.auth_calls == [], (
+        "Auth backend should never be reached without a valid proxy key"
+    )
 
 
 @pytest.mark.asyncio

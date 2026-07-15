@@ -224,7 +224,7 @@ class FrameObserver:
             )
             yield _capped(direction, "text", payload)
         elif isinstance(event, BytesMessage):
-            yield _capped(direction, "binary", event.data)
+            yield _capped(direction, "binary", bytes(event.data))
         elif isinstance(event, Ping):
             yield ObservedFrame(
                 direction=direction, opcode="ping", payload=event.payload

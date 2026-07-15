@@ -23,7 +23,6 @@ from portunus.models import (
     WSSummaryRecord,
 )
 from portunus.services.state_service import StateService
-from portunus.services.xray_service import capture_async
 from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
