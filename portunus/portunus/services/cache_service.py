@@ -9,6 +9,7 @@ from portunus.config import config
 from portunus.exceptions import CacheError
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
 from portunus.services.state_service import StateService
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -164,6 +165,7 @@ class CacheService:
             logger.error("Error caching auth response: %s", type(e).__name__)
             raise CacheError(f"Failed to store in cache: {type(e).__name__}")
 
+    @capture_async()
     async def flush_all(self) -> bool:
         """Flush the entire auth cache.
 
@@ -186,6 +188,7 @@ class CacheService:
             logger.error("Error flushing cache: %s", type(e).__name__)
             raise CacheError(f"Failed to flush cache: {type(e).__name__}")
 
+    @capture_async()
     async def health_check(self) -> bool:
         """Check if the Redis cache is available."""
         return await self.state_service.health_check()

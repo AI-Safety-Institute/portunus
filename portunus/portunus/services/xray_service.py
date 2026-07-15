@@ -6,8 +6,9 @@ including trace context extraction, segment management, and logging integration.
 """
 
 import logging
+from collections.abc import Callable, Coroutine
 from contextvars import ContextVar, Token
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, TypeVar, cast
 
 from aws_xray_sdk.core import patch_all, xray_recorder
 from aws_xray_sdk.core.async_context import AsyncContext
@@ -23,6 +24,25 @@ trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
 # here (not portunus.logging) because importing that module configures
 # logging as a side effect, which the servicers must not trigger.
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+
+_AsyncCallable = TypeVar(
+    "_AsyncCallable", bound=Callable[..., Coroutine[Any, Any, Any]]
+)
+
+
+def capture_async(
+    name: Optional[str] = None,
+) -> Callable[[_AsyncCallable], _AsyncCallable]:
+    """Typed passthrough for ``xray_recorder.capture_async``.
+
+    The stubs type the returned decorator via wrapt internals, so decorated
+    coroutine methods look like bare ``Coroutine``s at call sites; at runtime
+    it decorates with an identity signature, so cast to what it behaves as.
+    """
+    return cast(
+        Callable[[_AsyncCallable], _AsyncCallable],
+        xray_recorder.capture_async(name),
+    )
 
 
 class XRayContext:

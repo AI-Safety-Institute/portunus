@@ -16,6 +16,7 @@ from portunus.services.arn_service import (
 from portunus.services.payload_service import (
     decode_payload,
 )
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 

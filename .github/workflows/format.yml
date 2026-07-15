@@ -12,4 +12,4 @@ jobs:
         uses: astral-sh/ruff-action@0ce1b0bf8b818ef400413f810f8a11cdbda0034b # v4.0.0
         with:
           args: 'format --check'
-          version: 0.6.0
+          version: 0.15.21

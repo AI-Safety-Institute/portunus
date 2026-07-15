@@ -1,12 +1,7 @@
-"""Tests for ``_decompress_b64_body`` (plain, gzip/deflate/br, eventstream) and.
-
-that ``JoinedLogRecord`` callers thread ``content_type`` into the decoder --
-regression guard for Bedrock streaming token accounting.
-"""
+"""Tests for ``_decompress_b64_body``: plain, gzip/deflate/br, eventstream."""
 
 import base64
 import binascii
-import builtins
 import gzip
 import json
 import logging
@@ -14,6 +9,7 @@ import struct
 import zlib
 from typing import Any
 
+import brotli
 import pytest
 
 from portunus.models import (
@@ -28,7 +24,6 @@ try:
 except ImportError:  # pragma: no cover — Glue-like env without brotli
     HAS_BROTLI = False
 
-requires_brotli = pytest.mark.skipif(not HAS_BROTLI, reason="brotli not installed")
 
 
 def _b64(data: bytes) -> str:
@@ -89,7 +84,6 @@ def test_deflate_content_encoding_decompresses():
     assert decoded == body
 
 
-@requires_brotli
 @pytest.mark.parametrize("encoding", ["br", "BR"])
 def test_br_content_encoding_decompresses(encoding):
     body = '{"hello": "world"}'
@@ -125,26 +119,7 @@ def test_gzip_with_corrupt_deflate_stream_marks_failure():
 
 
 def test_corrupt_br_marks_failure():
-    """Corrupt (or undecodable-without-library) Brotli maps to a failure."""
     decoded, failed = _decompress_b64_body(_b64(b"\x00not brotli"), "br")
-    assert failed
-    assert decoded is None
-
-
-def test_br_without_library_marks_failure(monkeypatch):
-    """Missing ``brotli`` (not stdlib, absent from the Glue image) must.
-
-    degrade to a decode-failure via ImportError, not crash the job.
-    """
-    real_import = builtins.__import__
-
-    def _no_brotli(name, *args, **kwargs):
-        if name in ("brotli", "brotlicffi"):
-            raise ImportError(name)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _no_brotli)
-    decoded, failed = _decompress_b64_body(_b64(b'{"hello": "world"}'), "br")
     assert failed
     assert decoded is None
 

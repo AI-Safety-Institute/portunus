@@ -233,13 +233,8 @@ def _decompress_b64_body(
             except (zlib.error, EOFError):
                 return None, True
         elif "br" in encoding:
-            # Brotli is not stdlib; the service depends on it, but this module
-            # also ships standalone to Glue whose base image may lack it —
-            # degrade to a decode-failure rather than crash.
-            try:
-                import brotli  # type: ignore[import-untyped,import-not-found]
-            except ImportError:
-                return None, True
+            import brotli
+
             try:
                 body_bytes = brotli.decompress(body_bytes)
             except brotli.error:

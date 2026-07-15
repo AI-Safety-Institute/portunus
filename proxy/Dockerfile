@@ -43,4 +43,8 @@ ENV ENVOY_LOG_LEVEL=info \
 
 COPY entrypoint.sh /envoy/entrypoint.sh
 RUN chmod +x /envoy/entrypoint.sh
+
+# Drop root — Envoy only needs to bind the non-privileged LISTEN_PORT (8888),
+# and entrypoint.sh writes its rendered config under /envoy (owned by envoy).
+USER envoy
 CMD ["/envoy/entrypoint.sh"]

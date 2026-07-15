@@ -12,6 +12,7 @@ from aiobotocore.session import get_session
 from portunus.config import config
 from portunus.exceptions import FetchSecretError
 from portunus.models import AuthPayload
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -33,6 +34,7 @@ class SecretsService:
         """
         self.boto_session = boto_session if boto_session is not None else get_session()
 
+    @capture_async()
     async def fetch_secret(self, payload: AuthPayload) -> str:
         """
         Fetch raw secret from Secrets Manager.

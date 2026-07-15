@@ -119,8 +119,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Removed the stale `CORS_ALLOWED_ORIGINS` proxy default left behind
   after CORS support was removed from the gRPC Envoy filter chain.
 
-## [0.6.0]
-
 ### Added
 - `envoy.filters.http.ext_authz` + `envoy.filters.http.ext_proc` gRPC
   pipeline replacing the previous Lua-driven REST callouts. Auth runs
@@ -257,6 +255,109 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   401 on every request. `GRPC_PROXY_API_KEY_OPTIONAL=true` only for
   local dev.
 
+## [0.6.0]
+
+### Changed
+- Bumped Envoy 1.31 → 1.38.3 (current supported release; keeps the proxy off the
+  near-end-of-support 1.36 line). Required for reliable admin-driven connection
+  draining: draining under in-flight async HTTP calls (the Lua audit `httpCall`s)
+  could crash Envoy on shutdown — a teardown-crash class hardened across later
+  releases — so we track a current version rather than pin an old one. (#90)
+- Modernise dev tooling: ruff 0.15, mypy 2, pre-commit 4, websockets 16. (#86)
+
+### Fixed
+- Envoy now gracefully drains in-flight **plain-HTTP** streams on `SIGTERM`
+  instead of exiting immediately and RSTing them, so ECS scale-in / deploys no
+  longer cut streaming responses (SSE, AWS eventstream, slow LLM completions)
+  mid-flight. `proxy/entrypoint.sh` orchestrates the drain through Envoy's
+  loopback-only admin API (there is no YAML/config knob to drain on `SIGTERM`);
+  bounded by `DRAIN_TIME_S` (default 60s). WebSocket sessions are unchanged —
+  excluded from the drain and closed at drain end as they are today (WS-aware
+  draining lands with the gRPC cutover, #19). For full effect it needs the
+  companion api-key-proxy change raising the legacy fleet's `stop_timeout` and
+  ALB `deregistration_delay` to 120s. (#90)
+- Clear the in-process auth cache on `/cache/flush`, not just Redis. (#89)
+
+### Security
+- Bump Python deps to clear the security backlog (FastAPI/Starlette,
+  cryptography). (#85)
+- Pin the remaining build-time deps (uv image digest, yq checksum). (#87)
+- Stop inheriting unnecessary secrets in CI workflows. (#88)
+
+## [0.5.5]
+
+### Changed
+- Harden the supply chain: pin GitHub Actions, Docker base images, and Python
+  dependencies by digest/hash, and enable Dependabot. (#31)
+
+### Fixed
+- Decode `Content-Encoding: br` (Brotli) response bodies. Previously fell
+  through to UTF-8 decode on compressed bytes, marking the row as
+  `response_body_decode_failure` and dropping it from token usage. (#26)
+
+### Documentation
+- Document the service-auth trust model and required deployment posture
+  (proxy → Portunus authentication / network-isolation expectations). (#33)
+- Document the audit-logging capture behaviour (what request/response data is
+  captured; redaction is a downstream concern). (#37)
+
+## [0.5.4]
+
+### Fixed
+- `_decompress_b64_body` now catches `zlib.error` in the gzip branch. A valid
+  gzip header wrapping a corrupt deflate stream raises `zlib.error` (e.g.
+  "invalid bit length repeat"), which escaped the existing
+  `(OSError, EOFError)` handler and crashed the caller instead of marking the
+  record as a decode failure — one such body in the 2026-06-11 00:00–12:00
+  raw logs repeatedly killed whole `portunus-log-analysis-backfill` windows
+  during the July 2026 regen. (#36)
+
+## [0.5.3]
+
+### Fixed
+- Revert the dependency lock changes accidentally introduced by the #17 bulk
+  lock regeneration (v0.5.1): restore both `uv.lock` files to the v0.5.0
+  version set, and drop the `aws-xray-sdk` / `types-aws-xray-sdk` caps added
+  alongside them. Among the accidental bumps, uvicorn 0.29.0 → 0.47.0 broke
+  X-Ray trace propagation — uvicorn 0.47.0 imports the ASGI app before the
+  serving event loop exists (encode/uvicorn#2919), so `AsyncContext()`
+  (constructed at import time via `XRayService()`) binds to the wrong loop,
+  `current_segment()` returns None in handlers, and every request logged
+  `request_id="No-Trace-Id"`, collapsing all proxy logs into one group and
+  OOMing the joined-logs ETL (2026-07-02 outage). The v0.5.2 aws-xray-sdk
+  theory was wrong: the built image ran 2.14.0 in both the working and broken
+  deployments.
+
+### Added
+- Constrain `uvicorn>=0.29.0,<0.47` so a future lock regeneration can't silently
+  reintroduce the trace-breaking 0.47.0 (see the Fixed entry above); locked
+  versions unchanged. (#28)
+- `tests/test_trace_propagation.py`: boots a real uvicorn subprocess and asserts
+  an `X-Amzn-Trace-Id` header round-trips into the handler's X-Ray segment
+  (fails on uvicorn >=0.47; `TestClient` can't catch it). (#28)
+
+## [0.5.2]
+
+### Fixed
+- Restore `aws-xray-sdk` to `>=2.15.0,<3`. v0.5.1 accidentally capped it to
+  `<2.15` (an unrelated, undocumented rider in the #17 eventstream-decode change,
+  `daf52c4`), which resolved the SDK *down* to 2.14.0 in downstream consumers.
+  2.14.0 fails to propagate the X-Ray trace context in the proxy runtime, so
+  every proxied request was logged with `request_id="No-Trace-Id"`; that
+  collapsed all logs into a single request_id group and OOM-ed the downstream
+  `portunus-log-analysis` Glue ETL, taking down joined-logs, token usage, and the
+  misalignment-monitor dashboard for ~4 days (from 2026-07-02). Floored at
+  2.15.0 so 2.14.0 can no longer resolve.
+
+## [0.5.1]
+
+### Fixed
+- Decode AWS Bedrock `application/vnd.amazon.eventstream` response bodies into
+  SSE so token usage is parseable for Bedrock streaming responses (previously
+  stored undecoded and dropped downstream). (#17)
+- Treat a truncated/incomplete eventstream as a decode failure rather than a
+  silent partial, so cut-off Bedrock streams don't silently undercount tokens. (#24)
+
 ## [0.5.0]
 
 ### Added
@@ -318,8 +419,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.2.0...v0.3.0
