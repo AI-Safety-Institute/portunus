@@ -12,7 +12,7 @@ This repo implements a secure API key proxy with two cooperating components:
 - Securely retrieve API keys from AWS Secrets Manager via short-lived AWS credentials supplied in the client's request.
 - Transparently proxy requests to third-party APIs (e.g. OpenAI, Anthropic) with header substitution.
 - Stream request / response / WebSocket audit to Firehose (direct-PUT) for downstream archival (S3) and joining (Glue ETL → aisitok).
-- Redis cache for authorisation responses to keep the hot path off Secrets Manager.
+- Two-layer auth cache (shared Redis + short-TTL in-process copy per task) to keep the hot path off Secrets Manager; a flush token in Redis converges a fleet-wide flush within `CACHE_FLUSH_POLL_SECONDS`.
 - Optional RFC 9421 request signing for Anthropic-style upstreams (Content-Digest + Signature / Signature-Input).
 - TLS termination, per-route rate limiting, and request-id propagation throughout.
 
@@ -63,6 +63,7 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 | `GRPC_HOST` | Interface the gRPC server binds to | loopback by default; set `0.0.0.0` if Envoy and Portunus are in separate netns |
 | `GRPC_PROXY_API_KEY` | Pre-shared key for the Envoy → Portunus gRPC channel (Envoy presents it as `x-portunus-proxy-key` initial_metadata; proxy side sets the same value via `PORTUNUS_API_KEY`) | identity check on both servicers |
 | `CACHE_DURATION` | Auth-cache TTL | seconds |
+| `CACHE_FLUSH_POLL_SECONDS` | How often each task re-checks the shared flush token (fleet-wide flush convergence bound) | default 5 |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_MAX_CONNECTIONS` | Redis connection | |
 | `FIREHOSE_*_STREAM` | Per-record-type Firehose delivery streams (metadata, request/response headers/body/trailers, ws summary) | direct-PUT |
 | `RATE_LIMIT_PERCENT_ENABLED` / `RATE_LIMIT_INTERVAL_SECONDS` / `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Optional rate limiting | `0` disables |

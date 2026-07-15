@@ -32,6 +32,14 @@ class RedisConfig(BaseModel):
         description="How long to cache authorization responses (seconds)",
         ge=1,
     )
+    flush_poll_seconds: float = Field(
+        default=5.0,
+        description=(
+            "How often each task re-checks the shared flush token; the "
+            "fleet-wide convergence bound for a cache flush (seconds)"
+        ),
+        gt=0,
+    )
     log_ttl: int = Field(
         default=86400,
         description="How long to store log data (seconds)",
@@ -398,6 +406,7 @@ def get_config() -> PortunusConfig:
         password=os.environ.get("REDIS_PASSWORD", None),
         # cache auth to extend temporary AWS creds lifetime
         cache_duration=int(os.environ.get("CACHE_DURATION", "86400")),
+        flush_poll_seconds=float(os.environ.get("CACHE_FLUSH_POLL_SECONDS", "5")),
         # keep log ttl short to prevent storage bloat
         log_ttl=int(os.environ.get("LOG_TTL", "3600")),
         max_connections=int(os.environ.get("REDIS_MAX_CONNECTIONS", "200")),

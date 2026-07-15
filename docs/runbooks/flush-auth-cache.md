@@ -3,13 +3,17 @@
 ## What this does
 
 Portunus caches successful authorisation results (the resolved upstream API key
-plus principal/signing metadata) in a **single shared ElastiCache (Redis)**,
-keyed by `sha256(target_host:payload)` with a per-entry TTL. This runbook flushes
-**all** of those entries fleet-wide by calling the application's own
-`CacheService.flush_all()`, which issues a Redis `FLUSHDB`.
+plus principal/signing metadata) in two layers: a **single shared ElastiCache
+(Redis)**, keyed by `sha256(target_host:payload)` with a per-entry TTL, and a
+short-lived **in-process copy inside each task**. This runbook flushes both,
+fleet-wide, by calling the application's own `CacheService.flush_all()`, which
+issues a Redis `FLUSHDB` and then rewrites a flush token in Redis.
 
-Because the cache is one shared ElastiCache for the whole Portunus fleet, **one
-flush is fleet-wide** — you do not need to repeat it per task.
+**One flush is fleet-wide** — you do not need to repeat it per task. The task
+you run it on converges instantly; every other task re-checks the flush token
+at most `CACHE_FLUSH_POLL_SECONDS` (default 5s) apart and drops its in-process
+copy on change, so the whole fleet stops serving flushed entries within a few
+seconds.
 
 ## When to use it
 
@@ -56,7 +60,7 @@ TASK=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SVC" \
 
 # Exec into the Portunus container and flush via the app's own Redis config.
 aws ecs execute-command --cluster "$CLUSTER" --task "$TASK" --container portunus --interactive \
-  --command "python -c \"import asyncio; from portunus.services.cache_service import CacheService; print('flushed:', asyncio.run(CacheService().flush_all()))\""
+  --command "portunus flush-cache"
 ```
 
 A successful run prints:
@@ -67,7 +71,9 @@ flushed: True
 
 `flushed: False` means Redis was unreachable from the task (nothing was flushed —
 see the fallback below). A non-zero exit / `CacheError` traceback means the
-`FLUSHDB` itself failed; re-run, and if it persists use the fallback.
+`FLUSHDB` or the flush-token write failed; **re-run** (the command is idempotent
+— without a fresh token the other tasks converge only by their in-process TTL),
+and if it persists use the fallback.
 
 > The `--container` name must match the container in the task definition. It is
 > `portunus` in the api-key-proxy CDK; adjust if your task definition names it
@@ -75,15 +81,16 @@ see the fallback below). A non-zero exit / `CacheError` traceback means the
 
 ## Why this form
 
-- **`CacheService().flush_all()` reuses the app's own Redis configuration.**
-  Constructed with no arguments, `CacheService` builds a default `StateService`
-  that reads the same `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` (TLS + AUTH)
-  from the task environment that the live servicers use — so you connect exactly
-  as Portunus does, with no separate credentials to manage.
-- **The container has the `redis` Python library but not `redis-cli` or
-  `grpcurl`.** Driving the flush through the app code is the only in-image path;
-  there is no admin CLI and no network-reachable admin endpoint.
-- **One exec suffices** because the cache is a single shared ElastiCache.
+- **`portunus flush-cache` reuses the app's own Redis configuration.** It
+  drives `CacheService.flush_all()` with a default `StateService` that reads
+  the same `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` (TLS + AUTH) from the
+  task environment that the live servicers use — so you connect exactly as
+  Portunus does, with no separate credentials to manage.
+- **The container has the `portunus` CLI and `redis` Python library but not
+  `redis-cli` or `grpcurl`.** Driving the flush through the app code is the
+  only in-image path; there is no network-reachable admin endpoint.
+- **One exec suffices**: Redis is shared, and the rewritten flush token is the
+  broadcast that makes every other task drop its in-process copy.
 - **It is auditable and IAM-gated.** `ecs:ExecuteCommand` is gated by IAM, and the
   session is logged via CloudTrail (the `ExecuteCommand` API call) and SSM session
   history.
@@ -98,8 +105,16 @@ foothold inside the VPC whose security group is allowed to reach the cache on
 # <primary-endpoint>: ElastiCache primary endpoint
 # <auth-token>: the Redis AUTH token from Secrets Manager (do NOT echo it)
 redis-cli -h <primary-endpoint> --tls -a <auth-token> FLUSHDB
+redis-cli -h <primary-endpoint> --tls -a <auth-token> SET cache:flush-token "$(uuidgen)"
 ```
 
 Pull the AUTH token from Secrets Manager rather than pasting a literal (avoid
 leaving the token in shell history). This bypasses the application entirely and
 talks to the same shared cache, so it is likewise fleet-wide.
+
+The `SET cache:flush-token` **is not optional**: it is the signal the tasks
+poll to drop their in-process copies. `FLUSHDB` alone deletes the token key,
+which only signals tasks that have seen a previous flush — on a fleet that has
+never flushed, tasks would keep serving in-process entries until their local
+TTL lapses. Always set a fresh token after a manual `FLUSHDB`, in that order
+(token first would let a task re-fill from not-yet-flushed Redis).

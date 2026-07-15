@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **In-process auth-cache layer with fleet-wide flush convergence.** Each
+  task keeps a short-TTL in-process copy of auth results in front of shared
+  Redis, keeping the hot path off Redis between requests. A flush stays
+  honest fleet-wide via a flush token: `flush_all` rewrites
+  `cache:flush-token` in Redis after `FLUSHDB`, and every task re-checks the
+  token at most `CACHE_FLUSH_POLL_SECONDS` (default 5s) apart, dropping its
+  in-process copy on change — so the flushing task converges instantly and
+  the rest of the fleet within one poll interval. New `portunus flush-cache`
+  CLI subcommand drives it for the ECS-exec runbook
+  (`docs/runbooks/flush-auth-cache.md`).
 - **Live CloudWatch metrics (EMF)**: a periodic reporter
   (`GRPC_METRICS_INTERVAL_SECONDS`, default 60, 0 disables) emits
   Embedded Metric Format lines to stdout — CloudWatch Logs extracts them

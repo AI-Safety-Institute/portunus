@@ -1,8 +1,16 @@
-"""Auth-response caching in Redis (the CacheService class)."""
+"""Auth-response caching: shared Redis plus a per-task in-process layer.
+
+A flush must be honest fleet-wide even though it runs on one task: the
+in-process layers on every other task are unreachable directly, so
+``flush_all`` rewrites a flush token in Redis and each task re-checks it at
+most ``flush_poll_seconds`` apart, dropping its in-process layer on change.
+"""
 
 import hashlib
 import json
 import logging
+import time
+import uuid
 from typing import Optional
 
 from portunus.config import config
@@ -12,6 +20,15 @@ from portunus.services.state_service import StateService
 from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
+
+# Bounds how long an in-process entry can outlive its Redis counterpart for
+# non-flush changes (entry TTL expiry, secret rotation without a flush).
+# Flush convergence is governed by the flush token, not this TTL.
+L1_TTL_SECONDS = 60.0
+
+# Rewritten (not INCRed) on every flush: FLUSHDB deletes this key too, and a
+# counter reborn at 1 would collide with a remembered 1 and hide the flush.
+FLUSH_TOKEN_KEY = "cache:flush-token"
 
 
 def normalise_target_host(host: Optional[str]) -> Optional[str]:
@@ -35,17 +52,47 @@ def normalise_target_host(host: Optional[str]) -> Optional[str]:
 
 
 class CacheService:
-    """Caches and retrieves authentication responses in Redis.
+    """Caches authentication responses in shared Redis plus a local layer.
 
     Attributes:
         state_service: The service providing access to Redis.
-        cache_duration: How long to cache entries (seconds).
+        cache_duration: How long to cache entries in Redis (seconds).
+        flush_poll_seconds: How often to re-check the shared flush token.
     """
 
-    def __init__(self, state_service: Optional[StateService] = None):
+    def __init__(
+        self,
+        state_service: Optional[StateService] = None,
+        flush_poll_seconds: Optional[float] = None,
+    ):
         """Initialize the CacheService."""
         self.state_service = state_service or StateService()
         self.cache_duration = config.redis.cache_duration
+        self.flush_poll_seconds = (
+            flush_poll_seconds
+            if flush_poll_seconds is not None
+            else config.redis.flush_poll_seconds
+        )
+        self._l1: dict[str, tuple[float, AuthResult]] = {}
+        self._flush_token: Optional[str] = None
+        self._flush_token_checked_at = float("-inf")
+
+    async def _drop_l1_if_flushed_elsewhere(self, client) -> None:
+        """Re-check the shared flush token; drop the in-process layer on change."""
+        now = time.monotonic()
+        if now - self._flush_token_checked_at < self.flush_poll_seconds:
+            return
+        try:
+            token = await client.get(FLUSH_TOKEN_KEY)
+        except Exception as e:
+            # Keep serving the in-process layer: no flush can land while
+            # Redis is unreachable, so there is nothing new to converge to.
+            logger.warning("Flush-token check failed: %s", type(e).__name__)
+            return
+        self._flush_token_checked_at = now
+        if token != self._flush_token:
+            self._l1.clear()
+            self._flush_token = token
 
     def generate_cache_key(
         self, payload: str, target_host: Optional[str] = None
@@ -79,8 +126,17 @@ class CacheService:
             logger.warning("Redis client unavailable for cache lookup")
             return None
 
+        await self._drop_l1_if_flushed_elsewhere(client)
+
+        cache_key = self.generate_cache_key(payload, target_host)
+        l1_entry = self._l1.get(cache_key)
+        if l1_entry is not None:
+            expires_at, l1_result = l1_entry
+            if time.monotonic() < expires_at:
+                return l1_result
+            del self._l1[cache_key]
+
         try:
-            cache_key = self.generate_cache_key(payload, target_host)
             cached_data = await client.get(cache_key)
 
             if not cached_data:
@@ -99,11 +155,13 @@ class CacheService:
                 if signing_key_dict
                 else None
             )
-            return AuthResult(
+            result = AuthResult(
                 api_key=auth_response["api_key"],
                 signing_key=signing_key,
                 principal_info=principal_info,
             )
+            self._l1[cache_key] = (time.monotonic() + L1_TTL_SECONDS, result)
+            return result
         except json.JSONDecodeError as e:
             # The repr includes the offending document — here a cached auth
             # response with the upstream API key. Log only the class name.
@@ -181,7 +239,14 @@ class CacheService:
             return False
 
         try:
+            # Token is written AFTER the flush: set first, and a peer could
+            # observe it, drop its layer, and re-fill from not-yet-flushed
+            # Redis — stale data with no later signal to evict it.
             await client.flushdb()
+            new_token = uuid.uuid4().hex
+            await client.set(FLUSH_TOKEN_KEY, new_token)
+            self._l1.clear()
+            self._flush_token = new_token
             logger.info("Flushed all auth cache entries")
             return True
         except Exception as e:
