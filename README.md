@@ -139,7 +139,7 @@ flowchart TB
 
 ## Security Model
 
-Portunus's service endpoints (`/authorise`, `/log/{request_id}/...`, `/cache/flush`, and the WebSocket relay) **do not authenticate their callers**. Anything that can reach them directly can flush the auth cache (forcing all clients to re-authenticate) or inject records into the Kinesis audit trail under any request ID. Only `/ping` is intended to be reachable without protection (health checks).
+Portunus's service endpoints (`/authorise`, `/log/{request_id}/...`, `/cache/flush`, and the WebSocket relay) **do not authenticate their callers**. Anything that can reach them directly can flush the auth cache (forcing all clients to re-authenticate) or inject records into the Kinesis audit trail under any request ID. Note that a flush is fleet-wide within the in-process cache TTL (10s), not instantaneous: each task keeps a short-TTL in-process cache that cannot be cleared remotely. Only `/ping` is intended to be reachable without protection (health checks).
 
 The Envoy proxy already sends a shared secret with every call it makes to Portunus: `PORTUNUS_API_KEY`, carried in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`). Portunus itself does not validate it, so your deployment **must** enforce access in front of the service:
 

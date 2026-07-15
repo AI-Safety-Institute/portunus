@@ -111,7 +111,9 @@ class CacheService:
             logger.error(f"Error getting from cache: {e}")
             raise CacheError(f"Failed to retrieve from cache: {e}")
 
-    @cached(ttl=500)
+    # This TTL is the fleet-wide staleness bound after /cache/flush (the flush
+    # reaches only one task). Do not raise it without cross-task invalidation.
+    @cached(ttl=10)
     async def get_cached_auth_result(self, payload: str) -> Optional[AuthResult]:
         """
         Get an authentication result from the cache.

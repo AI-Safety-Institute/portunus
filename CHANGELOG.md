@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- In-process auth-cache TTL cut from 500s to 10s (#94). `/cache/flush` reaches one
+  task; the other tasks' in-process caches cannot be cleared remotely and
+  converge only by TTL expiry — at 500s a flushed (e.g. compromised) key kept
+  being served by most of the fleet for up to ~8 minutes. 10s bounds that
+  window to ~10s while keeping the cache's hit-rate benefit.
+  Cross-task invalidation is not implemented; TTL expiry remains the
+  only bound.
+
 ## [0.6.0]
 
 ### Changed

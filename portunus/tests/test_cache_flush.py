@@ -1,5 +1,7 @@
-"""Tests for the POST /cache/flush endpoint."""
+"""Tests for POST /cache/flush and fleet-wide flush convergence."""
 
+import asyncio
+import time
 from contextlib import AsyncExitStack
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +11,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from portunus.app import portunus
+from portunus.models import AuthResult, PrincipalInfo
 from portunus.services.cache_service import CacheService
 
 
@@ -118,3 +121,42 @@ class TestCacheFlush:
 
         assert resp.status_code == 500
         assert resp.json()["debug_id"] == "test-trace-id"
+
+
+class TestFleetWideFlushBound:
+    @pytest.mark.slow
+    @pytest.mark.asyncio
+    async def test_task_that_missed_the_flush_stops_serving_within_12s(
+        self, fake_redis
+    ):
+        """A task that did not handle the flush converges within seconds.
+
+        Shared Redis is flushed remotely; this task's in-process cache is
+        not. Deliberate real-time wait: the TTL bound IS the behaviour
+        under test.
+        """
+        cache = CacheService(state_service=FakeStateService(fake_redis))
+        payload = "payload-under-test"
+        result = AuthResult(
+            api_key="sk-flushed-key", signing_key=None, principal_info=PrincipalInfo()
+        )
+        assert await cache.cache_auth_result(payload, result)
+
+        hit = await cache.get_cached_auth_result(payload)
+        assert hit is not None
+        assert hit.api_key == "sk-flushed-key"
+
+        await fake_redis.flushdb()
+
+        # Immediately after, this task still serves from process memory —
+        # that's the mechanism whose duration we're bounding.
+        assert await cache.get_cached_auth_result(payload) is not None
+
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            if await cache.get_cached_auth_result(payload) is None:
+                return
+            await asyncio.sleep(0.5)
+        pytest.fail(
+            "a task that missed the flush served a flushed auth entry for more than 12s"
+        )
