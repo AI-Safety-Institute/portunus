@@ -1,10 +1,4 @@
-"""
-Configuration module for the Portunus.
-
-This module centralizes all configuration options for the Portunus service.
-It loads configuration from environment variables with reasonable defaults and
-provides validation and documentation for all options.
-"""
+"""Portunus configuration loaded from environment variables."""
 
 import logging
 import os
@@ -17,16 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class RedisConfig(BaseModel):
-    """Redis configuration settings.
-
-    Attributes:
-        host: Redis server hostname
-        port: Redis server port
-        password: Redis server password (optional)
-        cache_duration: How long to cache authorization responses (seconds)
-        log_ttl: How long to store log data (seconds)
-        max_connections: Maximum number of Redis connections
-    """
+    """Redis configuration settings."""
 
     host: str = Field(
         default="localhost",
@@ -47,6 +32,14 @@ class RedisConfig(BaseModel):
         description="How long to cache authorization responses (seconds)",
         ge=1,
     )
+    flush_poll_seconds: float = Field(
+        default=5.0,
+        description=(
+            "How often each task re-checks the shared flush token; the "
+            "fleet-wide convergence bound for a cache flush (seconds)"
+        ),
+        gt=0,
+    )
     log_ttl: int = Field(
         default=86400,
         description="How long to store log data (seconds)",
@@ -63,68 +56,80 @@ class RedisConfig(BaseModel):
     )
 
 
-class KinesisConfig(BaseModel):
-    """Kinesis configuration for data streaming and storage.
+class FirehoseConfig(BaseModel):
+    """Per-component Firehose delivery stream names for log record publishing.
 
-    This configuration includes both Kinesis Data Streams for high-throughput ingestion
-    and Kinesis Firehose for S3 delivery.
-
-    Attributes:
-        metadata_stream_name: Firehose stream name for metadata records
-        request_headers_stream_name: Firehose stream name for request headers
-        request_body_stream_name: Firehose stream name for request bodies
-        request_trailers_stream_name: Firehose stream name for request trailers
-        response_headers_stream_name: Firehose stream name for response headers
-        response_body_stream_name: Firehose stream name for response bodies
-        response_trailers_stream_name: Firehose stream name for response trailers
-        max_record_size: Maximum size in bytes for a single Kinesis record
+    S3 destinations and Glue ETL are provisioned separately (api-key-proxy CDK
+    infra), not configured here.
     """
 
     metadata_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for metadata records",
+        description="Firehose delivery stream for metadata records",
     )
     request_headers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request headers",
+        description="Firehose delivery stream for request headers",
     )
     request_body_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request bodies",
+        description="Firehose delivery stream for request bodies",
     )
     request_trailers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request trailers",
+        description="Firehose delivery stream for request trailers",
     )
     response_headers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response headers",
+        description="Firehose delivery stream for response headers",
     )
     response_body_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response bodies",
+        description="Firehose delivery stream for response bodies",
     )
     response_trailers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response trailers",
+        description="Firehose delivery stream for response trailers",
+    )
+    ws_summary_stream_name: Optional[str] = Field(
+        default=None,
+        description="Firehose stream for one summary record per WebSocket connection",
     )
     max_record_size: int = Field(
-        default=900000,
-        description="Maximum size in bytes for single Kinesis record (900KB)",
+        # Must match get_config()'s env-loader default (1_000_000).
+        default=1_000_000,
+        description="Maximum size in bytes for a single Firehose record (1MB)",
         ge=1000,
     )
 
+    def missing_required_streams(self) -> list[str]:
+        """Return the ``FIREHOSE_*`` env-var names whose stream is unset.
+
+        Used to fail fast at gRPC startup: with a stream unset, the build path
+        short-circuits to None and the task serves traffic while dropping 100%
+        of that audit record type.
+
+        ``ws_summary_stream_name`` is excluded from the required set: its frame
+        payloads are still captured via the required request/response body
+        streams, so an unset summary loses only connection-level stats.
+
+        Returns:
+            Unset required ``FIREHOSE_*`` env-var names (empty when all set).
+        """
+        required = {
+            "FIREHOSE_METADATA_STREAM": self.metadata_stream_name,
+            "FIREHOSE_REQUEST_HEADERS_STREAM": self.request_headers_stream_name,
+            "FIREHOSE_REQUEST_BODY_STREAM": self.request_body_stream_name,
+            "FIREHOSE_REQUEST_TRAILERS_STREAM": self.request_trailers_stream_name,
+            "FIREHOSE_RESPONSE_HEADERS_STREAM": self.response_headers_stream_name,
+            "FIREHOSE_RESPONSE_BODY_STREAM": self.response_body_stream_name,
+            "FIREHOSE_RESPONSE_TRAILERS_STREAM": self.response_trailers_stream_name,
+        }
+        return [env_var for env_var, value in required.items() if not value]
+
 
 class AwsConfig(BaseModel):
-    """AWS-related configuration settings.
-
-    Attributes:
-        xray_daemon_address: AWS X-Ray daemon address
-        xray_log_group: AWS X-Ray log group
-        xray_extra_log_groups: Additional AWS X-Ray log groups,
-                               comma separated (optional)
-        xray_enabled: Whether AWS X-Ray tracing is enabled
-    """
+    """AWS-related configuration settings."""
 
     xray_daemon_address: str = Field(
         default="127.0.0.1:2000",
@@ -148,52 +153,186 @@ class AwsConfig(BaseModel):
     )
 
 
-class RelayConfig(BaseModel):
-    """WebSocket relay configuration settings.
+class GrpcConfig(BaseModel):
+    """gRPC server config for Envoy ext_authz / ext_proc filters."""
 
-    The upstream target (host, port, TLS) is provided per-connection via
-    headers injected by each proxy's Envoy (x-portunus-target-host, etc.).
-    This config only holds Portunus-level settings that apply to all connections.
-
-    Attributes:
-        max_message_size: Maximum WebSocket message size in bytes
-        max_connection_lifetime: Maximum connection lifetime in seconds
-        max_connections: Maximum concurrent WebSocket connections per instance
-        drain_timeout: Seconds to wait for WS connections to drain on shutdown
-    """
-
-    max_message_size: int = Field(
-        default=10_485_760,
-        description="Maximum WebSocket message size in bytes (10MB)",
-        ge=1024,
+    enabled: bool = Field(
+        default=False,
+        description="Whether to start the gRPC server",
     )
-    max_connection_lifetime: int = Field(
-        default=3300,
-        description="Maximum connection lifetime in seconds (55 min)",
-        ge=60,
+    host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Interface the gRPC server binds to. Defaults to loopback for "
+            "the sidecar topology where Envoy reaches Portunus on localhost. "
+            "Set to ``0.0.0.0`` for docker-compose where Envoy and Portunus "
+            "are separate containers reaching each other over a bridge "
+            "network. (In our docker-compose the portunus container shares "
+            "the proxy container's network namespace, so loopback works "
+            "there too — this knob exists for non-shared-netns topologies.)"
+        ),
     )
-    max_connections: int = Field(
-        default=200,
-        description="Maximum concurrent WebSocket connections per instance",
+    port: int = Field(
+        default=9000,
+        description="TCP port the gRPC server binds to",
+        ge=1,
+        le=65535,
+    )
+    max_concurrent_streams: int = Field(
+        default=1000,
+        description="Per-connection HTTP/2 stream limit",
         ge=1,
     )
-    drain_timeout: int = Field(
-        default=10,
-        description="Seconds to wait for WS connections to drain on shutdown",
+    graceful_shutdown_seconds: int = Field(
+        default=30,
+        description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
+    )
+    metrics_interval_seconds: float = Field(
+        default=60.0,
+        description=(
+            "Interval for the CloudWatch EMF metrics reporter (publish-queue "
+            "counters, active ext_proc streams, Check outcomes). 0 disables."
+        ),
+        ge=0.0,
+    )
+    drain_flush_reserve_seconds: float = Field(
+        default=5.0,
+        description=(
+            "Slice of the SIGTERM grace reserved for flushing the publish "
+            "queue after the gRPC stream drain. Envoy holds ext_proc streams "
+            "open for its own (longer) drain, so ``server.stop`` consumes "
+            "its whole budget on every busy stop; without a reserve the "
+            "queue would get a 0-second flush window and cancel every "
+            "buffered audit record even with a healthy sink."
+        ),
+        ge=0.0,
+    )
+    publish_queue_maxsize: int = Field(
+        default=10_000,
+        description="Publish queue record-count capacity (bodies + metadata)",
+        ge=1,
+    )
+    publish_queue_body_capacity: int = Field(
+        default=9_000,
+        description=(
+            "Record-count soft cap for droppable body submits; the headroom "
+            "up to ``publish_queue_maxsize`` is reserved for blocking "
+            "header/metadata/sentinel submits."
+        ),
+        ge=0,
+    )
+    publish_queue_max_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        description=(
+            "Byte budget for raw body payloads retained by queued (and "
+            "in-flight) publish tasks. Body submits drop once the budget is "
+            "hit, whatever the record count — the record-count cap alone "
+            "allows ~6.4 GiB of retained chunks (10k × ~750 KB), which "
+            "drives the process into its cgroup OOM kill. Size this with "
+            "headroom: building a record adds ~33% (base64) transiently."
+        ),
+        ge=1,
+    )
+    drop_sentinel_timeout_seconds: float = Field(
+        default=0.25,
+        description=(
+            "How long the body-drop sentinel submit may wait for queue "
+            "headroom. The sentinel uses the blocking (reserved-headroom) "
+            "path so it survives the very saturation it reports; the "
+            "timeout bounds the wait so a wedged sink cannot stall the "
+            "ext_proc Process coroutine for long (this wait happens inline "
+            "on the stream's read loop, once per dropped chunk — keep it "
+            "short)."
+        ),
+        ge=0.0,
+    )
+    publish_blocking_timeout_seconds: float = Field(
+        default=5.0,
+        description=(
+            "Bound on every blocking publish submit issued from the "
+            "ext_proc stream path (headers, trailers, metadata, WS "
+            "summary). With a wedged sink the queue never drains; an "
+            "unbounded submit would pin the Process coroutine (and the "
+            "drain's WS-summary flush) forever. On timeout the record is "
+            "dropped and counted (dropped_total + warning) — observable "
+            "loss instead of a wedged stream/drain."
+        ),
+        gt=0.0,
+    )
+    health_check_interval_seconds: float = Field(
+        default=10.0,
+        description=(
+            "Interval for the dependency (Redis) health probe that drives "
+            "the 'readiness' gRPC health service. 0 disables the monitor "
+            "(readiness then reports SERVING unconditionally). A Portunus "
+            "that is alive but would deny every Check (Redis down) must "
+            "leave ALB rotation via readiness — while its liveness stays "
+            "SERVING so ECS does not recycle the task."
+        ),
+        ge=0.0,
+    )
+    health_check_timeout_seconds: float = Field(
+        default=2.0,
+        description="Per-probe timeout for the dependency health check",
+        gt=0.0,
+    )
+    health_check_failure_threshold: int = Field(
+        default=3,
+        description=(
+            "Consecutive dependency-probe failures before the 'readiness' "
+            "health service flips NOT_SERVING (debounce — a single slow "
+            "Redis ping must not pull the task from rotation). Recovery is "
+            "immediate on the first successful probe."
+        ),
+        ge=1,
+    )
+    proxy_api_key: str = Field(
+        default="",
+        description=(
+            "Pre-shared key the proxy presents as `x-portunus-proxy-key` "
+            "gRPC metadata. Empty disables validation (tests only)."
+        ),
+    )
+    proxy_api_key_optional: bool = Field(
+        default=False,
+        description=(
+            "Explicit opt-in to allow empty ``proxy_api_key``. Production "
+            "must leave this False so a missing key fails closed."
+        ),
+    )
+
+
+class SigningConfig(BaseModel):
+    """HTTP message-signing (KMS) throughput and memory bounds.
+
+    Read by ``signing_service`` via ``config.signing`` to size the KMS.Sign
+    executor and cap concurrent buffered signing requests (each waiter pins a
+    buffered request body in memory).
+    """
+
+    kms_executor_workers: int = Field(
+        default=16,
+        description="Thread count of the dedicated KMS.Sign executor",
+        ge=1,
+    )
+    max_concurrent: int = Field(
+        default=32,
+        description="Cap on concurrent signing requests (semaphore)",
+        ge=1,
+    )
+    acquire_timeout_s: float = Field(
+        default=2.0,
+        description=(
+            "How long a signing request waits for a semaphore slot before "
+            "being shed (fail-closed deny)"
+        ),
+        gt=0.0,
     )
 
 
 class PortunusConfig(BaseModel):
-    """Main configuration for the Portunus service.
-
-    Attributes:
-        redis: Redis configuration
-        aws: AWS configuration
-        log_level: Logging level
-        api_key_header: Header name to use for the API key
-        api_key_prefix: Prefix to use for the API key
-    """
+    """Top-level Portunus configuration."""
 
     # Service settings
     redis: RedisConfig = Field(
@@ -204,13 +343,17 @@ class PortunusConfig(BaseModel):
         default_factory=AwsConfig,
         description="AWS configuration",
     )
-    kinesis: KinesisConfig = Field(
-        default_factory=KinesisConfig,
-        description="Kinesis Firehose configuration",
+    firehose: FirehoseConfig = Field(
+        default_factory=FirehoseConfig,
+        description="Firehose direct-PUT configuration",
     )
-    relay: RelayConfig = Field(
-        default_factory=RelayConfig,
-        description="WebSocket relay configuration",
+    grpc: GrpcConfig = Field(
+        default_factory=GrpcConfig,
+        description="gRPC server configuration",
+    )
+    signing: SigningConfig = Field(
+        default_factory=SigningConfig,
+        description="KMS signing throughput / concurrency bounds",
     )
     log_level: str = Field(
         default="INFO",
@@ -223,6 +366,13 @@ class PortunusConfig(BaseModel):
     api_key_prefix: str = Field(
         default="Bearer ",
         description="Prefix to use for the API key",
+    )
+    proxy_header_prefix: str = Field(
+        default="portunus",
+        description=(
+            "Prefix for proxy-emitted response headers (e.g. ``x-{prefix}-error``). "
+            "Must match the proxy container's PORTUNUS_HEADER_PREFIX."
+        ),
     )
 
     @field_validator("log_level")
@@ -245,9 +395,7 @@ class PortunusConfig(BaseModel):
 
 @lru_cache()
 def get_config() -> PortunusConfig:
-    """Get the application configuration, using environment variables.
-
-    The function is cached to avoid reloading the configuration on every call.
+    """Get the application configuration from environment variables (cached).
 
     Returns:
         PortunusConfig: The application configuration
@@ -258,6 +406,7 @@ def get_config() -> PortunusConfig:
         password=os.environ.get("REDIS_PASSWORD", None),
         # cache auth to extend temporary AWS creds lifetime
         cache_duration=int(os.environ.get("CACHE_DURATION", "86400")),
+        flush_poll_seconds=float(os.environ.get("CACHE_FLUSH_POLL_SECONDS", "5")),
         # keep log ttl short to prevent storage bloat
         log_ttl=int(os.environ.get("LOG_TTL", "3600")),
         max_connections=int(os.environ.get("REDIS_MAX_CONNECTIONS", "200")),
@@ -272,44 +421,89 @@ def get_config() -> PortunusConfig:
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL", None),
     )
 
-    kinesis = KinesisConfig(
-        metadata_stream_name=os.environ.get("KINESIS_METADATA_STREAM", None),
+    firehose = FirehoseConfig(
+        metadata_stream_name=os.environ.get("FIREHOSE_METADATA_STREAM", None),
         request_headers_stream_name=os.environ.get(
-            "KINESIS_REQUEST_HEADERS_STREAM", None
+            "FIREHOSE_REQUEST_HEADERS_STREAM", None
         ),
-        request_body_stream_name=os.environ.get("KINESIS_REQUEST_BODY_STREAM", None),
+        request_body_stream_name=os.environ.get("FIREHOSE_REQUEST_BODY_STREAM", None),
         request_trailers_stream_name=os.environ.get(
-            "KINESIS_REQUEST_TRAILERS_STREAM", None
+            "FIREHOSE_REQUEST_TRAILERS_STREAM", None
         ),
         response_headers_stream_name=os.environ.get(
-            "KINESIS_RESPONSE_HEADERS_STREAM", None
+            "FIREHOSE_RESPONSE_HEADERS_STREAM", None
         ),
-        response_body_stream_name=os.environ.get("KINESIS_RESPONSE_BODY_STREAM", None),
+        response_body_stream_name=os.environ.get("FIREHOSE_RESPONSE_BODY_STREAM", None),
         response_trailers_stream_name=os.environ.get(
-            "KINESIS_RESPONSE_TRAILERS_STREAM", None
+            "FIREHOSE_RESPONSE_TRAILERS_STREAM", None
         ),
-        max_record_size=int(os.environ.get("KINESIS_MAX_RECORD_SIZE", "1000000")),
+        ws_summary_stream_name=os.environ.get("FIREHOSE_WS_SUMMARY_STREAM", None),
+        max_record_size=int(os.environ.get("FIREHOSE_MAX_RECORD_SIZE", "1000000")),
     )
 
-    relay = RelayConfig(
-        max_message_size=int(os.environ.get("WS_MAX_MESSAGE_SIZE", "10485760")),
-        max_connection_lifetime=int(
-            os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")
+    grpc = GrpcConfig(
+        enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
+        host=os.environ.get("GRPC_HOST", "127.0.0.1"),
+        port=int(os.environ.get("GRPC_PORT", "9000")),
+        max_concurrent_streams=int(
+            os.environ.get("GRPC_MAX_CONCURRENT_STREAMS", "1000")
         ),
-        max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "200")),
-        drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
+        graceful_shutdown_seconds=int(
+            os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
+        ),
+        metrics_interval_seconds=float(
+            os.environ.get("GRPC_METRICS_INTERVAL_SECONDS", "60.0")
+        ),
+        drain_flush_reserve_seconds=float(
+            os.environ.get("GRPC_DRAIN_FLUSH_RESERVE_SECONDS", "5.0")
+        ),
+        publish_queue_maxsize=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_MAXSIZE", "10000")
+        ),
+        publish_queue_body_capacity=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_BODY_CAPACITY", "9000")
+        ),
+        publish_queue_max_bytes=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_MAX_BYTES", str(256 * 1024 * 1024))
+        ),
+        drop_sentinel_timeout_seconds=float(
+            os.environ.get("GRPC_DROP_SENTINEL_TIMEOUT_SECONDS", "0.25")
+        ),
+        publish_blocking_timeout_seconds=float(
+            os.environ.get("GRPC_PUBLISH_BLOCKING_TIMEOUT_SECONDS", "5.0")
+        ),
+        health_check_interval_seconds=float(
+            os.environ.get("GRPC_HEALTH_CHECK_INTERVAL_SECONDS", "10.0")
+        ),
+        health_check_timeout_seconds=float(
+            os.environ.get("GRPC_HEALTH_CHECK_TIMEOUT_SECONDS", "2.0")
+        ),
+        health_check_failure_threshold=int(
+            os.environ.get("GRPC_HEALTH_CHECK_FAILURE_THRESHOLD", "3")
+        ),
+        proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
+        proxy_api_key_optional=(
+            os.environ.get("GRPC_PROXY_API_KEY_OPTIONAL", "false").lower() == "true"
+        ),
+    )
+
+    signing = SigningConfig(
+        kms_executor_workers=int(os.environ.get("SIGNING_KMS_EXECUTOR_WORKERS", "16")),
+        max_concurrent=int(os.environ.get("SIGNING_MAX_CONCURRENT", "32")),
+        acquire_timeout_s=float(os.environ.get("SIGNING_ACQUIRE_TIMEOUT_S", "2.0")),
     )
 
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
+        proxy_header_prefix=os.environ.get("PORTUNUS_HEADER_PREFIX", "portunus"),
         redis=redis,
         aws=aws,
-        kinesis=kinesis,
-        relay=relay,
+        firehose=firehose,
+        grpc=grpc,
+        signing=signing,
     )
 
 
-# Create a singleton instance of the configuration
 config = get_config()

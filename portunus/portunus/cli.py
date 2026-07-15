@@ -1,6 +1,7 @@
-"""Portunus CLI for generating proxy authentication payloads."""
+"""Portunus CLI: proxy authentication payloads and operator commands."""
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -8,6 +9,7 @@ import sys
 import boto3
 
 from portunus.services.arn_service import get_role_arn
+from portunus.services.cache_service import CacheService
 from portunus.services.payload_service import encode_payload
 
 TEMP_CRED_DURATION_SECONDS = 12 * 60 * 60
@@ -98,6 +100,14 @@ def main() -> None:
         help="Custom IAM session policy: path to a JSON file or inline JSON string.",
     )
 
+    subparsers.add_parser(
+        "flush-cache",
+        help=(
+            "Flush the shared auth cache and signal every task to drop its "
+            "in-process copy (uses the task's own Redis configuration)"
+        ),
+    )
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -108,6 +118,10 @@ def main() -> None:
         if args.policy:
             policy_json = _load_policy(args.policy)
         print(encode_credentials(args.secret_arn, policy=policy_json))
+    elif args.command == "flush-cache":
+        flushed = asyncio.run(CacheService().flush_all())
+        print(f"flushed: {flushed}")
+        sys.exit(0 if flushed else 1)
 
 
 if __name__ == "__main__":

@@ -7,13 +7,22 @@ import json
 import logging
 import struct
 import zlib
+from typing import Any
 
 import brotli
 import pytest
 
 from portunus.models import (
+    JoinedLogRecord,
     _decompress_b64_body,
 )
+
+try:
+    import brotli
+
+    HAS_BROTLI = True
+except ImportError:  # pragma: no cover — Glue-like env without brotli
+    HAS_BROTLI = False
 
 
 def _b64(data: bytes) -> str:
@@ -24,8 +33,8 @@ def _build_eventstream_message(payload: bytes, headers: bytes = b"") -> bytes:
     """[12-byte prelude][headers][payload][4-byte CRC] with valid CRC32s.
 
     Mirrors the vnd.amazon.eventstream wire format botocore's
-    ``EventStreamBuffer`` parses: the prelude carries a CRC32 of its first
-    8 bytes, and the message ends with a CRC32 of everything preceding it.
+    ``EventStreamBuffer`` parses (prelude CRC32 over its first 8 bytes,
+    trailing CRC32 over everything preceding it).
     """
     total_len = 12 + len(headers) + len(payload) + 4
     prelude_head = struct.pack(">II", total_len, len(headers))
@@ -97,11 +106,9 @@ def test_corrupt_gzip_marks_failure():
 
 
 def test_gzip_with_corrupt_deflate_stream_marks_failure():
-    """Gzip body with a corrupt deflate stream maps to a decode failure.
+    """A valid gzip header wrapping corrupt deflate data raises zlib.error.
 
-    A valid gzip header wrapping corrupt deflate data raises zlib.error
-    (not BadGzipFile/OSError) and must map to (None, failed=True) rather
-    than escaping to the caller.
+    (not BadGzipFile/OSError) and must map to (None, failed=True), not escape.
     """
     valid = gzip.compress(b'{"hello": "world"}')
     corrupted = valid[:10] + b"\xff" * 20  # keep 10-byte gzip header, trash the stream
@@ -231,7 +238,7 @@ def test_eventstream_whitespace_padded_inner_payload_is_compacted():
     ("bad_bytes", "exception_name"),
     [
         (123, "TypeError"),
-        ("\u00e9", "ValueError"),
+        ("é", "ValueError"),
     ],
 )
 def test_eventstream_skips_malformed_bytes_members(bad_bytes, exception_name, caplog):
@@ -308,12 +315,10 @@ def test_non_eventstream_content_types_use_utf8_path(content_type):
 
 # --- Truncated trailing frame: detected decode failure, not silent partial ---
 #
-# botocore's EventStreamBuffer ends iteration with a bare StopIteration the
-# moment the remaining bytes are too few for the next complete frame -- the
-# same way a clean end of stream ends. A truncated trailing frame therefore
-# used to look like success (failed=False) and silently drop the token-bearing
-# tail: Anthropic-on-Bedrock puts usage.output_tokens in the near-final
-# message_delta, so a cut-off stream undercounts tokens with no error signal.
+# botocore's EventStreamBuffer ends iteration the same way on a truncated tail
+# as on a clean end of stream. Without the residual-bytes guard a cut-off frame
+# looks like success and silently drops the token-bearing tail (Anthropic-on-
+# Bedrock puts usage.output_tokens in the near-final message_delta).
 
 # Two-frame Bedrock stream whose final frame carries usage.output_tokens.
 _TEXT_DELTA = {
@@ -328,10 +333,9 @@ _MESSAGE_DELTA = {
 
 
 def test_eventstream_complete_stream_keeps_token_bearing_tail():
-    """A complete stream still succeeds and keeps the token-bearing tail.
+    """Baseline for the guard: a complete stream succeeds and retains the.
 
-    Baseline for the guard: the success path is byte-for-byte identical and
-    the final message_delta carrying usage.output_tokens is retained.
+    final message_delta carrying usage.output_tokens.
     """
     es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
     decoded, failed = _decompress_b64_body(
@@ -349,8 +353,7 @@ def test_eventstream_complete_stream_keeps_token_bearing_tail():
 def test_eventstream_truncated_trailing_frame_marks_failure(cut, caplog):
     """Cutting bytes off the final frame must surface as a decode failure.
 
-    The body returns failed=True / decoded=None, so downstream token
-    accounting never trusts the silently dropped tail.
+    (failed=True / decoded=None), so token accounting never trusts a dropped tail.
     """
     caplog.set_level(logging.WARNING, logger="api.access")
     frame_a = _bedrock_event(_TEXT_DELTA)
@@ -370,10 +373,9 @@ def test_eventstream_truncated_trailing_frame_marks_failure(cut, caplog):
 
 
 def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
-    """Cutting at an exact frame boundary leaves a complete (shorter) stream.
+    """Cutting at an exact frame boundary leaves a complete (shorter) stream:.
 
-    There is no incomplete tail, so the guard must NOT fire -- this protects
-    against over-flagging streams that simply end on fewer frames.
+    no incomplete tail, so the guard must NOT fire (no over-flagging).
     """
     frame_a = _bedrock_event(_TEXT_DELTA)
     full = frame_a + _bedrock_event(_MESSAGE_DELTA)
@@ -382,3 +384,108 @@ def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
     )
     assert not failed
     assert decoded == f"data: {json.dumps(_TEXT_DELTA, separators=(',', ':'))}\n"
+
+
+# --- JoinedLogRecord callers must thread content_type into the decoder ---
+#
+# Regression guard: a caller that omits content_type sends Bedrock eventstream
+# bodies down the plain .decode("utf-8") path, failing all Bedrock streaming
+# traffic. These exercise the real caller methods end-to-end.
+
+
+def _make_joined_record(**overrides: Any) -> JoinedLogRecord:
+    fields: dict[str, Any] = dict(
+        request_id="req-1",
+        timestamp="2026-07-09T00:00:00Z",
+        metadata_published_at="2026-07-09T00:00:00Z",
+        metadata_account_id="123456789012",
+        metadata_principal="principal",
+        metadata_principal_arn="arn:aws:iam::123456789012:role/r",
+        metadata_project="proj",
+        metadata_session_name="sess",
+        metadata_secret_arn="arn:aws:secretsmanager:eu-west-2:123456789012:secret:s",
+        request_headers_raw_headers={},
+        request_headers_timestamp="2026-07-09T00:00:00Z",
+        request_headers_content_type=None,
+        request_headers_method="POST",
+        request_headers_path="/v1/messages",
+        request_headers_authority="example.com",
+        request_headers_user_agent="ua",
+        request_headers_content_encoding=None,
+        request_body_body=_b64(b"{}"),
+        request_body_body_size=2,
+        request_body_num_chunks=0,
+        request_body_truncated=False,
+        request_body_timestamp="2026-07-09T00:00:00Z",
+        response_headers_raw_headers={},
+        response_headers_timestamp="2026-07-09T00:00:00Z",
+        response_headers_server="server",
+        response_headers_status="200",
+        response_headers_content_length=None,
+        response_headers_content_type=None,
+        response_headers_content_encoding=None,
+        response_body_body=_b64(b"{}"),
+        response_body_body_size=2,
+        response_body_num_chunks=0,
+        response_body_truncated=False,
+        response_body_timestamp="2026-07-09T00:00:00Z",
+    )
+    fields.update(overrides)
+    return JoinedLogRecord(**fields)
+
+
+def test_decompress_response_body_threads_content_type_for_eventstream():
+    """A real Bedrock-shaped frame decodes with its usage intact via the caller."""
+    es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
+    record = _make_joined_record(
+        response_body_body=_b64(es_bytes),
+        response_body_body_size=len(es_bytes),
+        response_headers_content_type="application/vnd.amazon.eventstream",
+    )
+
+    assert record.decompress_response_body() is True
+    assert record.response_body_decode_failure is False
+    assert record.response_body_decoded is not None
+    assert '"output_tokens":1234' in record.response_body_decoded
+
+
+def test_decompress_response_body_truncated_eventstream_marks_failure():
+    """A truncated trailing frame surfaces as decode_failure via the caller."""
+    es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
+    truncated = es_bytes[:-7]
+    record = _make_joined_record(
+        response_body_body=_b64(truncated),
+        response_body_body_size=len(truncated),
+        response_headers_content_type="application/vnd.amazon.eventstream",
+    )
+
+    assert record.decompress_response_body() is False
+    assert record.response_body_decode_failure is True
+    assert record.response_body_decoded is None
+
+
+def test_decompress_request_body_threads_content_type_for_eventstream():
+    """The request-side caller passes content_type too (symmetric threading)."""
+    es_bytes = _bedrock_event({"type": "message_start"})
+    record = _make_joined_record(
+        request_body_body=_b64(es_bytes),
+        request_body_body_size=len(es_bytes),
+        request_headers_content_type="application/vnd.amazon.eventstream",
+    )
+
+    assert record.decompress_request_body() is True
+    assert record.request_body_decode_failure is False
+    assert record.request_body_decoded == 'data: {"type":"message_start"}\n'
+
+
+def test_decompress_response_body_gzip_still_works_via_caller():
+    """content_encoding path through the caller is unchanged by the threading."""
+    body = '{"usage": {"output_tokens": 5}}'
+    record = _make_joined_record(
+        response_body_body=_b64(gzip.compress(body.encode())),
+        response_headers_content_encoding="gzip",
+        response_headers_content_type="application/json",
+    )
+
+    assert record.decompress_response_body() is True
+    assert record.response_body_decoded == body

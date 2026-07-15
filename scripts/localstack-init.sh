@@ -1,10 +1,6 @@
 #!/bin/bash
-# LocalStack initialization script - header for init process
-# This runs automatically when LocalStack container starts
-#
-# Note: LocalStack automatically runs all scripts in ready.d/ in alphabetical order.
-# The individual stack init scripts (01-init-kinesis.sh, 02-init-async-analysis.sh)
-# will run after this header script.
+# First LocalStack init script (ready.d runs in alphabetical order, so this
+# 00- header runs before 01-init-firehose.sh / 02-init-async-analysis.sh).
 
 set -e
 

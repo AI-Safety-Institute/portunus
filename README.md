@@ -2,191 +2,84 @@
 
 ![Portunus](portunus.png)
 
-**Portunus** is a secure API key proxy. It allows clients to authenticate with temporary AWS credentials and transparently swaps them for real API keys stored in AWS Secrets Manager, before forwarding requests to upstream targets. All traffic is logged to Kinesis for auditing.
+**Portunus** is a secure API key proxy. Clients authenticate with temporary AWS credentials and Portunus transparently swaps them for the real API key stored in AWS Secrets Manager before forwarding requests to upstream targets. All traffic is logged to Firehose for auditing.
 
-It consists of two main components:
+It runs as two cooperating components:
 
-- **Envoy Proxies**: Envoy deployments (one per target) which interact with the Portunus backend
-- **Portunus Backend**: A FastAPI service which authenticates requests using temporary AWS credentials and logs all traffic
-  - A client inserts a special payload into the authorization header expected by the upstream API
-    - The payload is a base64-encoded JSON blob containing temporary AWS credentials and a reference to a Secrets Manager secret ARN
-  - A Lua filter within Envoy forwards this payload to the Portunus `/authorise` endpoint
-  - Portunus uses the credentials from the payload to fetch the referenced secret, which should contain the actual API key. Network restrictions prevent clients from doing this directly.
-    - Secrets can be stored in two formats:
-      - **Plaintext**: `"sk-1234567890abcdef"` (works with any proxy target)
-      - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
-  - If successful, Portunus returns the real API key to the Envoy instance
-  - The filter swaps the original authorization payload for the real API key before allowing the request to proceed
-  - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
-  - As the above is happening, Envoy also sends request and response data to the Portunus `/log/..` endpoints for storage
+- **Envoy proxy** (one deployment per target host). Envoy terminates the client's connection and applies a filter chain:
+  - **`ext_authz`** calls Portunus's `Check` gRPC servicer to authenticate the request and (for signing tenants) compute the RFC 9421 signature headers.
+  - **`ext_proc`** streams request and response bodies — and post-101 WebSocket frames — to Portunus's `Process` gRPC servicer for audit publication.
+- **Portunus backend**. A pure gRPC process (`python -m portunus.grpc.server` — FastAPI was retired in the 0.6.0 cutover) hosting the two servicers above plus the standard `grpc.health.v1.Health` and reflection services. Envoy answers `/ping` (Envoy process liveness) and `/healthz` (gated on Portunus's `"readiness"` gRPC health service — the ALB health-check target); flushing the shared auth cache is an operator runbook — see [`docs/runbooks/flush-auth-cache.md`](docs/runbooks/flush-auth-cache.md) — not an HTTP endpoint:
+  - Decodes the base64-encoded payload in the client's `Authorization` header — `{credentials, secret_arn}` — and uses those AWS credentials to fetch the real API key from Secrets Manager. Clients can't reach Secrets Manager directly; network policy enforces this.
+  - Secrets can be stored as plaintext (`"sk-…"`) or as JSON with a target-host check (`{"secret":"sk-…","host":"api.openai.com"}`); the latter only authorises for matching upstreams.
+  - Returns the real key as a header mutation; Envoy applies it before forwarding upstream.
+  - Streams metadata, headers, and bodies to per-stream Firehose delivery streams for archival in S3.
 
 Supporting AWS services:
 
-- **Kinesis Data Streams / Firehose**: All traffic is streamed to Kinesis for archival in S3
-- **AWS Secrets Manager**: Stores the real API keys
-- **AWS X-Ray**: Distributed tracing for debugging
+- **Kinesis Firehose (direct-PUT)** for the audit pipeline.
+- **AWS Secrets Manager** for the real API keys.
+- **AWS KMS** for request signing (signing tenants only).
+- **AWS X-Ray** for distributed tracing.
 
-## Data Flow
+## Data flow
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Envoy as Envoy Proxy
-    participant Auth as portunus /authorise
-    participant Portunus as portunus /log
+    participant Envoy as Envoy proxy
+    participant Auth as portunus<br/>ext_authz Check
+    participant Proc as portunus<br/>ext_proc Process
     participant Redis
-    participant AWS as AWS Services
-    participant Target as Upstream Target
-    participant Kinesis as AWS Kinesis
+    participant AWS as Secrets Manager / KMS / STS
+    participant Target as Upstream target
+    participant Firehose
 
     Client->>Envoy: Initial request
+    Envoy->>Auth: Check (headers only)
+    Auth->>Redis: Cached auth result?
+    Auth-->>AWS: (miss) STS get-caller-identity
+    Auth-->>AWS: (miss) Secrets Manager get-secret-value
+    Auth-->>Redis: (miss) Cache result
+    Auth-->>Envoy: Header mutations (real api_key, signing flag)<br/>+ dynamic_metadata (principal_info, secret_arn)
 
-    Envoy->>Auth: Call /authorise
-    Auth->>Redis: Check for cached auth result
+    Note over Envoy: If signing required:<br/>composite filter dispatches<br/>a second ext_authz pass<br/>that buffers the body, signs<br/>via KMS, and returns<br/>Content-Digest + Signature headers.
 
-    Auth-->>AWS: (If cache miss) Get AWS Identity
-    Auth-->>AWS: (If cache miss) Fetch API Key from SecretManager
-    Auth-->>Redis: (If cache miss) Cache successful auth result
-
-    Auth->>Redis: Store principal metadata against request ID
-    Auth-->>Envoy: Return auth response
-
-    Note over Envoy: Terminate request if Auth not successful
-    Note over Envoy: Substitute API key in request header
-
-    Envoy->>Portunus: Log request headers
-    Portunus->>Kinesis: Publish record to Kinesis
-
-    Envoy->>Portunus: Log request body
-    Portunus->>Kinesis: Publish record to Kinesis
-
-    Envoy->>Target: Forward request to upstream
-
+    Envoy->>Target: Forward request
+    Envoy-->>Proc: Stream request headers (carry dynamic_metadata) + body chunks
+    Proc->>Firehose: Publish principal metadata record (off the auth-latency path)
     Target-->>Envoy: Stream response
     Envoy-->>Client: Stream response to client
-
-    Envoy->>Portunus: Log response body
-    Portunus->>Kinesis: Publish record to Kinesis
-
-    Envoy->>Portunus: Log response headers
-    Portunus->>Kinesis: Publish record to Kinesis
+    Envoy-->>Proc: Stream response headers + body chunks
+    Proc->>Firehose: Publish records per chunk
 ```
-
-## Architecture
-
-```mermaid
-flowchart TB
-    Client["Client Application"]
-
-    Envoy["Envoy Proxy"]
-
-    subgraph "Portunus Service"
-        Auth["Portunus /authorise endpoint"]
-        LogEndpoint["Portunus /log endpoints"]
-    end
-
-    subgraph "External Services"
-        Target["Upstream Target Services"]
-    end
-
-    subgraph "Data Storage"
-        Redis["Redis Cache"]
-    end
-
-    subgraph "AWS Services"
-        SecretManager["AWS Secret Manager"]
-        IAM["AWS IAM/Identity"]
-        Kinesis["AWS Kinesis Firehose / S3"]
-    end
-
-
-    %% Client flow
-    Client <-->|Request/Response| Envoy
-
-    %% Auth flow
-    Envoy -->|Auth Request| Auth
-    Auth <-->|Check cache| Redis
-    Auth <-->|Identity verification| IAM
-    Auth <-->|Fetch API Key| SecretManager
-    Auth -->|Store metadata| Redis
-    Auth -->|Auth Response| Envoy
-
-    %% Request logging
-    Envoy -->|Log events| LogEndpoint
-
-    %% Request forwarding
-    Envoy <-->|Forward request/response| Target
-
-
-    %% Log publishing
-    LogEndpoint -->|Archive log| Kinesis
-
-    %% Styling
-    classDef client fill:#e6f7ff,stroke:#1890ff
-    classDef envoyProxy fill:#f6ffed,stroke:#52c41a
-    classDef portunusService fill:#fff7e6,stroke:#fa8c16
-    classDef storageLayer fill:#fff2e8,stroke:#fa541c
-    classDef awsLayer fill:#fcf4d6,stroke:#d4b106
-    classDef externalLayer fill:#f0f5ff,stroke:#2f54eb
-
-    class Client client
-    class Envoy envoyProxy
-    class Auth,LogEndpoint portunusService
-    class Redis storageLayer
-    class SecretManager,IAM,Kinesis awsLayer
-    class Target externalLayer
-```
-
-## Security Model
-
-Portunus's service endpoints (`/authorise`, `/log/{request_id}/...`, `/cache/flush`, and the WebSocket relay) **do not authenticate their callers**. Anything that can reach them directly can flush the auth cache (forcing all clients to re-authenticate) or inject records into the Kinesis audit trail under any request ID. Only `/ping` is intended to be reachable without protection (health checks).
-
-The Envoy proxy already sends a shared secret with every call it makes to Portunus: `PORTUNUS_API_KEY`, carried in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`). Portunus itself does not validate it, so your deployment **must** enforce access in front of the service:
-
-- **Validate the shared-secret header before requests reach Portunus.** We recommend an authenticating reverse-proxy sidecar (e.g. nginx) in front of the service: reject any request that doesn't carry the expected `x-api-key` value and forward the rest (including WebSocket upgrades) to the app, exposing only the sidecar's port.
-- **And/or restrict network reachability** so that only the Envoy proxies (and trusted operational tooling, e.g. whatever calls `/cache/flush`) can reach the Portunus service at all.
-
-Do not expose Portunus directly to clients or the public internet.
-
-### Logged data
-
-Portunus captures **full request and response data** — bodies, headers, and trailers — and publishes it to Kinesis for the audit trail. This is deliberate: the logs are an audit record of everything that passed through the proxy. Be aware that this means:
-
-- **Request and response bodies are stored verbatim**, including prompts, completions, and any data (personal, commercial, or otherwise sensitive) that clients send or receive.
-- **Headers and URLs are stored verbatim**, except the provider API key header (`API_KEY_HEADER`), which is dropped before logging because Portunus substitutes the real upstream key into it. No other headers are filtered — provider keys or other secrets carried in a *different* header, or embedded in a URL or body, **will be captured**.
-
-Portunus does **not** attempt to redact secrets or sensitive content from what it logs. If you need redaction, filtering, or access tiering, do it downstream of the Kinesis streams (e.g. in the ETL/query layer that consumes the logs) and restrict who can read the raw stream output. Treat the raw log storage as containing everything your clients send and receive.
 
 ## Configuration
 
-### Environment Variables
+### Environment variables
 
 | Variable | Description | Default |
 |---|---|---|
 | `AWS_REGION` | AWS region for all service clients | *(required)* |
-| `PORTUNUS_API_KEY` | Shared secret the proxy attaches to every Portunus service call, in the `PORTUNUS_API_KEY_HEADER` header. Portunus does not validate it — see [Security Model](#security-model) | - |
-| `PORTUNUS_API_KEY_HEADER` | Header carrying the shared secret | `x-api-key` |
-| `API_KEY_HEADER` | Header name for the API key | `authorization` |
-| `API_KEY_PREFIX` | Prefix for the API key value | `Bearer ` |
+| `API_KEY_HEADER` | Header name carrying the encoded payload | `authorization` |
+| `API_KEY_PREFIX` | Prefix on the header value | `Bearer ` |
 | `PORTUNUS_HEADER_PREFIX` | Prefix for proxy response headers (`x-{prefix}-*`) | `portunus` |
-| `RATE_LIMIT_PERCENT_ENABLED` | Percentage of traffic to rate limit (0 = disabled) | `0` |
-| `RATE_LIMIT_INTERVAL_SECONDS` | Rate limit time window (seconds) | - |
-| `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Max requests per interval | - |
-| `USE_TLS` / `USE_TLS_TARGET` / `USE_TLS_PROVIDER` / `USE_TLS_LISTENER` | TLS configuration | - |
-| `CACHE_DURATION` | Authorization cache TTL | - |
-| `CACHE_INACTIVE` | Remove cache entries if unused for this period | - |
-| `REDIS_HOST` | Redis hostname | `localhost` |
-| `REDIS_PORT` | Redis port | `6379` |
-| `REDIS_PASSWORD` | Redis password | - |
+| `GRPC_ENABLED` | Start the ext_authz / ext_proc gRPC server | `false` |
+| `GRPC_HOST` | Interface the gRPC server binds to. Loopback by default for the sidecar topology where Envoy reaches Portunus on localhost. Set to `0.0.0.0` if Envoy and Portunus run in separate network namespaces. | `127.0.0.1` |
+| `GRPC_PORT` | gRPC server listen port | `9000` |
+| `GRPC_PROXY_API_KEY` | Pre-shared key Envoy presents in `x-portunus-proxy-key` initial metadata | - |
+| `GRPC_PROXY_API_KEY_OPTIONAL` | When `true`, allow an empty `GRPC_PROXY_API_KEY` (dev only) | `false` |
+| `CACHE_DURATION` | Authorisation cache TTL (seconds) | - |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis connection settings | `localhost` / `6379` / - |
 | `REDIS_MAX_CONNECTIONS` | Max Redis connections | `200` |
-| `KINESIS_METADATA_STREAM` | Kinesis stream for metadata | - |
-| `KINESIS_REQUEST_HEADERS_STREAM` | Kinesis stream for request headers | - |
-| `KINESIS_REQUEST_BODY_STREAM` | Kinesis stream for request bodies | - |
-| `KINESIS_RESPONSE_HEADERS_STREAM` | Kinesis stream for response headers | - |
-| `KINESIS_RESPONSE_BODY_STREAM` | Kinesis stream for response bodies | - |
-| `KINESIS_RESPONSE_TRAILERS_STREAM` | Kinesis stream for response trailers | - |
+| `FIREHOSE_METADATA_STREAM` | Firehose delivery stream for principal metadata records | - |
+| `FIREHOSE_REQUEST_HEADERS_STREAM` / `FIREHOSE_REQUEST_BODY_STREAM` / `FIREHOSE_REQUEST_TRAILERS_STREAM` | Request-side delivery streams | - |
+| `FIREHOSE_RESPONSE_HEADERS_STREAM` / `FIREHOSE_RESPONSE_BODY_STREAM` / `FIREHOSE_RESPONSE_TRAILERS_STREAM` | Response-side delivery streams | - |
+| `FIREHOSE_WS_SUMMARY_STREAM` | Per-connection WebSocket summary records (`WSSummaryRecord`) | - |
+| `RATE_LIMIT_PERCENT_ENABLED` / `RATE_LIMIT_INTERVAL_SECONDS` / `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Optional rate limiting | `0` / - / - |
+| `REDIS_USE_TLS` | TLS to Redis | `true` |
 
-## Local Development
+## Local development
 
 ### Setup
 
@@ -196,24 +89,18 @@ uv sync
 
 ### Running locally
 
-There is a `docker compose` test rig:
-
 ```bash
 docker compose up --build
 ```
 
-By default, the proxy points at an included instance of [httpbun](https://httpbun.com/) which can be used for testing.
-
-Send a request through the stack:
+By default the proxy points at an included [httpbun](https://httpbun.com/) instance. Send a request through the stack:
 
 ```bash
 curl -X GET http://localhost:8888/headers \
   -H "Authorization: Bearer eyJjcmVkZW50aWFscyI6eyJhY2Nlc3Nfa2V5X2lkIjoiQUtJQVRFU1QiLCJzZWNyZXRfYWNjZXNzX2tleSI6IlNFQ1JFVFRFU1QiLCJzZXNzaW9uX3Rva2VuIjoiVEVTVFRPS0VOIn0sInNlY3JldF9hcm4iOiJhcm46YXdzOnNlY3JldHNtYW5hZ2VyOnVzLWVhc3QtMToxMjM0NTY3ODkwMTI6c2VjcmV0OnRlc3Qtc2VjcmV0In0="
 ```
 
-### Constructing a Payload
-
-You can use `encode_payload()` to construct an authorization payload programmatically:
+### Constructing a payload
 
 ```python
 from portunus.services.payload_service import encode_payload
@@ -222,35 +109,54 @@ from portunus.services.payload_service import encode_payload
 payload = encode_payload(credentials, "arn:aws:secretsmanager:eu-west-2:123456789012:secret:my-api-key")
 ```
 
-### Running Tests
+## Running tests
+
+The test suite splits into two surfaces. The first runs in CI on every push and PR; the second needs Docker (and is slow) and runs in the same job after the unit tests pass.
+
+### Unit tests (fast, in-CI)
 
 ```bash
-# Run all tests
-uv run pytest
-
-# Run with docker compose stack (for e2e tests)
-docker compose up --build --wait
-uv run pytest tests/ portunus/
+cd portunus && uv run pytest -q
 ```
 
-### X-Ray Integration
+Covers the gRPC servicers (auth + proc) in isolation with `Fake*` collaborators, plus secrets / cache / signing / publish-queue logic and the schema-consistency check for the Glue ETL.
 
-For [X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) integration to work when testing locally, you need valid credentials in your environment when you start the docker stack. See the compose file for details.
+### Behaviour and end-to-end tests (slow, docker-compose required)
 
-### CloudWatch Integration
+Bring the stack up once and run the broader suite from the repo root:
 
-For [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) integration to work when testing locally, you need to uncomment the logging settings for the relevant services and set valid AWS credentials **in `~/.aws/credentials` for the root user, in the default profile**. See the compose file for details.
+```bash
+docker compose up --build --wait
+uv run --group dev pytest tests/ -q
+```
 
-## Known Issues
+The same fixtures cover:
 
-- **Kinesis record size**: Kinesis has a max record size of 1MiB. Large payloads are chunked automatically, but Envoy and Portunus both hold payloads in memory, which may cause memory pressure under heavy load with large payloads.
+- `tests/test_http_proxy_behaviour.py` — parameterised HTTP corpus driven through Envoy → Portunus → httpbun. Auth, methods, headers, security adversarial cases.
+- `tests/test_ws_proxy_behaviour.py` — WebSocket upgrade, frame round-trip, close-code propagation, abrupt-disconnect handling.
+- `tests/test_e2e.py` — non-corpus HTTP behaviours (custom header prefix, error-response diagnostics).
+- `tests/test_e2e_signing.py` — request-signing against the Anthropic test vectors via LocalStack KMS.
+- `tests/test_inspect_compat.py` — OpenAI SDK driven through Portunus via Inspect AI.
+- `tests/test_redis_cache.py` — Redis cache TTL and signing-key handling.
 
-- **Scaling lag**: The backend autoscales, and some 504/503 responses are expected during rapid load increases. These resolve as the service scales to accommodate the load.
+Tests that need the Docker stack are tagged `@pytest.mark.slow`. CI runs both surfaces in `.github/workflows/test.yml`; the lint and type-check workflows skip the Docker-driven lane.
+
+### X-Ray and CloudWatch integration
+
+For [X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) integration to work locally you need valid AWS credentials in your environment when you start the docker stack. See `docker-compose.yaml`.
+
+For [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) integration to work locally, uncomment the logging settings for the relevant services and provide credentials in `~/.aws/credentials` (default profile). See `docker-compose.yaml`.
+
+## Known issues
+
+- **Firehose record size**: Firehose has a 1 MiB max record size. Large payloads are chunked automatically (one record per chunk), but Envoy and Portunus both hold payloads in memory which can cause memory pressure under heavy load with large bodies.
+- **Scaling lag**: The backend autoscales; some 504 / 503 responses are expected during rapid load increases and resolve as the service scales up.
+- **WebSocket signing not supported**: If a tenant configured with a `signing_key` initiates a WebSocket upgrade, the proxy rejects the upgrade with `HTTP 400` and a body explaining the limitation. Either remove the `signing_key` from the tenant secret to use WebSocket, or use HTTPS for signed requests. No provider exposes signed WebSocket endpoints today, so this is unlikely to constrain real workloads; the explicit rejection ensures a clear customer-visible failure mode rather than silently signing an empty payload.
 
 ## Streaming
 
 The proxy handles streaming responses (e.g. SSE from LLM APIs) efficiently:
-- Request bodies are buffered (up to 50 MiB) for authentication
-- Responses are streamed directly to the client as they arrive
-- Each response chunk is logged individually with an index
-- Envoy's `stream_idle_timeout` is set to 3600s for long-running streams
+
+- Request bodies are buffered (up to 32 MiB) only when the tenant requires request signing; unsigned tenants stream end-to-end with no buffering. Larger signed bodies receive HTTP 413 from Envoy rather than being silently truncated.
+- Responses stream directly to the client as they arrive. Each response chunk is logged to Firehose individually with a monotonic `chunk_id`; the akp Glue ETL reassembles by `request_id` at aggregation time.
+- Envoy's `stream_idle_timeout` is set to 3600s for long-running streams.

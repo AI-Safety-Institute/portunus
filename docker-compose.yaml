@@ -14,7 +14,11 @@ services:
     networks:
       app_network:
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://portunus:8080/ping | grep -qE '^(200)$'"]
+      # Two probes matching prod: /ping is Envoy-liveness only, /healthz is
+      # gated on the active gRPC health check of Portunus. Probing /healthz
+      # validates the whole chain, so the stack reports healthy only when
+      # Portunus is SERVING, not merely when Envoy is up.
+      test: ["CMD", "sh", "-c", "curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/ping | grep -qE '^(200)$' && curl -s -o /dev/null -w '%{http_code}' http://proxy:8888/healthz | grep -qE '^(200)$'"]
       interval: 15s
       timeout: 2s
       retries: 5
@@ -26,9 +30,8 @@ services:
     networks:
       app_network:
     ports:
-      # Host publishes are a dev convenience only — the test suite drives
-      # LocalStack via ``docker exec localstack-main awslocal`` — so both
-      # are overridable for machines where something else holds 4566.
+      # Host publishes are a dev convenience only (tests drive LocalStack via
+      # docker exec awslocal); overridable when something else holds 4566.
       - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"                      # LocalStack Gateway
       - "127.0.0.1:${LOCALSTACK_HOST_SERVICES_PORTS:-4510-4559}:4510-4559"  # external services port range
     environment:
@@ -43,7 +46,7 @@ services:
       - "${LOCALSTACK_VOLUME_DIR:-./localstack}:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "./scripts/localstack-init.sh:/etc/localstack/init/ready.d/00-init-main.sh"
-      - "./scripts/localstack-init-kinesis.sh:/etc/localstack/init/ready.d/01-init-kinesis.sh"
+      - "./scripts/localstack-init-firehose.sh:/etc/localstack/init/ready.d/01-init-firehose.sh"
       - "./scripts/localstack-init-async-analysis.sh:/etc/localstack/init/ready.d/02-init-async-analysis.sh"
 
   xray-daemon:
@@ -67,6 +70,8 @@ services:
     init: true
     networks:
       app_network:
+    # Publishes the Envoy listener (8888). Portunus shares this container's
+    # network namespace and serves only gRPC on loopback 127.0.0.1:9000.
     ports:
       - "8888:8888"
     environment:
@@ -78,11 +83,16 @@ services:
       API_KEY_HEADER: authorization
       API_KEY_PREFIX: "Bearer "
       LISTEN_PORT: 8888
-      PORTUNUS_HOST: portunus
-      PORTUNUS_PORT: 8080
       TARGET_HOST: http-bun
       TARGET_PORT: 80
-      WS_TARGET_HOST: ws-echo  # Override for local WS testing (defaults to TARGET_HOST in prod)
+      # Route WS upgrades to ws-echo but keep plain HTTP at http-bun, so the
+      # behaviour tests can exercise WS without a provider that serves both.
+      WS_TARGET_HOST: ws-echo
+      WS_TARGET_PORT: 80
+      # ws-echo is HTTP/1.1 plaintext, so disable the cluster's TLS transport
+      # socket. (h2 is pinned at config level via typed_extension_protocol_options,
+      # not env-var-driven.)
+      WS_TARGET_HOST_TRANSPORT_SOCKET: "null"
       ENVOY_LOG_LEVEL: info
       AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
       # Uncomment the three env vars below to
@@ -112,14 +122,14 @@ services:
     build: portunus/
     container_name: portunus
     init: true
-    networks:
-      app_network:
-    # x-ray console can automatically display relevant cloudwatch logs by querying
-    # the group for a matching trace id. If you want to log docker to cloudwatch,
-    # you must put credentials in /root/.aws/credentials default profile
-    # in order to override aninstance profile.
-    # It is not enough to paste them in as env vars.
-    # Comment this out you don't want to log to cloudwatch.
+    # Share the proxy's network namespace, mirroring the prod Fargate-sidecar
+    # layout (Envoy dials portunus over loopback 127.0.0.1:9000). A shared
+    # namespace means portunus can't publish its own ports — the proxy service
+    # publishes on its behalf for the bridged health probe.
+    network_mode: "service:proxy"
+    # To ship these logs to CloudWatch (so X-Ray can correlate them by trace
+    # id), uncomment below and put credentials in /root/.aws/credentials'
+    # default profile — env vars alone won't override an instance profile.
     #
     # logging:
     #   driver: awslogs
@@ -133,7 +143,6 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
       # AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
       LOG_LEVEL: info
-      LISTEN_PORT: 8080
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: redis_secure_password
@@ -144,14 +153,31 @@ services:
       # Localstack endpoint. Unset to make real AWS requests
       AWS_ENDPOINT_URL: http://localstack:4566
       REDIS_USE_TLS: "false"
-      # Kinesis stream configuration for local testing
-      KINESIS_METADATA_STREAM: portunus-stream-metadata
-      KINESIS_REQUEST_HEADERS_STREAM: portunus-stream-request-headers
-      KINESIS_REQUEST_BODY_STREAM: portunus-stream-request-body
-      KINESIS_REQUEST_TRAILERS_STREAM: portunus-stream-request-trailers
-      KINESIS_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
-      KINESIS_RESPONSE_BODY_STREAM: portunus-stream-response-body
-      KINESIS_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
+      # Firehose direct-PUT delivery streams for local testing. Names
+      # must match the streams created by scripts/localstack-init.sh.
+      FIREHOSE_METADATA_STREAM: portunus-firehose-metadata
+      FIREHOSE_REQUEST_HEADERS_STREAM: portunus-firehose-request-headers
+      FIREHOSE_REQUEST_BODY_STREAM: portunus-firehose-request-body
+      FIREHOSE_REQUEST_TRAILERS_STREAM: portunus-firehose-request-trailers
+      FIREHOSE_RESPONSE_HEADERS_STREAM: portunus-firehose-response-headers
+      FIREHOSE_RESPONSE_BODY_STREAM: portunus-firehose-response-body
+      FIREHOSE_RESPONSE_TRAILERS_STREAM: portunus-firehose-response-trailers
+      FIREHOSE_WS_SUMMARY_STREAM: portunus-firehose-ws-summary
+      # Header prefix; passed to portunus too so denied responses carry
+      # x-{prefix}-error: true.
+      PORTUNUS_HEADER_PREFIX: aisi-proxy
+      # gRPC ext_authz + ext_proc server. Without it ext_authz is
+      # connection-refused → 403.
+      GRPC_ENABLED: "true"
+      GRPC_PORT: "9000"
+      # Fast metrics ticks locally so the EMF lines are visible in short runs.
+      GRPC_METRICS_INTERVAL_SECONDS: "${GRPC_METRICS_INTERVAL_SECONDS:-10}"
+      # Empty proxy_api_key disables the proxy-identity check (test-only; the
+      # SC-namespace gate that motivates it in prod doesn't apply on the bridge).
+      # GRPC_PROXY_API_KEY_OPTIONAL=true acknowledges this; without it the
+      # server fails closed on startup.
+      GRPC_PROXY_API_KEY: ""
+      GRPC_PROXY_API_KEY_OPTIONAL: "true"
 
   ws-echo:
     build: ws-echo

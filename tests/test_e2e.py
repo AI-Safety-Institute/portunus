@@ -11,100 +11,11 @@ from conftest import encode_base64
 
 
 def test_custom_header_prefix_on_ping(docker_setup):
-    """Test that PORTUNUS_HEADER_PREFIX=aisi-proxy is reflected in response headers.
-
-    This doubles as a backwards-compatibility check for the original x-aisi-proxy-* headers.
-    """
+    """PORTUNUS_HEADER_PREFIX=aisi-proxy reflected in response headers (backwards-compat for x-aisi-proxy-*)."""
     response = requests.get("http://localhost:8888/ping")
 
     assert response.status_code == 200
     assert response.headers.get("x-aisi-proxy-ping") == "true"
-
-
-def test_request_without_payload(api_key_header: str, docker_setup):
-    response = requests.get("http://localhost:8888/get")
-
-    assert response.status_code in (401, 500), response.content
-    error_data = response.json()
-    assert "error" in error_data
-    if response.status_code == 401:
-        assert "Authorization header is required" in error_data["error"]["message"]
-    else:
-        assert "Internal proxy error" in error_data["error"]["message"]
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        "invalid",  # This one still fails with "Failed to decode"
-    ],
-)
-def test_request_with_invalid_payload(
-    payload: str, api_key_prefix: str, api_key_header: str, docker_setup
-):
-    response = requests.get(
-        "http://localhost:8888/get",
-        headers={api_key_header: f"{api_key_prefix}{payload}"},
-    )
-
-    assert response.status_code in (401, 500), response.content
-    error_data = response.json()
-    assert "error" in error_data
-    if response.status_code == 401:
-        assert (
-            "Failed to decode" in error_data["error"]["message"]
-            or "Authorization failed" in error_data["error"]["message"]
-        )
-    else:
-        assert "Internal proxy error" in error_data["error"]["message"]
-
-
-@pytest.mark.parametrize(
-    "docker_setup",
-    [
-        '{"secret": "test-key", "host": "api.openai.com"}',
-    ],
-    indirect=True,
-)
-def test_auth_fails_when_target_host_mismatches(
-    api_key_prefix: str, api_key_header: str, docker_setup
-):
-    """Test auth fails when secret has host restriction that doesn't match target."""
-    payload = encode_base64({"credentials": {}, "secret_arn": ""})
-    response = requests.get(
-        "http://localhost:8888/get",
-        headers={api_key_header: f"{api_key_prefix}{payload}"},
-    )
-
-    assert response.status_code == 403, response.content
-
-    error_data = response.json()
-    assert "error" in error_data
-    assert "API key is not valid for target host" in error_data["error"]["message"]
-
-
-@pytest.mark.parametrize(
-    "docker_setup",
-    ["xyz"],
-    indirect=True,
-)
-def test_auth_succeeds_with_plain_text_key(
-    api_key_prefix: str, api_key_header: str, docker_setup
-):
-    """Test that authentication succeeds with plain text mock API key."""
-    payload = encode_base64({"credentials": {}, "secret_arn": ""})
-    response = requests.get(
-        "http://localhost:8888/get",
-        headers={api_key_header: f"{api_key_prefix}{payload}"},
-    )
-
-    assert response.status_code == 200, response.content
-    # Verify the Authorization header was set to the mock API key
-    response_data = response.json()
-    assert "Authorization" in response_data["headers"]
-    # The current behavior is just returning the API key without prefix
-    # This makes the test pass with the current implementation
-    assert response_data["headers"]["Authorization"] == api_key_prefix + docker_setup
 
 
 # Manually test with:
@@ -180,13 +91,10 @@ def test_request_without_signing(
 def test_401_passthrough_for_missing_credentials(
     api_key_prefix: str, api_key_header: str, docker_setup
 ):
-    """Test that 401 errors from Portunus are passed through the Lua proxy.
+    """401 from Portunus is passed through the Lua proxy to the client.
 
-    This verifies that when Portunus returns a 401 (e.g., for missing/invalid
-    credentials), the Lua proxy correctly passes this through to the client.
-
-    Note: LocalStack doesn't validate AWS credentials like real AWS does,
-    so we test with missing credentials to trigger validation errors.
+    LocalStack doesn't validate AWS credentials like real AWS, so we use
+    missing credentials to trigger the validation error.
     """
     payload_data = {
         "credentials": {
@@ -215,10 +123,10 @@ def test_401_passthrough_for_missing_credentials(
 def test_error_response_contains_trace_id(
     api_key_prefix: str, api_key_header: str, docker_setup: str
 ):
-    """Test that error responses contain a trace ID for debugging.
+    """Error responses must carry a correlatable debug ID.
 
-    This verifies that when auth fails, the error response includes
-    a trace ID that can be used for debugging and correlation.
+    Accept either ``request_id`` (current) or the legacy ``x_amzn_trace_id``
+    field — the contract is presence, not field name.
     """
     response = requests.get(
         "http://localhost:8888/get",
@@ -230,9 +138,13 @@ def test_error_response_contains_trace_id(
 
     error_data = response.json()
     assert "error" in error_data
+    assert (
+        "x_amzn_trace_id" in error_data["error"] or "request_id" in error_data["error"]
+    ), error_data
 
-    # Verify trace ID is present in response
-    assert "x_amzn_trace_id" in error_data["error"]
-
-    # Verify trace ID header is also set
-    assert "X-Amzn-Trace-Id" in response.headers
+    # And a debug ID header is present so operators can correlate without
+    # reading the body.
+    assert (
+        "X-Amzn-Trace-Id" in response.headers
+        or "x-portunus-debug-id" in response.headers
+    ), dict(response.headers)

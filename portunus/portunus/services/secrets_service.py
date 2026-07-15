@@ -25,9 +25,14 @@ class SecretsService:
     including API keys.
     """
 
-    def __init__(self):
-        """Initialize the SecretsService."""
-        self.boto_session = get_session()
+    def __init__(self, boto_session=None):
+        """Initialize the SecretsService.
+
+        Args:
+            boto_session: Optional aiobotocore session. Defaults to
+                ``get_session()``; tests pass a fake to avoid real AWS.
+        """
+        self.boto_session = boto_session if boto_session is not None else get_session()
 
     @capture_async()
     async def fetch_secret(self, payload: AuthPayload) -> str:
@@ -54,7 +59,12 @@ class SecretsService:
                 response = await client.get_secret_value(SecretId=payload.secret_arn)
                 return response["SecretString"]
         except Exception as e:
-            logger.error(f"Failed to get secret from Secrets Manager: {e}")
-            raise FetchSecretError(
-                403, f"Failed to get secret from Secrets Manager: {e}"
-            ) from e
+            # Customer supplies ``secret_arn``; boto echoes it into the
+            # exception message. Logging that verbatim is a log-injection
+            # vector (newlines in the supplied string fake CloudWatch
+            # records) and a cross-account ARN-disclosure channel. Log
+            # only the exception class.
+            logger.error(
+                "Failed to get secret from Secrets Manager: %s", type(e).__name__
+            )
+            raise FetchSecretError(403, "Failed to retrieve API key secret") from e

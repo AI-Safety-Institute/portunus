@@ -1,19 +1,17 @@
-"""
-Data models for the Portunus.
+"""Data models for Portunus.
 
-This module contains dataclass models and Pydantic models that represent entities
-and data structures used throughout the Portunus service. These models provide
-type safety, validation, and conversion methods.
-
-Note: Non-standard library imports are lazy-loaded to allow safe export to
-environments like AWS Glue where dependencies may not be available.
+Non-standard library imports are lazy-loaded so this module can be
+exported standalone to environments like AWS Glue where heavy
+dependencies aren't available.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import json
+import zlib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import (
@@ -54,30 +52,6 @@ class RowLike(Protocol):
     def asDict(self) -> Dict[str, str]:
         """Convert Row to dict."""
         ...
-
-
-@dataclass
-class ParsedArn:
-    """Result of parsing an AWS ARN."""
-
-    account_id: str
-    path_parts: Optional[List[str]] = None
-
-
-@dataclass
-class RequestSummary:
-    """Summary of request data for notifications."""
-
-    headers: Dict[str, str]
-    size: int
-
-
-@dataclass
-class ResponseSummary:
-    """Summary of response data for notifications."""
-
-    headers: Dict[str, str]
-    size: int
 
 
 def decode_base64(value: str) -> bytes:
@@ -143,9 +117,9 @@ def _eventstream_payload_to_sse_line(payload: bytes) -> Optional[str]:
             "Skipping malformed eventstream message: %s", exc.__class__.__name__
         )
         return None
-    # Re-parse + dict check is the SSE-injection guard: rejects non-object
-    # inners, and inners whose strings contain literal control chars (RFC 8259
-    # forbids those). Re-serializing keeps each SSE event on one data line.
+    # SSE-injection guard: reject non-object inners and inners with literal
+    # control chars (forbidden by RFC 8259); re-serializing keeps each SSE
+    # event on one data line.
     try:
         inner = json.loads(inner_str)
     except json.JSONDecodeError:
@@ -158,27 +132,22 @@ def _eventstream_payload_to_sse_line(payload: bytes) -> Optional[str]:
 def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
     r"""Unwrap eventstream framing into SSE ``data: {...}\n`` lines.
 
-    Framing is parsed by botocore's ``EventStreamBuffer`` (the same code path
-    boto3 uses for Bedrock streaming), so prelude/header/CRC handling isn't
-    rolled by hand here. One SSE line per inner ``bytes`` event; non-``bytes``
-    messages are skipped (see ``_eventstream_payload_to_sse_line``).
+    Framing is parsed by botocore's ``EventStreamBuffer`` (the same path boto3
+    uses for Bedrock streaming). One SSE line per inner ``bytes`` event;
+    non-``bytes`` messages are skipped (see ``_eventstream_payload_to_sse_line``).
 
-    Returns None to signal a decode failure (the caller maps that to
-    ``response_body_decode_failure``). That happens when no complete message
-    could be parsed, *and* when the body ends in a truncated (incomplete)
-    trailing frame -- see the truncation guard below. A non-None result means
-    every input byte was accounted for by a complete frame.
+    Returns None on decode failure (caller maps to
+    ``response_body_decode_failure``): when no complete message parsed, or when
+    the body ends in a truncated trailing frame (see truncation guard below).
+    A non-None result means every input byte was in a complete frame.
 
-    Distinct from truncation: a ``ParserError`` from a corrupt frame *after*
-    at least one message has parsed (e.g. a mid-stream CRC mismatch) is
-    best-effort -- the events recovered before it are returned rather than
-    discarding the whole body. CRCs are validated by botocore; a mismatch
-    mid-stream is non-fatal for that reason.
+    A ``ParserError`` from a corrupt frame *after* at least one message parsed
+    (e.g. mid-stream CRC mismatch, which botocore validates) is best-effort:
+    events recovered before it are returned rather than discarding the body.
     """
-    # Lazy-loaded per this module's convention (see module docstring): keep
-    # `import portunus.models` free of third-party imports. botocore itself is
-    # always present in both run targets (the service depends on it; Glue
-    # preinstalls boto3).
+    # Lazy import per module convention: keep `import portunus.models` free of
+    # third-party imports. botocore is present in both run targets (service
+    # depends on it; Glue preinstalls boto3).
     from botocore.eventstream import EventStreamBuffer, ParserError
 
     buffer = EventStreamBuffer()
@@ -190,10 +159,9 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         for message in buffer:
             parsed_any = True
             # total_length spans the whole on-wire frame (prelude + headers +
-            # payload + both CRCs), so accumulating it tracks exactly how many
-            # input bytes complete frames have consumed -- the basis for the
-            # truncation guard below. (botocore-stubs mistypes ``prelude`` as
-            # ``int`` rather than ``MessagePrelude``; hence the attr ignore.)
+            # payload + both CRCs), so the running sum tracks bytes consumed by
+            # complete frames — the basis for the truncation guard below.
+            # (botocore-stubs mistypes ``prelude`` as ``int``; hence the ignore.)
             consumed += message.prelude.total_length  # type: ignore[attr-defined]
             line = _eventstream_payload_to_sse_line(message.payload)
             if line is not None:
@@ -202,10 +170,10 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         if not parsed_any:
             logger.warning("eventstream parse failed: %s", exc.__class__.__name__)
             return None
-        # A corrupt frame after a valid prefix (e.g. CRC mismatch): keep the
-        # events decoded so far. This is NOT the truncation path -- the guard
-        # below must not run here, since an unparsed corrupt frame also leaves
-        # a residual but is deliberately recovered as a partial success.
+        # Corrupt frame after a valid prefix (e.g. CRC mismatch): keep events
+        # decoded so far. NOT the truncation path — a corrupt frame also leaves
+        # a residual, but is deliberately recovered as a partial success, so
+        # the guard below must not run here.
         logger.warning(
             "eventstream corrupt after %d message(s), keeping partial: %s",
             len(sse_lines),
@@ -214,15 +182,13 @@ def _parse_vnd_amazon_eventstream(body_bytes: bytes) -> Optional[str]:
         return "".join(sse_lines)
     if not parsed_any:
         return None
-    # Truncation guard (silent-failure fix). botocore's EventStreamBuffer ends
-    # iteration with a bare StopIteration the instant the remaining bytes are
-    # too few to form the next complete frame -- indistinguishable, to the
-    # `for` loop, from a clean end of stream. So a truncated trailing frame
-    # (client disconnect, upstream reset, idle timeout, body-size cap) looked
-    # like success and silently dropped the token-bearing tail (Anthropic's
-    # usage.output_tokens live in the near-final message_delta). Detect it via
-    # the one observable difference: complete frames account for every input
-    # byte, so any residual is an incomplete tail -> mark a decode failure.
+    # Truncation guard. botocore's EventStreamBuffer ends iteration with a bare
+    # StopIteration the instant the remaining bytes are too few for the next
+    # complete frame — indistinguishable from a clean end of stream. So a
+    # truncated trailing frame (disconnect, reset, timeout, body-size cap) looks
+    # like success and silently drops the token-bearing tail (Anthropic's
+    # usage.output_tokens live in the near-final message_delta). Complete frames
+    # account for every input byte, so any residual is an incomplete tail.
     residual = len(body_bytes) - consumed
     if residual > 0:
         logger.warning(
@@ -247,9 +213,6 @@ def _decompress_b64_body(
     ``_parse_vnd_amazon_eventstream``). Returns ``(text, failed)``;
     ``text`` is None when ``failed``.
     """
-    import gzip
-    import zlib
-
     try:
         body_bytes = base64.b64decode(body_b64)
     except (binascii.Error, UnicodeDecodeError):
@@ -291,15 +254,7 @@ def _decompress_b64_body(
 
 @dataclass
 class AwsCredentials:
-    """AWS credential object containing access keys and optional session token.
-
-    Attributes:
-        access_key_id (str): AWS access key ID
-        secret_access_key (str): AWS secret access key
-        session_token (Optional[str]): Optional AWS session token for temporary
-                                       credentials
-        expiration (Optional[datetime]): When credentials expire (UTC)
-    """
+    """AWS credentials: access keys, optional session token, expiration (UTC)."""
 
     access_key_id: str
     secret_access_key: str
@@ -308,6 +263,7 @@ class AwsCredentials:
 
     def __post_init__(self) -> None:
         """Validate credentials after initialization."""
+        # Lazy import: models.py ships standalone to AWS Glue.
         from portunus.exceptions import InputValidationError
 
         if not self.access_key_id:
@@ -331,14 +287,14 @@ class AwsCredentials:
             return None
 
         try:
-            # Parse ISO-8601 timestamp (handles various formats including Z suffix)
             dt = datetime.fromisoformat(expiration_str.replace("Z", "+00:00"))
-            # Ensure it's in UTC
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse credential expiration: {expiration_str}")
+            # ``expiration_str`` is customer-controlled (base64-JSON bearer
+            # payload); don't log its content — log-injection vector.
+            logger.warning("Could not parse credential expiration string")
             return None
 
     @classmethod
@@ -400,14 +356,7 @@ class AwsCredentials:
 
 @dataclass
 class AuthPayload:
-    """Authorization payload containing AWS credentials and a secret ARN.
-
-    Attributes:
-        raw (str): JSON string of AWS credentials
-        credentials (AwsCredentials): Parsed AWS credentials
-        secret_arn (str): ARN of the secret to retrieve
-        target_host (Optional[str]): Expected target host for validation
-    """
+    """Authorization payload containing AWS credentials and a secret ARN."""
 
     raw: str
     "Used for cache key generation to allow for forward compatible cache busting"
@@ -426,12 +375,10 @@ class AuthPayload:
     def from_contents(
         cls, raw_payload: str, target_host: Optional[str] = None
     ) -> "AuthPayload":
-        """
-        Create an AuthPayload from a base64 encoded payload.
+        """Create an AuthPayload from a base64-encoded payload.
 
-        The proxy removes the Bearer prefix before sending this payload. The payload
-        is expected to be a base64-encoded JSON string containing "credentials" and
-        "secret_arn" fields.
+        The proxy removes the Bearer prefix first. The payload is a base64-encoded
+        JSON string with "credentials" and "secret_arn" fields.
 
         Args:
             raw_payload (str): Base64-encoded payload string
@@ -448,7 +395,6 @@ class AuthPayload:
 
         try:
             decoded_payload = decode_payload(raw_payload)
-            # Check for required fields
             if not isinstance(decoded_payload, dict):
                 raise PayloadError("Invalid payload format")
 
@@ -462,34 +408,19 @@ class AuthPayload:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
         except Exception as e:
-            msg = f"Failed to decode authorization payload: {e}, payload: {raw_payload}"
+            # Never include raw_payload in the message: the base64 blob holds
+            # temporary AWS credentials that would surface in error responses,
+            # logs, and Envoy access logs. `from e` keeps the decode error for
+            # debugging.
+            msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary representation.
-
-        Returns:
-            Dict[str, Any]: Dictionary with payload fields
-        """
-        result = {
-            "credentials": self.credentials.to_dict(),
-            "secret_arn": self.secret_arn,
-            "expiration": None,  # This is typically set when creating temporary creds
-        }
-        if self.target_host:
-            result["target_host"] = self.target_host
-        return result
 
 
 @dataclass
 class PrincipalInfo:
-    """Principal identity information extracted from AWS ARN.
+    """Principal identity extracted from an AWS ARN.
 
-    Attributes:
-        account_id (str): The AWS account ID
-        principal (Optional[str]): The principal type and name
-        session_name (Optional[str]): The session name if present
-        project (str): The project name extracted from UserProfile_ roles
+    ``project`` is derived from ``UserProfile_`` roles.
     """
 
     arn: str = "unknown"
@@ -497,15 +428,6 @@ class PrincipalInfo:
     principal: Optional[str] = None
     session_name: Optional[str] = None
     project: Optional[str] = None
-
-    @classmethod
-    def empty(cls) -> "PrincipalInfo":
-        """Create an empty PrincipalInfo object with default values.
-
-        Returns:
-            PrincipalInfo: An empty principal info object
-        """
-        return cls()
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PrincipalInfo":
@@ -541,11 +463,10 @@ class PrincipalInfo:
 
 
 class SecretsManagerAuthPayload(BaseModel):
-    """
-    AWS SecretsManager payload for our proxy api keys.
+    """AWS SecretsManager payload for our proxy API keys.
 
-    Each api key secret is either a simple string consisting entirely of the api key,
-    or a json payload in this format
+    Each secret is either a plain string (the whole API key) or a JSON payload
+    in this shape.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -564,11 +485,11 @@ class SecretsManagerAuthPayload(BaseModel):
 
         try:
             return cls.model_validate(secret_data)
-        except ValidationError as e:
-            logger.info(
-                "JSON secret with unrecognised schema, using JSON as API key",
-                exc_info=e,
-            )
+        except ValidationError:
+            # Do NOT pass exc_info — pydantic ValidationError formats the
+            # offending input verbatim, which here is the raw secret JSON
+            # (upstream provider API key).
+            logger.info("JSON secret with unrecognised schema, using JSON as API key")
             return cls(api_key=input)
 
 
@@ -587,35 +508,11 @@ class SigningKey:
 
 @dataclass
 class AuthResult:
-    """Result of an authentication operation.
-
-    Attributes:
-        api_key (str): The API key retrieved from Secrets Manager
-        principal_info (PrincipalInfo): Information about the authenticated principal
-    """
+    """Result of an authentication operation."""
 
     api_key: str
     signing_key: Optional[SigningKey]
     principal_info: PrincipalInfo
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "AuthResult":
-        """Create an AuthResult object from a dictionary.
-
-        Args:
-            data (Dict[str, Any]): Dictionary containing auth result fields
-
-        Returns:
-            AuthResult: A new auth result object
-        """
-        principal_info_data = data.get("principal_info", {})
-        principal_info = PrincipalInfo.from_dict(principal_info_data)
-
-        return cls(
-            api_key=data.get("api_key", ""),
-            signing_key=data.get("signing_key", None),
-            principal_info=principal_info,
-        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation.
@@ -635,75 +532,14 @@ class AuthResult:
         return bool(self.api_key)
 
 
-# Request payload models for the new REST endpoints
-class HeadersPayload(BaseModel):
-    """Request payload model for headers endpoints (request/response).
-
-    Attributes:
-        headers: Dictionary of headers with base64-encoded values from Lua
-        timestamp: Unix timestamp number when the event occurred
-    """
-
-    headers: Dict[str, str]
-    timestamp: int
-
-    def get_iso_timestamp(self) -> str:
-        """Convert timestamp to ISO-8601 format if it's a Unix timestamp."""
-        from portunus.util import unix_timestamp_to_iso
-
-        return unix_timestamp_to_iso(self.timestamp)
-
-
-class TrailersPayload(BaseModel):
-    """Request payload model for trailers endpoints (request/response).
-
-    Attributes:
-        trailers: Dictionary of trailers with base64-encoded values from Lua
-        timestamp: Unix timestamp number when the event occurred
-    """
-
-    trailers: Dict[str, str]
-    timestamp: int
-
-    def get_iso_timestamp(self) -> str:
-        """Convert timestamp to ISO-8601 format if it's a Unix timestamp."""
-        from portunus.util import unix_timestamp_to_iso
-
-        return unix_timestamp_to_iso(self.timestamp)
-
-
-# Kinesis record dataclasses - define the structure of published records
+# Firehose record dataclasses - define the structure of published records
 
 
 @dataclass
 class MetadataRecord:
-    """Metadata record for Kinesis stream containing request and principal information.
+    """Per-request principal + secret identity record published to Firehose.
 
-    This record is generated by Portunus when a request is first authorized and contains
-    identity information extracted from the AWS credentials used for authentication.
-    Published to the metadata Kinesis stream.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Used to correlate logs
-            across all streams.
-        timestamp: ISO-8601 formatted timestamp when the request was received by the
-            proxy. This is the canonical timestamp used for partitioning in ETL jobs.
-        published_at: ISO-8601 timestamp when this record was published to Kinesis.
-            May differ slightly from timestamp due to processing delays.
-        account_id: AWS account ID extracted from the principal ARN. None if principal
-            information is unavailable (e.g., mock mode).
-        principal: Principal type and name (e.g., "assumed-role/RoleName"). None if
-            principal information is unavailable.
-        principal_arn: Full principal ARN (e.g.
-            "arn:aws:sts::123456789012:assumed-role/...").
-            None if principal information is unavailable.
-        project: Project name extracted from UserProfile_ pattern in role names. None
-            if the role doesn't match the pattern or principal info is unavailable.
-        session_name: Session name from assumed role ARNs. None if not present or
-            principal information is unavailable.
-        secret_arn: Full ARN of the AWS Secrets Manager secret used for the API
-            key. None if not available. Downstream consumers parse the name
-            from the ARN when needed.
+    ``timestamp`` is the canonical partition key for ETL.
     """
 
     request_id: str
@@ -717,7 +553,7 @@ class MetadataRecord:
     secret_arn: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Kinesis publishing."""
+        """Convert to dictionary for Firehose publishing."""
         return {
             "record_type": "metadata",
             "request_id": self.request_id,
@@ -750,35 +586,7 @@ class MetadataRecord:
 
 @dataclass
 class RequestHeadersRecord:
-    """Request headers record for Kinesis stream containing HTTP request headers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    request-headers Kinesis stream. Headers are base64-encoded by Lua before publishing
-    to safely handle binary or non-UTF-8 header values.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        raw_headers: Complete dictionary of HTTP headers with base64-encoded values.
-            Keys are lowercase header names. Includes pseudo-headers (prefixed with :)
-            from HTTP/2. All values are base64-encoded strings.
-        timestamp: ISO-8601 formatted timestamp when headers were captured (typically
-            matches the metadata timestamp).
-        published_at: ISO-8601 timestamp when this record was published to Kinesis.
-        content_type: Decoded content-type header value (UTF-8 string). Automatically
-            decoded from raw_headers during __post_init__. None if header not present
-            or decoding fails.
-        method: Decoded HTTP method from :method pseudo-header (e.g., "GET", "POST").
-            None if not present or decoding fails.
-        path: Decoded request path from :path pseudo-header (e.g.
-            "/v1/chat/completions"). None if not present or decoding fails.
-        authority: Decoded authority from :authority pseudo-header (HTTP/2 equivalent
-            of Host header). None if not present or decoding fails.
-        user_agent: Decoded User-Agent header value. None if not present or decoding
-            fails.
-        content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
-            Indicates compression applied to request body. None if not present or
-            decoding fails.
-    """
+    """Request-headers audit record. ``raw_headers`` values are base64-encoded."""
 
     request_id: str
     raw_headers: Dict[str, str]
@@ -801,7 +609,7 @@ class RequestHeadersRecord:
         self.content_encoding = _decode_b64_header(self.raw_headers, "content-encoding")
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Kinesis publishing."""
+        """Convert to dictionary for Firehose publishing."""
         return {
             "record_type": "request_headers",
             "request_id": self.request_id,
@@ -836,29 +644,26 @@ class RequestHeadersRecord:
 
 @dataclass
 class RequestBodyRecord:
-    """Request body record for Kinesis stream containing HTTP request body data.
+    """One chunk of a request body. ``body`` is base64; ETL concatenates by chunk_id.
 
-    This record is captured by the Envoy proxy via Lua script and published to the
-    request-body Kinesis stream. Large bodies are automatically split into chunks to
-    stay within Kinesis record size limits. Each chunk is published as a separate
-    record.
+    ``num_chunks=0`` is the per-chunk wire format where Glue derives the total
+    at aggregation via ``count(*)``.
 
-    Body data is base64-encoded by Lua before publishing to safely handle
-    binary content.
+    ``dropped=True`` is a sentinel for a chunk the publish queue rejected under
+    backpressure (``body``/``body_size`` empty/zero). ETL must treat a
+    reassembled body with any sentinel as incomplete, not read chunk_id gaps as
+    absence-of-data.
 
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        body: Base64-encoded body content for this chunk. May contain compressed data
-            if content-encoding header indicates compression (see request headers).
-        body_size: Size of this chunk's body in bytes (after base64 encoding). Note
-            this is the size of the encoded string, not the original binary data.
-        timestamp: ISO-8601 formatted timestamp when body was captured.
-        chunk_id: Zero-based index of this chunk. 0 for first chunk, incremented for
-            subsequent chunks. ETL jobs currently only process chunk_id=0.
-        num_chunks: Total number of chunks for this request body. If > 1, the body
-            was split across multiple records. ETL jobs set a 'truncated' flag when
-            num_chunks > 1 to indicate incomplete data.
-        published_at: ISO-8601 timestamp when this record was published to Kinesis.
+    ``truncated=True`` marks a chunk capped by an upstream safety limit
+    (currently only the WS deflate decompression cap in ``frame_observer.py``):
+    the bytes present are real but incomplete vs. the wire.
+
+    ``final_chunk=True`` marks the terminal chunk of a streamed
+    (``num_chunks=0``) ext_proc body (Envoy's ``end_of_stream``) — the explicit
+    end-of-body marker the ``count(*)`` scheme otherwise lacks, so a lost
+    *trailing* chunk (surviving ids stay contiguous and match the count) can be
+    detected. The declared/buffered path stamps the real total per chunk and
+    leaves this ``False``.
     """
 
     request_id: str
@@ -868,9 +673,15 @@ class RequestBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    dropped: bool = False
+    truncated: bool = False
+    final_chunk: bool = False
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS frames
+    # by (request_id, frame_index) to reassemble and disambiguate frames.
+    frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Kinesis publishing."""
+        """Convert to dictionary for Firehose publishing."""
         return {
             "record_type": "request_body",
             "request_id": self.request_id,
@@ -880,6 +691,10 @@ class RequestBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "dropped": self.dropped,
+            "truncated": self.truncated,
+            "final_chunk": self.final_chunk,
+            "frame_index": self.frame_index,
         }
 
     @classmethod
@@ -894,24 +709,16 @@ class RequestBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "dropped", "type": "boolean"},
+            {"name": "truncated", "type": "boolean"},
+            {"name": "final_chunk", "type": "boolean"},
+            {"name": "frame_index", "type": "bigint"},
         ]
 
 
 @dataclass
 class RequestTrailersRecord:
-    """Request trailers record for Kinesis stream containing HTTP request trailers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    request-trailers Kinesis stream. Trailers are HTTP headers that appear after the
-    message body in chunked transfer encoding. They are relatively uncommon in practice.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        trailers: Dictionary of trailer name-value pairs. Keys are lowercase trailer
-            names. Values may be base64-encoded depending on implementation.
-        timestamp: ISO-8601 formatted timestamp when trailers were captured.
-        published_at: ISO-8601 timestamp when this record was published to Kinesis.
-    """
+    """Request-trailers audit record."""
 
     request_id: str
     trailers: Dict[str, str]
@@ -919,7 +726,7 @@ class RequestTrailersRecord:
     published_at: str
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Kinesis publishing."""
+        """Convert to dictionary for Firehose publishing."""
         return {
             "record_type": "request_trailers",
             "request_id": self.request_id,
@@ -942,35 +749,7 @@ class RequestTrailersRecord:
 
 @dataclass
 class ResponseHeadersRecord:
-    """Response headers record for Kinesis stream containing HTTP response headers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    response-headers Kinesis stream after receiving headers from the upstream API.
-    Headers are base64-encoded by Lua before publishing to safely handle binary or
-    non-UTF-8 header values.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        raw_headers: Complete dictionary of HTTP response headers with base64-encoded
-            values. Keys are lowercase header names. Includes pseudo-headers (prefixed
-            with :) from HTTP/2. All values are base64-encoded strings.
-        timestamp: ISO-8601 formatted timestamp when response headers were captured.
-            May differ from request timestamp by the upstream API latency.
-        published_at: ISO-8601 timestamp when this record was published to Kinesis.
-        server: Decoded Server header value (e.g., "uvicorn"). Automatically decoded
-            from raw_headers during __post_init__. None if header not present or
-            decoding fails.
-        status: Decoded HTTP status code from :status pseudo-header (e.g., "200",
-            "404"). None if not present or decoding fails.
-        content_length: Decoded Content-Length header value as string. Indicates the
-            size of the response body in bytes. None if not present (e.g., chunked
-            encoding) or decoding fails.
-        content_type: Decoded Content-Type header value (e.g., "application/json").
-            None if not present or decoding fails.
-        content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
-            Indicates compression applied to response body. None if not present or
-            decoding fails.
-    """
+    """Response-headers audit record. ``raw_headers`` values are base64-encoded."""
 
     request_id: str
     raw_headers: Dict[str, str]
@@ -991,7 +770,7 @@ class ResponseHeadersRecord:
         self.content_encoding = _decode_b64_header(self.raw_headers, "content-encoding")
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Kinesis publishing."""
+        """Convert to dictionary for Firehose publishing."""
         return {
             "record_type": "response_headers",
             "request_id": self.request_id,
@@ -1024,34 +803,10 @@ class ResponseHeadersRecord:
 
 @dataclass
 class ResponseBodyRecord:
-    """Response body record for Kinesis stream containing HTTP response body data.
+    """One chunk of a response body. SSE/chunked streams emit one record per chunk.
 
-    This record is captured by the Envoy proxy via Lua script and published to the
-    response-body Kinesis stream. For streaming responses (e.g., Server-Sent Events),
-    each chunk is published as it arrives. Large responses are automatically split into
-    chunks to stay within Kinesis record size limits.
-
-    Body data is base64-encoded by Lua before publishing to safely handle
-    binary content.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        body: Base64-encoded body content for this chunk. May contain compressed data
-            if content-encoding header indicates compression (see response headers).
-            For streaming responses, contains the data received in that stream chunk.
-        body_size: Size of this chunk's body in bytes (after base64 encoding). Note
-            this is the size of the encoded string, not the original binary data.
-        timestamp: ISO-8601 formatted timestamp when this body chunk was captured.
-            For streaming responses, each chunk has its own timestamp indicating when
-            it was received.
-        chunk_id: Zero-based index of this chunk. 0 for first chunk, incremented for
-            subsequent chunks. For streaming responses, increments with each received
-            chunk. ETL jobs currently only process chunk_id=0.
-        num_chunks: Total number of chunks for this response body. If > 1, the body
-            was split across multiple records. For streaming responses, this may not
-            be known until the final chunk. ETL jobs set a 'truncated' flag when
-            num_chunks > 1 to indicate incomplete data.
-        published_at: ISO-8601 timestamp when this record was published to Kinesis.
+    ``dropped`` / ``truncated`` / ``final_chunk`` semantics mirror
+    :class:`RequestBodyRecord`.
     """
 
     request_id: str
@@ -1061,9 +816,15 @@ class ResponseBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    dropped: bool = False
+    truncated: bool = False
+    final_chunk: bool = False
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS frames
+    # by (request_id, frame_index) to reassemble and disambiguate frames.
+    frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Kinesis publishing."""
+        """Convert to dictionary for Firehose publishing."""
         return {
             "record_type": "response_body",
             "request_id": self.request_id,
@@ -1073,6 +834,10 @@ class ResponseBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "dropped": self.dropped,
+            "truncated": self.truncated,
+            "final_chunk": self.final_chunk,
+            "frame_index": self.frame_index,
         }
 
     @classmethod
@@ -1087,25 +852,16 @@ class ResponseBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "dropped", "type": "boolean"},
+            {"name": "truncated", "type": "boolean"},
+            {"name": "final_chunk", "type": "boolean"},
+            {"name": "frame_index", "type": "bigint"},
         ]
 
 
 @dataclass
 class ResponseTrailersRecord:
-    """Response trailers record for Kinesis stream containing HTTP response trailers.
-
-    This record is captured by the Envoy proxy via Lua script and published to the
-    response-trailers Kinesis stream. Trailers are HTTP headers that appear after the
-    message body in chunked transfer encoding. They are commonly used in streaming
-    responses to send metadata after the body is complete.
-
-    Attributes:
-        request_id: Unique request identifier (UUID format). Matches metadata stream.
-        trailers: Dictionary of trailer name-value pairs. Keys are lowercase trailer
-            names. Values may be base64-encoded depending on implementation.
-        timestamp: ISO-8601 formatted timestamp when trailers were captured.
-        published_at: ISO-8601 timestamp when this record was published to Kinesis.
-    """
+    """Response-trailers audit record."""
 
     request_id: str
     trailers: Dict[str, str]
@@ -1113,7 +869,7 @@ class ResponseTrailersRecord:
     published_at: str
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Kinesis publishing."""
+        """Convert to dictionary for Firehose publishing."""
         return {
             "record_type": "response_trailers",
             "request_id": self.request_id,
@@ -1135,28 +891,112 @@ class ResponseTrailersRecord:
 
 
 @dataclass
+class WSSummaryRecord:
+    """Per-connection WebSocket summary emitted on stream end.
+
+    A joinable, cheap view of connection-level shape (duration, frame
+    counts per direction, close code) so analytics don't have to
+    aggregate the body stream.
+    """
+
+    request_id: str
+    timestamp: str
+    published_at: str
+    duration_seconds: float
+    close_code: Optional[int] = None
+    close_initiator: Optional[str] = None
+    client_text_frames: int = 0
+    client_binary_frames: int = 0
+    client_ping_frames: int = 0
+    client_pong_frames: int = 0
+    client_close_frames: int = 0
+    server_text_frames: int = 0
+    server_binary_frames: int = 0
+    server_ping_frames: int = 0
+    server_pong_frames: int = 0
+    server_close_frames: int = 0
+    # Audit-integrity counters: frames lost to publish-queue backpressure or
+    # capped by the deflate decompression limit. A cheap aggregate of the
+    # per-frame ``dropped`` / ``truncated`` sentinels, joinable without
+    # scanning the body stream.
+    dropped_client_frames: int = 0
+    dropped_server_frames: int = 0
+    truncated_client_frames: int = 0
+    truncated_server_frames: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for Firehose publishing."""
+        return {
+            "record_type": "ws_summary",
+            "request_id": self.request_id,
+            "timestamp": self.timestamp,
+            "published_at": self.published_at,
+            "duration_seconds": self.duration_seconds,
+            "close_code": self.close_code,
+            "close_initiator": self.close_initiator,
+            "client_text_frames": self.client_text_frames,
+            "client_binary_frames": self.client_binary_frames,
+            "client_ping_frames": self.client_ping_frames,
+            "client_pong_frames": self.client_pong_frames,
+            "client_close_frames": self.client_close_frames,
+            "server_text_frames": self.server_text_frames,
+            "server_binary_frames": self.server_binary_frames,
+            "server_ping_frames": self.server_ping_frames,
+            "server_pong_frames": self.server_pong_frames,
+            "server_close_frames": self.server_close_frames,
+            "dropped_client_frames": self.dropped_client_frames,
+            "dropped_server_frames": self.dropped_server_frames,
+            "truncated_client_frames": self.truncated_client_frames,
+            "truncated_server_frames": self.truncated_server_frames,
+        }
+
+    @classmethod
+    def glue_schema(cls) -> List[Dict[str, str]]:
+        """Return Glue table schema for this record type."""
+        return [
+            {"name": "record_type", "type": "string"},
+            {"name": "request_id", "type": "string"},
+            {"name": "timestamp", "type": "string"},
+            {"name": "published_at", "type": "string"},
+            {"name": "duration_seconds", "type": "double"},
+            {"name": "close_code", "type": "int"},
+            {"name": "close_initiator", "type": "string"},
+            {"name": "client_text_frames", "type": "bigint"},
+            {"name": "client_binary_frames", "type": "bigint"},
+            {"name": "client_ping_frames", "type": "bigint"},
+            {"name": "client_pong_frames", "type": "bigint"},
+            {"name": "client_close_frames", "type": "bigint"},
+            {"name": "server_text_frames", "type": "bigint"},
+            {"name": "server_binary_frames", "type": "bigint"},
+            {"name": "server_ping_frames", "type": "bigint"},
+            {"name": "server_pong_frames", "type": "bigint"},
+            {"name": "server_close_frames", "type": "bigint"},
+            {"name": "dropped_client_frames", "type": "bigint"},
+            {"name": "dropped_server_frames", "type": "bigint"},
+            {"name": "truncated_client_frames", "type": "bigint"},
+            {"name": "truncated_server_frames", "type": "bigint"},
+        ]
+
+
+@dataclass
 class JoinedLogRecord:
-    """Joined log record combining all streams for analysis.
+    """Joined log record: output of the Glue ETL job (process_raw_data.py).
 
-    This record represents the output of the Glue ETL job (process_raw_data.py) that
-    joins all log streams (metadata, request headers/body, response headers/body)
-    by request_id using INNER joins. Only complete transactions with all streams
-    present are included in the output.
+    INNER-joins all streams (metadata, request/response headers/body) by
+    request_id, so only complete transactions appear. Schema is generated
+    dynamically from the source schemas: metadata timestamp is the canonical
+    (unprefixed) timestamp, other streams get ``<stream>_`` prefixes, internal
+    fields (record_type, non-metadata published_at) are dropped, and ETL
+    metadata (etl_processed_at, partition columns) is added.
 
-    The schema is generated dynamically from the source record schemas by:
-    1. Using metadata timestamp as the canonical timestamp (unprefixed)
-    2. Adding stream-specific prefixes (metadata_, request_headers_, request_body_...)
-    3. Dropping internal fields (record_type, published_at from non-metadata streams)
-    4. Adding ETL metadata (etl_processed_at, partition columns)
+    Limitations:
+    - Incomplete transactions (missing any stream) are excluded.
+    - Trailers are not included.
+    - Responses arriving more than MINUTES_TO_PROCESS after the request may be
+      filtered out, yielding incomplete transactions.
 
-    IMPORTANT LIMITATIONS:
-    - Incomplete transactions (missing any stream) are excluded
-    - Trailers are currently not included in the joined data
-    - Response timing: responses arriving more than MINUTES_TO_PROCESS after requests
-      may be filtered out and cause incomplete transactions
-
-    All body data remains base64-encoded. Raw header dictionaries remain as maps of
-    base64-encoded values. Individual header fields are decoded for convenience.
+    Body data and raw header maps stay base64-encoded; individual header fields
+    are decoded for convenience.
     """
 
     # Core request metadata (from MetadataRecord)
@@ -1261,7 +1101,9 @@ class JoinedLogRecord:
             True if decoding succeeded, False otherwise
         """
         decoded, failed = _decompress_b64_body(
-            self.request_body_body, self.request_headers_content_encoding
+            self.request_body_body,
+            self.request_headers_content_encoding,
+            self.request_headers_content_type,
         )
         self.request_body_decoded = decoded
         self.request_body_decode_failure = failed
@@ -1346,11 +1188,7 @@ class JoinedLogRecord:
 
     @classmethod
     def partition_keys(cls) -> List[Dict[str, str]]:
-        """Return Glue partition key schema for partitioning by timestamp.
-
-        These columns are derived from the timestamp field during ETL processing
-        and used for efficient Athena queries. They are kept separate from the
-        main data schema since they are computed fields used for data organization.
+        """Return Glue partition key schema (columns derived from timestamp during ETL).
 
         Returns:
             List of partition key definitions (name, type pairs) in Glue format
@@ -1366,8 +1204,6 @@ class JoinedLogRecord:
     def partition_key_names(cls) -> List[str]:
         """Return just the partition column names.
 
-        Convenience method for filtering, SQL generation, Spark operations, etc.
-
         Returns:
             List of partition column names
         """
@@ -1375,24 +1211,17 @@ class JoinedLogRecord:
 
     @classmethod
     def partition_path_from_datetime(cls, dt, zero_pad: bool = False) -> str:
-        """Build S3 partition path string from a datetime.
+        """Build an S3 partition path (year=/month=/day=/hour=) from a datetime.
 
-        Returns path in format: year=YYYY/month=M/day=D/hour=H/ (or zero-padded if
-        requested)
-
-        IMPORTANT: Two different systems use different padding formats:
-        - Spark (OUTPUT): Non-zero-padded (month=4) - default for this method
-        - Kinesis Firehose (INPUT): Zero-padded (month=04) - use zero_pad=True
-
-        Kinesis Firehose uses zero-padding because it extracts partition values from
-        ISO timestamp strings. Spark uses integer columns which write without padding.
+        Padding differs by system and must match the writer:
+        - Spark (OUTPUT, default): non-padded (month=4) — integer columns.
+        - Kinesis Firehose (INPUT, zero_pad=True): zero-padded (month=04) —
+          extracted from ISO timestamp strings.
 
         Args:
             dt: Datetime to extract partition values from
-            zero_pad: If True, zero-pad month/day/hour to 2 digits
-                      (for Kinesis Firehose).
-                      If False (default), use Spark's non-padded format
-                      (for OUTPUT data).
+            zero_pad: Zero-pad month/day/hour to 2 digits (Firehose) if True;
+                      else Spark's non-padded format (default).
 
         Returns:
             S3 partition path string
@@ -1417,9 +1246,7 @@ class JoinedLogRecord:
 
     @classmethod
     def partition_column_expression(cls, column: str) -> str:
-        """Return Spark SQL expression to extract partition column from timestamp.
-
-        Used in ETL jobs to derive partition columns from the main timestamp field.
+        """Return Spark SQL expression to extract a partition column from timestamp.
 
         Args:
             column: Partition column name (year, month, day, hour)

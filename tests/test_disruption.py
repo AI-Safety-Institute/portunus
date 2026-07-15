@@ -1,31 +1,36 @@
-"""Disruption e2e tests for Envoy's SIGTERM drain (proxy/entrypoint.sh).
+"""Disruption / graceful-drain e2e tests for the Portunus gRPC sidecar.
 
-Asserts an in-flight plain-HTTP stream survives a SIGTERM (the drain lets it
-finish) and that a quiescent SIGTERM exits fast and clean. HTTP-only: WS is
-excluded from the drain count.
+Inject real container failures (SIGTERM, restart) against the live
+docker-compose stack and assert the system drains / recovers gracefully
+rather than dropping or hanging.
 
-Destructive (restarts the proxy container), so marked ``slow`` +
-``disruption`` — but they run in the DEFAULT pytest/CI suite deliberately:
-they are the only coverage that catches a built image whose drain tooling
-(wget) is missing at runtime. To run just these against an already-up stack:
+Destructive (they kill/restart containers), so they run serially and are
+marked ``slow`` + ``disruption`` — but they run in the DEFAULT pytest/CI
+suite deliberately: they are the only coverage that catches a built image
+whose drain tooling (wget) is missing at runtime. To run just these against
+an already-up stack:
 
     uv run pytest tests/test_disruption.py -m disruption
 """
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 
 import pytest
 import requests
 from conftest import encode_base64
+from grpc_health.v1 import health_pb2
 
 PROXY_URL = "http://localhost:8888"
+PORTUNUS_CONTAINER = "portunus"
+# Portunus serves gRPC on loopback inside the proxy netns; the proxy publishes
+# nothing for it, so health is probed from inside the container.
+GRPC_ADDR = "127.0.0.1:9000"
 
 pytestmark = [pytest.mark.slow, pytest.mark.disruption]
-
-_PROXY_CONTAINER_CACHE: str | None = None
 
 
 def _auth_header(prefix: str = "Bearer ") -> str:
@@ -39,12 +44,212 @@ def _docker(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
     )
 
 
+def _container_state(name: str) -> str:
+    out = _docker("inspect", "-f", "{{.State.Status}}", name)
+    return out.stdout.strip()
+
+
+def _wait_for_proxy_ping(timeout: float = 30.0) -> bool:
+    """Wait until Envoy answers /ping (proxy task up)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if requests.get(f"{PROXY_URL}/ping", timeout=2).status_code == 200:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def _grpc_health(timeout: float = 2.0) -> int:
+    """Query Portunus' gRPC health from inside the container (SERVING/NOT_SERVING).
+
+    The gRPC port is loopback-only, so exec grpc_health_probe in the container
+    rather than dialling from the test host.
+    """
+    out = _docker(
+        "exec",
+        PORTUNUS_CONTAINER,
+        "grpc_health_probe",
+        f"-addr={GRPC_ADDR}",
+        timeout=timeout + 3,
+    )
+    # grpc_health_probe exits 0 = SERVING, non-zero otherwise.
+    return (
+        health_pb2.HealthCheckResponse.SERVING
+        if out.returncode == 0
+        else (health_pb2.HealthCheckResponse.NOT_SERVING)
+    )
+
+
+@pytest.fixture
+def restore_portunus():
+    """Restart the portunus container after a test and wait for readiness.
+
+    Destructive tests can leave it stopped; the next test needs a healthy stack.
+    """
+    yield
+    if _container_state(PORTUNUS_CONTAINER) != "running":
+        _docker("start", PORTUNUS_CONTAINER)
+    # Wait for the proxy<->portunus path to answer again.
+    _wait_for_proxy_ping(timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# Liveness / health
+# ---------------------------------------------------------------------------
+
+
+def test_grpc_health_reports_serving_when_up(docker_setup):
+    """Baseline: grpc.health.v1 reports SERVING on a healthy stack."""
+    assert _grpc_health() == health_pb2.HealthCheckResponse.SERVING
+
+
+def test_http_request_succeeds_on_healthy_stack(docker_setup):
+    """Sanity: a valid auth request round-trips through the gRPC ext_authz."""
+    resp = requests.get(
+        f"{PROXY_URL}/get", headers={"Authorization": _auth_header()}, timeout=10
+    )
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Auth short-circuit — ext_authz denies without touching the upstream
+# ---------------------------------------------------------------------------
+
+
+def test_auth_failure_short_circuits_at_ext_authz(docker_setup):
+    """A bad bearer is denied by Portunus ext_authz, not forwarded upstream."""
+    resp = requests.get(
+        f"{PROXY_URL}/get",
+        headers={"Authorization": "Bearer not-a-valid-payload"},
+        timeout=10,
+    )
+    assert resp.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Graceful drain on SIGTERM
+# ---------------------------------------------------------------------------
+
+
+def test_sigterm_drains_within_grace_window(docker_setup, restore_portunus):
+    """SIGTERM the portunus container; it should exit cleanly within grace.
+
+    server.py's SIGTERM handler stops accepting gRPC streams, flushes the
+    publish queue, and exits. A quiescent server drains well inside the 30s
+    ``GRPC_GRACEFUL_SHUTDOWN_SECONDS`` grace, not SIGKILL'd.
+    """
+    assert _container_state(PORTUNUS_CONTAINER) == "running"
+
+    start = time.monotonic()
+    # docker stop sends SIGTERM then SIGKILL after the timeout; give it the
+    # full grace budget. A clean drain exits 0 before the kill.
+    result = _docker("stop", "-t", "40", PORTUNUS_CONTAINER, timeout=50)
+    elapsed = time.monotonic() - start
+
+    assert result.returncode == 0, result.stderr
+    # Clean drain on a quiescent server is fast — well under the 40s kill.
+    assert elapsed < 35, f"drain took {elapsed:.1f}s — close to SIGKILL window"
+
+    # Exit code 0 = clean shutdown (not 137 = SIGKILL).
+    code = _docker(
+        "inspect", "-f", "{{.State.ExitCode}}", PORTUNUS_CONTAINER
+    ).stdout.strip()
+    assert code == "0", f"portunus exited {code} (137 = SIGKILL'd mid-drain)"
+
+
+def test_inflight_http_request_during_portunus_restart_does_not_hang(
+    docker_setup, restore_portunus
+):
+    """Restarting Portunus mid-traffic fails fast or succeeds — never hangs.
+
+    With ext_authz ``failure_mode_allow: false`` a Portunus outage denies
+    requests rather than bypassing auth; either way the client gets a prompt
+    response, not a hang.
+    """
+    # Kick off the restart, then fire a request into the window.
+    restart = subprocess.Popen(["docker", "restart", "-t", "10", PORTUNUS_CONTAINER])
+    try:
+        start = time.monotonic()
+        try:
+            resp = requests.get(
+                f"{PROXY_URL}/get",
+                headers={"Authorization": _auth_header()},
+                timeout=15,
+            )
+            elapsed = time.monotonic() - start
+            # Either authorised (200) or failed-closed (5xx/403) — but bounded.
+            assert resp.status_code in (200, 401, 403, 500, 502, 503, 504)
+            assert elapsed < 15, f"request hung {elapsed:.1f}s during restart"
+        except requests.RequestException:
+            # A connection error is an acceptable fail-fast, not a hang.
+            elapsed = time.monotonic() - start
+            assert elapsed < 15, f"request hung {elapsed:.1f}s before erroring"
+    finally:
+        restart.wait(timeout=60)
+
+    # Recovers afterwards. Envoy's /ping doesn't depend on Portunus, so wait
+    # for the gRPC health service to report SERVING (and retry the authed
+    # request) before asserting — the just-restarted server may briefly
+    # reject while it finishes binding / warming the auth path.
+    assert _wait_for_proxy_ping(timeout=30)
+    deadline = time.monotonic() + 30
+    last_status = None
+    while time.monotonic() < deadline:
+        if _grpc_health() == health_pb2.HealthCheckResponse.SERVING:
+            resp = requests.get(
+                f"{PROXY_URL}/get",
+                headers={"Authorization": _auth_header()},
+                timeout=10,
+            )
+            last_status = resp.status_code
+            if last_status == 200:
+                break
+        time.sleep(1)
+    assert last_status == 200, (
+        f"did not recover to 200 after restart (last={last_status})"
+    )
+
+
+def test_portunus_restart_keeps_same_topology_and_recovers(
+    docker_setup, restore_portunus
+):
+    """After a restart the gRPC health service comes back SERVING."""
+    _docker("restart", "-t", "10", PORTUNUS_CONTAINER, timeout=60)
+    assert _wait_for_proxy_ping(timeout=30)
+
+    # Health probe should report SERVING again within a short window.
+    deadline = time.monotonic() + 20
+    serving = False
+    while time.monotonic() < deadline:
+        if _grpc_health() == health_pb2.HealthCheckResponse.SERVING:
+            serving = True
+            break
+        time.sleep(0.5)
+    assert serving, "gRPC health did not return to SERVING after restart"
+
+
+# ---------------------------------------------------------------------------
+# Envoy drain on SIGTERM — in-flight streams across protocols.
+#
+# ECS task stop is: ALB deregistration → SIGTERM → stopTimeout → SIGKILL.
+# proxy/entrypoint.sh must put Envoy into a drain (in-flight streams keep
+# flowing) and exit only once downstream connections hit zero or the budget
+# expires. SSE and AWS eventstream are both long streaming HTTP responses, so
+# one streaming-HTTP test covers that class; WebSocket is a separate upgraded
+# path with its own test.
+# ---------------------------------------------------------------------------
+
+_PROXY_CONTAINER_CACHE: str | None = None
+
+
 def _proxy_container() -> str:
     """Resolve the proxy service's container name for this compose project.
 
-    The compose project name derives from the checkout directory, so the
-    container name isn't stable across clones — resolve it via the compose
-    service rather than hardcoding.
+    The project name derives from the checkout dir, so the container name isn't
+    stable across clones — resolve via compose rather than hardcoding.
     """
     global _PROXY_CONTAINER_CACHE
     if _PROXY_CONTAINER_CACHE is None:
@@ -60,26 +265,8 @@ def _proxy_container() -> str:
     return _PROXY_CONTAINER_CACHE
 
 
-def _container_state(name: str) -> str:
-    out = _docker("inspect", "-f", "{{.State.Status}}", name)
-    return out.stdout.strip()
-
-
 def _exit_code(name: str) -> str:
     return _docker("inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip()
-
-
-def _wait_for_proxy_ping(timeout: float = 30.0) -> bool:
-    """Wait until the proxy answers /ping (Lua direct response, no auth)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if requests.get(f"{PROXY_URL}/ping", timeout=2).status_code == 200:
-                return True
-        except requests.RequestException:
-            pass
-        time.sleep(0.5)
-    return False
 
 
 def _wait_for_authed_200(timeout: float = 45.0) -> bool:
@@ -102,15 +289,17 @@ def _wait_for_authed_200(timeout: float = 45.0) -> bool:
 
 @pytest.fixture
 def restore_proxy():
-    """Bring the proxy container back after a destructive test.
+    """Bring the proxy and its netns-sharing portunus sidecar back after a test.
 
-    Portunus runs in its own container/netns on this branch, so restarting
-    the proxy alone is sufficient (unlike the #19 sidecar layout).
+    Portunus shares the proxy's network namespace (``network_mode:
+    service:proxy``), so restarting the proxy requires restarting portunus too
+    to join the fresh namespace — ``docker start`` alone leaves it in the dead one.
     """
     yield
     proxy = _proxy_container()
     if _container_state(proxy) != "running":
         _docker("start", proxy)
+        _docker("restart", "-t", "10", PORTUNUS_CONTAINER, timeout=60)
     assert _wait_for_proxy_ping(timeout=30), "proxy did not come back up"
     assert _wait_for_authed_200(), "authed path did not recover after restart"
 
@@ -118,13 +307,15 @@ def restore_proxy():
 def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_proxy):
     """A streaming HTTP response in flight at SIGTERM completes, uncut.
 
-    httpbun ``/drip`` (~1 byte/sec, ~12s); SIGTERM ~2s in. The drain must let
-    the rest stream to the client and Envoy exit 0 after it, not RST it.
+    SSE / eventstream shape: a chunked response trickling through Envoy
+    (httpbun ``/drip``). The drain must let it finish rather than reset the
+    connection, and Envoy must exit 0 shortly after the last downstream
+    connection completes — before the 90s SIGKILL backstop.
     """
     proxy = _proxy_container()
     assert _container_state(proxy) == "running"
-    # First authed request on a cold stack can 5xx while Portunus warms
-    # its auth path; this test is about draining, not cold starts.
+    # First authed request on a cold stack can 5xx while the auth path
+    # warms; this test is about draining, not cold starts.
     assert _wait_for_authed_200(), "stack not serving authed traffic"
 
     num_bytes = 12
@@ -132,9 +323,12 @@ def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_prox
     stop: subprocess.Popen | None = None
     stop_started = 0.0
 
-    # Connection: close so an idle keep-alive doesn't hold the drain to its
-    # deadline (prod: the ALB closes idle keep-alives to a deregistered target).
-    # finally: ensure the background `docker stop` lands before restore_proxy.
+    # ``Connection: close`` so Envoy closes the wire once the response
+    # completes — otherwise the client's parked HTTP/1.1 keep-alive holds the
+    # drain open until its deadline (prod's ALB closes idle keep-alives the
+    # same way). The finally ensures the background ``docker stop`` has landed
+    # before restore_proxy runs even if the stream dies mid-read, so the
+    # fixture's ``docker start`` doesn't race a still-running stop.
     try:
         with requests.get(
             f"{PROXY_URL}/drip?duration={num_bytes}&numbytes={num_bytes}&delay=0",
@@ -176,15 +370,74 @@ def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_prox
     )
 
 
+@pytest.mark.asyncio
+async def test_envoy_sigterm_keeps_websocket_flowing_during_drain(
+    docker_setup, restore_proxy
+):
+    """An established WebSocket session keeps echoing through the drain.
+
+    Upgraded connections can't be closed at a response boundary like plain
+    HTTP, so the drain must leave them open until the client closes (or the
+    budget expires). Echo for ~6s after SIGTERM, close client-side, expect a
+    prompt clean exit.
+    """
+    from websockets.asyncio.client import connect as ws_connect
+
+    proxy = _proxy_container()
+    assert _container_state(proxy) == "running"
+
+    stop: subprocess.Popen | None = None
+    async with ws_connect(
+        "ws://localhost:8888/echo",
+        additional_headers={"Authorization": _auth_header()},
+    ) as ws:
+        # Established, working session first.
+        await ws.send("pre-drain")
+        assert await asyncio.wait_for(ws.recv(), timeout=5) == "pre-drain"
+
+        stop_started = time.monotonic()
+        stop = subprocess.Popen(
+            ["docker", "stop", "-t", "90", proxy],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            # Frames must keep round-tripping during the drain window.
+            frame = 0
+            while time.monotonic() - stop_started < 6:
+                frame += 1
+                await ws.send(f"drain-{frame}")
+                echoed = await asyncio.wait_for(ws.recv(), timeout=5)
+                assert echoed == f"drain-{frame}", (
+                    f"echo diverged {time.monotonic() - stop_started:.1f}s "
+                    "after SIGTERM"
+                )
+                await asyncio.sleep(0.5)
+            assert frame >= 8, f"only {frame} echoes during the drain window"
+        finally:
+            pass  # context manager sends the client-side close
+
+    assert stop is not None
+    stop.wait(timeout=120)
+    stop_elapsed = time.monotonic() - stop_started
+    assert stop.returncode == 0
+    assert stop_elapsed < 45, f"drain held Envoy for {stop_elapsed:.1f}s"
+    assert _exit_code(proxy) == "0", (
+        f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    )
+
+
 def test_envoy_sigterm_quiescent_exits_fast_and_clean(docker_setup, restore_proxy):
     """With no traffic, SIGTERM exits promptly and cleanly (no SIGKILL).
 
-    Guards against an 'always sleep the full window' regression: zero active
-    connections should short-circuit the wait.
+    Guards the drain handler against 'always sleep the full window'
+    regressions: zero downstream connections should short-circuit the wait.
     """
     proxy = _proxy_container()
     assert _container_state(proxy) == "running"
-    # Let any preceding test's async audit tail flush (the drain waits for it).
+    # Let the async audit tail of any preceding test's traffic flush —
+    # the drain rightly waits for in-flight audit work, and this test is
+    # about the no-traffic path.
     time.sleep(3)
 
     start = time.monotonic()

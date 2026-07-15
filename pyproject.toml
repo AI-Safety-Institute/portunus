@@ -19,6 +19,11 @@ dev = [
     "types-pyyaml>=6.0.12.20240724,<7",
     "types-aiobotocore>=2.24.1,<4",
     "types-aws-xray-sdk>=2.14.0.20250708,<3",
+    "types-grpcio>=1.0.0",
+    "types-protobuf>=4.24.0",
+    "inspect-ai>=0.3.0",
+    "openai>=1.0.0",  # inspect-ai's openai/ provider; required for the
+                       # inspect compat tests against httpbun's /llm/ mock.
     "pre-commit>=3.7.1,<5",
     "pytest>=8.4.1,<10",
     "pytest-asyncio>=1.1.0,<2",
@@ -31,6 +36,8 @@ dev = [
     "pyarrow>=21.0.0,<24",
     "freezegun>=1.5.0,<2",
     "fakeredis>=2.26.0,<3",
+    "pyyaml>=6.0.1,<7",
+    "websockets>=16,<17",
 ]
 
 [tool.uv]
@@ -65,9 +72,18 @@ exclude = [
     "^\\.venv/.*",
 ]
 
+# Generated protobuf modules and grpcio's untyped sub-packages don't ship
+# stubs; their import-not-found / import-untyped errors are environmental,
+# not type errors we can fix in source.
 [[tool.mypy.overrides]]
-# Brotli ships no type stubs.
-module = ["brotli"]
+module = [
+    "envoy.*",
+    "google.rpc.*",
+    "wsproto.*",
+    "grpc_health.*",
+    "grpc_reflection.*",
+    "brotli",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
