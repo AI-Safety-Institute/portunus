@@ -8,11 +8,11 @@ interacting with AWS Secrets Manager to retrieve API keys and other secrets.
 import logging
 
 from aiobotocore.session import get_session
-from aws_xray_sdk.core import xray_recorder
 
 from portunus.config import config
 from portunus.exceptions import FetchSecretError
 from portunus.models import AuthPayload
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -29,7 +29,7 @@ class SecretsService:
         """Initialize the SecretsService."""
         self.boto_session = get_session()
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def fetch_secret(self, payload: AuthPayload) -> str:
         """
         Fetch raw secret from Secrets Manager.

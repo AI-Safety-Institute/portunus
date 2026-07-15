@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Set default values for environment variables only if they're not already set
-export LISTEN_POST=${LISTEN_POST:-8888}
+export LISTEN_PORT=${LISTEN_PORT:-8888}
 export RATE_LIMIT_REQUESTS_PER_INTERVAL=${RATE_LIMIT_REQUESTS_PER_INTERVAL:-1}
 export RATE_LIMIT_INTERVAL_SECONDS=${RATE_LIMIT_INTERVAL_SECONDS:-1}
 export RATE_LIMIT_PERCENT_ENABLED=${RATE_LIMIT_PERCENT_ENABLED:-0}
@@ -66,6 +66,8 @@ EOF
 fi
 
 # DOWNSTREAM_TLS_TRANSPORT_SOCKET
+# NB: the container runs as uid 101 (envoy), so cert.crt/cert.key must be
+# readable by that user when terminating TLS here — see proxy/README.md.
 if [ -z "$DOWNSTREAM_TLS_TRANSPORT_SOCKET" ]; then
   export DOWNSTREAM_TLS_TRANSPORT_SOCKET=$(yq -o json <<EOF
 name: envoy.transport_sockets.tls

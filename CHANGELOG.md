@@ -3,6 +3,8 @@
 All notable changes to Portunus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
 ## [0.6.0]
 
 ### Changed
@@ -11,8 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   draining: draining under in-flight async HTTP calls (the Lua audit `httpCall`s)
   could crash Envoy on shutdown — a teardown-crash class hardened across later
   releases — so we track a current version rather than pin an old one. (#90)
-- Harden the supply chain: pin GitHub Actions, Docker base images, and Python
-  dependencies by digest/hash, and enable Dependabot. (#31)
+- Modernise dev tooling: ruff 0.15, mypy 2, pre-commit 4, websockets 16. (#86)
 
 ### Fixed
 - Envoy now gracefully drains in-flight **plain-HTTP** streams on `SIGTERM`
@@ -25,6 +26,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   draining lands with the gRPC cutover, #19). For full effect it needs the
   companion api-key-proxy change raising the legacy fleet's `stop_timeout` and
   ALB `deregistration_delay` to 120s. (#90)
+- Clear the in-process auth cache on `/cache/flush`, not just Redis. (#89)
+
+### Security
+- Bump Python deps to clear the security backlog (FastAPI/Starlette,
+  cryptography). (#85)
+- Pin the remaining build-time deps (uv image digest, yq checksum). (#87)
+- Stop inheriting unnecessary secrets in CI workflows. (#88)
+
+## [0.5.5]
+
+### Changed
+- Harden the supply chain: pin GitHub Actions, Docker base images, and Python
+  dependencies by digest/hash, and enable Dependabot. (#31)
+
+### Fixed
+- Decode `Content-Encoding: br` (Brotli) response bodies. Previously fell
+  through to UTF-8 decode on compressed bytes, marking the row as
+  `response_body_decode_failure` and dropping it from token usage. (#26)
 
 ### Documentation
 - Document the service-auth trust model and required deployment posture

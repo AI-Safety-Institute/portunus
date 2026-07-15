@@ -11,12 +11,12 @@ import logging
 from typing import Optional, Tuple
 
 from aiocache import cached  # type: ignore[import-untyped]
-from aws_xray_sdk.core import xray_recorder
 
 from portunus.config import config
 from portunus.exceptions import CacheError
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
 from portunus.services.state_service import StateService
+from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -196,7 +196,7 @@ class CacheService:
             logger.error(f"Error caching auth response: {e}")
             raise CacheError(f"Failed to store in cache: {e}")
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def cache_auth_result(
         self,
         payload: str,
@@ -222,7 +222,7 @@ class CacheService:
             ttl_seconds,
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def cache_api_key(
         self,
         payload: str,
@@ -246,7 +246,7 @@ class CacheService:
             payload, api_key, signing_key, principal_info
         )
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def invalidate_cache_entry(self, payload: str) -> bool:
         """
         Invalidate a cache entry.
@@ -271,7 +271,7 @@ class CacheService:
             logger.error(f"Error invalidating cache entry: {e}")
             return False
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def flush_all(self) -> bool:
         """
         Flush the entire auth cache.
@@ -282,6 +282,12 @@ class CacheService:
         Raises:
             CacheError: If there's an error flushing the cache.
         """
+        # Clear the in-process cache layer first. get_cached_auth_result is
+        # wrapped with aiocache's @cached (in-memory), which sits in front of
+        # Redis; flushing only Redis would keep serving a flushed (e.g.
+        # compromised) key from process memory until its TTL expires.
+        await self.get_cached_auth_result.cache.clear()
+
         client = await self.state_service.acquire_redis_connection()
         if not client:
             logger.warning("Redis client unavailable for cache flush")
@@ -295,7 +301,7 @@ class CacheService:
             logger.error(f"Error flushing cache: {e}")
             raise CacheError(f"Failed to flush cache: {e}")
 
-    @xray_recorder.capture_async()  # type: ignore
+    @capture_async()
     async def health_check(self) -> bool:
         """
         Check if Redis cache is available.

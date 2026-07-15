@@ -5,9 +5,9 @@ description = ""
 authors = [{ name = "Tom.Catling", email = "Tom.Catling@dsit.gov.uk" }]
 requires-python = "~=3.12"
 dependencies = [
-    "fastapi>=0.111.0,<0.112",
+    "fastapi>=0.111.0,<1",
     "gunicorn>=22.0.0,<23",
-    "cryptography>=43.0.0,<44",
+    "cryptography>=43.0.0,<50",
     "httpx>=0.27.0,<1",
     "rsa~=4.9",
     "boto3>=1.34.144,<2",
@@ -18,20 +18,26 @@ dependencies = [
     "aws-xray-sdk>=2.14.0,<3",
     "contextvars~=2.4",
     "aiocache>=0.12.3,<0.13",
-    "websockets>=12.0,<14",
+    # Pinned to the 16.x major: the relay uses the websockets.asyncio client
+    # API, which has churned across majors, and CI only exercises the locked
+    # 16.x line. (The asyncio API was introduced in 13.0; 12.x lacks it.)
+    "websockets>=16,<17",
     # <0.47: uvicorn 0.47.0 imports the ASGI app before the serving event loop
     # exists (encode/uvicorn#2919); XRayService()/AsyncContext() run at import
     # and bind to the wrong loop, so segments never reach handlers and every
     # request logs "No-Trace-Id" (2026-07-02 outage). Guarded by
     # tests/test_trace_propagation.py; lift only when AsyncContext moves to
     # app startup.
+    # uvicorn is ignored in .github/dependabot.yml so it isn't bumped
+    # automatically — update that ignore rule if this pin changes.
     "uvicorn>=0.29.0,<0.47",
+    "Brotli>=1.1.0,<2",
 ]
 
 [dependency-groups]
 dev = [
-    "mypy>=1.11.0,<2",
-    "ruff>=0.5.5,<0.6",
+    "mypy>=1.11.0,<3",
+    "ruff>=0.5.5,<1",
     "boto3-stubs[secretsmanager, logs]>=1.34.149,<2",
     "types-pyyaml>=6.0.12.20240724,<7",
     "moto>=5.1.13,<6",

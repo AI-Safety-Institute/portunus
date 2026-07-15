@@ -255,9 +255,9 @@ class TestGlueJobTransformations:
         joined_schema = {col["name"] for col in JoinedLogRecord.glue_schema()}
 
         # Check if 'principal_arn' exists in metadata schema
-        assert (
-            "principal_arn" in metadata_schema
-        ), "MetadataRecord should have 'principal_arn' field"
+        assert "principal_arn" in metadata_schema, (
+            "MetadataRecord should have 'principal_arn' field"
+        )
 
         # The Glue job adds 'metadata_' prefix to all metadata fields
         # (except request_id, timestamp). So 'principal_arn' should become
@@ -284,9 +284,9 @@ class TestGlueJobTransformations:
         metadata_schema = {col["name"] for col in MetadataRecord.glue_schema()}
         joined_schema = {col["name"] for col in JoinedLogRecord.glue_schema()}
 
-        assert (
-            "secret_arn" in metadata_schema
-        ), "MetadataRecord should have 'secret_arn' field"
+        assert "secret_arn" in metadata_schema, (
+            "MetadataRecord should have 'secret_arn' field"
+        )
 
         expected_name = "metadata_secret_arn"
         assert expected_name in joined_schema, (
@@ -336,9 +336,9 @@ class TestGlueJobTransformations:
         joined_schema = {col["name"] for col in JoinedLogRecord.glue_schema()}
 
         # Should have metadata_published_at
-        assert (
-            "metadata_published_at" in joined_schema
-        ), "JoinedLogRecord should have 'metadata_published_at'"
+        assert "metadata_published_at" in joined_schema, (
+            "JoinedLogRecord should have 'metadata_published_at'"
+        )
 
         # Should NOT have published_at from other streams
         unwanted_fields = [
@@ -369,9 +369,9 @@ class TestSchemaTypes:
         }
 
         # Main timestamp should be timestamp type
-        assert (
-            joined_schema["timestamp"] == "timestamp"
-        ), "Main 'timestamp' field should be 'timestamp' type (converted by Glue)"
+        assert joined_schema["timestamp"] == "timestamp", (
+            "Main 'timestamp' field should be 'timestamp' type (converted by Glue)"
+        )
 
         # Stream-specific timestamps should also be timestamp type
         timestamp_fields = [
@@ -453,9 +453,9 @@ class TestSchemaCompleteness:
             schema_fields = {col["name"] for col in record_class.glue_schema()}
             missing = required_fields - schema_fields
 
-            assert (
-                not missing
-            ), f"{record_class.__name__} is missing required fields: {missing}"
+            assert not missing, (
+                f"{record_class.__name__} is missing required fields: {missing}"
+            )
 
     def test_joined_record_has_all_prefixed_streams(self):
         """Verify record includes fields from all streams with correct prefixes."""

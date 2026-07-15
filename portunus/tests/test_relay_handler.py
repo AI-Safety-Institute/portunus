@@ -96,7 +96,7 @@ class TestHandleWsConnection:
             ),
             patch("portunus.relay.handler.config") as mock_config,
             patch(
-                "portunus.relay.handler.websockets.connect",
+                "portunus.relay.handler.ws_connect",
                 side_effect=Exception("Connection refused"),
             ),
         ):
@@ -141,7 +141,7 @@ class TestHandleWsConnection:
             ),
             patch("portunus.relay.handler.config") as mock_config,
             patch(
-                "portunus.relay.handler.websockets.connect",
+                "portunus.relay.handler.ws_connect",
                 return_value=mock_upstream,
             ),
         ):
