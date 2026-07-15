@@ -33,8 +33,8 @@ updates:
         patterns:
           - "*"
     ignore:
-      # Envoy 1.31 -> 1.38+ is a large, coordinated upgrade — hold the major/minor
-      # jump and take only patch releases of the current minor. Bump deliberately.
+      # Envoy major/minor upgrades are coordinated, tested changes — hold them
+      # and take only patch releases of the current minor. Bump deliberately.
       - dependency-name: "envoyproxy/envoy"
         update-types:
           - "version-update:semver-major"

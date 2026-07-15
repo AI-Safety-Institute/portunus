@@ -1,7 +1,7 @@
 # ---- Builder: compile the Lua rocks and fetch yq ----
 # Kept on the same Envoy base so the compiled rock (sha2.so) is ABI-compatible
 # with the runtime image's embedded LuaJIT.
-FROM envoyproxy/envoy:v1.31.0@sha256:2bf7f042e3960e3904864cb09c174498e20a06859a5c394b7e3a6528a649b1da AS builder
+FROM envoyproxy/envoy:v1.38.3@sha256:5f7c43e1147412fdb3af578c651c67478a3df818eae89d2261e707e06c209cdb AS builder
 
 # luarocks (and the C toolchain its recommends pull in) builds the native rocks;
 # wget fetches yq. None of this reaches the runtime image.
@@ -21,12 +21,12 @@ RUN luarocks-5.1 make proxy-utils-1.0-0.rockspec
 WORKDIR /
 
 # ---- Runtime: clean Envoy image with only what's needed at run time ----
-FROM envoyproxy/envoy:v1.31.0@sha256:2bf7f042e3960e3904864cb09c174498e20a06859a5c394b7e3a6528a649b1da
+FROM envoyproxy/envoy:v1.38.3@sha256:5f7c43e1147412fdb3af578c651c67478a3df818eae89d2261e707e06c209cdb
 
-# envsubst (from gettext-base) is the only apt package needed at runtime;
-# the C toolchain, luarocks and wget stay in the builder.
+# gettext-base provides envsubst; wget is REQUIRED at runtime — entrypoint.sh
+# drives the SIGTERM drain through the Envoy admin API with it.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gettext-base && \
+    apt-get install -y --no-install-recommends gettext-base wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Bring over the built Lua modules (Envoy's embedded LuaJIT finds them on its
