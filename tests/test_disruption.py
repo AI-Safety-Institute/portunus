@@ -5,9 +5,11 @@ docker-compose stack and assert the system drains / recovers gracefully
 rather than dropping or hanging.
 
 Destructive (they kill/restart containers), so they run serially and are
-marked ``slow`` + ``disruption``. Run with the stack up:
+marked ``slow`` + ``disruption`` — but they run in the DEFAULT pytest/CI
+suite deliberately: they are the only coverage that catches a built image
+whose drain tooling (wget) is missing at runtime. To run just these against
+an already-up stack:
 
-    docker compose up -d --build --wait
     uv run pytest tests/test_disruption.py -m disruption
 """
 

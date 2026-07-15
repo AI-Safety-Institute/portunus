@@ -78,8 +78,10 @@ envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
 # drains (https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/draining).
 # So this entrypoint owns the drain: on SIGTERM it
 #
-#   1. POSTs /healthcheck/fail — HTTP/1.1 gets "Connection: close" at the next
-#      response boundary, HTTP/2 gets GOAWAY, paced by --drain-strategy gradual.
+#   1. POSTs /healthcheck/fail — /healthz goes 503 so the ALB de-pools the
+#      task; HTTP/1.1 gets "Connection: close" at the next response boundary,
+#      HTTP/2 gets GOAWAY (--drain-strategy immediate: the target is already
+#      deregistering, so there's no reconnect herd to pace out).
 #   2. POSTs /drain_listeners?graceful&skip_exit — skip_exit leaves the exit
 #      decision to this script.
 #   3. Polls active work and /quitquitquit's once it hits zero or the
@@ -97,6 +99,10 @@ envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
 #     Envoy is SIGKILL'd (137) mid-drain.
 # Streams longer than the budget are still cut at the deadline; the drain
 # bounds the damage, it can't hold the task open indefinitely.
+
+# The drain rides on wget — hard-require it so an image regression fails the
+# container at boot, not silently at the first SIGTERM.
+command -v wget >/dev/null || { echo "[entrypoint] FATAL: wget missing — SIGTERM drain cannot work" >&2; exit 1; }
 
 ADMIN="http://127.0.0.1:${ADMIN_PORT:-9901}"
 DRAIN_TIME_S="${DRAIN_TIME_S:-60}"
@@ -154,7 +160,7 @@ fi
 envoy -c /envoy/envoy_subst.yaml \
   --log-level "${ENVOY_LOG_LEVEL:-info}" \
   --drain-time-s "$DRAIN_TIME_S" \
-  --drain-strategy gradual &
+  --drain-strategy immediate &
 ENVOY_PID=$!
 trap drain_and_quit TERM INT
 

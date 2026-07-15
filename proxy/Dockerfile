@@ -9,7 +9,9 @@ FROM envoyproxy/envoy:v1.38.3@sha256:5f7c43e1147412fdb3af578c651c67478a3df818eae
 # the nondeterministic shutdown SIGSEGV. entrypoint.sh re-asserts at runtime.
 RUN envoy --version && envoy --version | grep -q '/1\.38\.'
 
-# gettext for envsubst (used in entrypoint.sh), wget for the yq binary.
+# gettext for envsubst; wget fetches yq AND is REQUIRED at runtime — the
+# entrypoint drives the SIGTERM drain through the admin API with it. If this
+# image ever goes multi-stage, wget must stay in the runtime stage.
 RUN apt update && apt install -y gettext wget
 
 # yq — entrypoint.sh uses it to synthesise transport socket configs as
