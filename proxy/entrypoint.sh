@@ -91,14 +91,16 @@ envsubst < /envoy/lua.lua > /envoy/lua_subst.lua
 # --- Graceful shutdown ------------------------------------------------------
 # Envoy doesn't drain on SIGTERM (it exits and RSTs open connections, cutting
 # client streams on every ECS scale-in/deploy); --drain-time-s only paces an
-# already-started drain, so we trigger it via the admin API — /healthcheck/fail,
-# /drain_listeners, then /quitquitquit once work drains or DRAIN_TIME_S expires
-# (mirrors Envoy Gateway's shutdown manager; envoyproxy/envoy#7841).
-# HTTP-only: in-flight streams finish; WebSockets close at drain end (#19
-# supersedes). DRAIN_TIME_S must stay under ECS stopTimeout (30s today, raise
-# to 120s). Admin is loopback-only.
+# already-started drain, so we trigger it via the admin API — /drain_listeners,
+# then /quitquitquit once work drains or DRAIN_TIME_S expires (mirrors Envoy
+# Gateway's shutdown manager; envoyproxy/envoy#7841). HTTP-only: in-flight
+# streams finish; WebSockets close at drain end (#19 supersedes). DRAIN_TIME_S
+# must stay under the ECS stopTimeout (120s in our deployment). Admin is
+# loopback-only. The drain rides on wget — hard-require it so an image
+# regression fails the container at boot, not silently at the first SIGTERM.
+command -v wget >/dev/null || { echo "[entrypoint] FATAL: wget missing — SIGTERM drain cannot work" >&2; exit 1; }
 
-ADMIN="http://127.0.0.1:${ADMIN_PORT:-9901}"
+ADMIN="http://127.0.0.1:${ADMIN_PORT}"
 DRAIN_TIME_S="${DRAIN_TIME_S:-60}"
 
 admin_post() {
@@ -123,7 +125,6 @@ active_work() {
 drain_and_quit() {
   trap '' TERM INT # one drain; from here ECS only escalates to SIGKILL
   echo "[entrypoint] SIGTERM: draining for up to ${DRAIN_TIME_S}s" >&2
-  admin_post "/healthcheck/fail"
   admin_post "/drain_listeners?graceful&skip_exit"
   deadline=$(($(date +%s) + DRAIN_TIME_S))
   cx=$(active_work)
@@ -135,10 +136,13 @@ drain_and_quit() {
   admin_post "/quitquitquit" || kill -TERM "$ENVOY_PID" 2>/dev/null
 }
 
+# immediate (not gradual): the ALB has already deregistered the target when
+# SIGTERM arrives, so there's no reconnect herd to spread out — signal closes
+# immediately and finish drains sooner.
 envoy -c /envoy/envoy_subst.yaml \
   --log-level "${ENVOY_LOG_LEVEL:-info}" \
   --drain-time-s "$DRAIN_TIME_S" \
-  --drain-strategy gradual &
+  --drain-strategy immediate &
 ENVOY_PID=$!
 trap drain_and_quit TERM INT
 

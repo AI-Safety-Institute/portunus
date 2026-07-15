@@ -2,10 +2,13 @@
 
 Asserts an in-flight plain-HTTP stream survives a SIGTERM (the drain lets it
 finish) and that a quiescent SIGTERM exits fast and clean. HTTP-only: WS is
-excluded from the drain count. Destructive (stops the proxy container) — marked
-``slow`` + ``disruption``; run with the stack up:
+excluded from the drain count.
 
-    docker compose up -d --build --wait
+Destructive (restarts the proxy container), so marked ``slow`` +
+``disruption`` — but they run in the DEFAULT pytest/CI suite deliberately:
+they are the only coverage that catches a built image whose drain tooling
+(wget) is missing at runtime. To run just these against an already-up stack:
+
     uv run pytest tests/test_disruption.py -m disruption
 """
 
@@ -162,15 +165,15 @@ def test_envoy_sigterm_completes_inflight_http_stream(docker_setup, restore_prox
         f"({(received[-1] - stop_started):.1f}s after SIGTERM was issued)"
     )
     # The stream must have kept flowing well into the drain, not raced it.
-    assert (
-        received[-1] - stop_started > 3
-    ), "stream finished before the drain was meaningfully exercised"
+    assert received[-1] - stop_started > 3, (
+        "stream finished before the drain was meaningfully exercised"
+    )
     assert stop.returncode == 0
     # Drain exits when connections hit zero — not at the 90s SIGKILL.
     assert stop_elapsed < 45, f"drain held Envoy for {stop_elapsed:.1f}s"
-    assert (
-        _exit_code(proxy) == "0"
-    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    assert _exit_code(proxy) == "0", (
+        f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    )
 
 
 def test_envoy_sigterm_quiescent_exits_fast_and_clean(docker_setup, restore_proxy):
@@ -190,6 +193,6 @@ def test_envoy_sigterm_quiescent_exits_fast_and_clean(docker_setup, restore_prox
 
     assert result.returncode == 0, result.stderr
     assert elapsed < 20, f"quiescent drain took {elapsed:.1f}s"
-    assert (
-        _exit_code(proxy) == "0"
-    ), f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    assert _exit_code(proxy) == "0", (
+        f"proxy exited {_exit_code(proxy)} (137 = SIGKILL'd mid-drain)"
+    )
