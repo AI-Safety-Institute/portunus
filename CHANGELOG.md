@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.7.0]
+
+### Added
+- Publish multi-arch (linux/amd64 + linux/arm64) container images for the
+  backend, proxy, and ws-echo to GitHub Container Registry, on pushes to main
+  and on version tags. Image tags mirror git tags (`v0.7.0`) so consumers can
+  pin the same string everywhere, and deployments can pull released images
+  instead of cloning this repo and building from source. The proxy image's yq
+  download is now `TARGETARCH`-aware to support the arm64 build. (#98)
+
+### Changed
+- Removed unused pandas, pandas-stubs and pyarrow dev dependencies. (#97)
+- Routine dependency updates via Dependabot: pyjwt, aiohttp, urllib3,
+  boto3-stubs and the Python dev group; Envoy in the Lua test image; ruff-action
+  and setup-uv in CI. (#56, #62, #64, #70, #72, #74, #80, #84, #93, #96)
+
 ## [0.6.0]
 
 ### Changed
@@ -169,6 +185,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
+[Unreleased]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.5...v0.6.0
+[0.5.5]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.2.0...v0.3.0
