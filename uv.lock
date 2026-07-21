@@ -858,7 +858,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "boto3-stubs", extras = ["secretsmanager", "logs"], specifier = ">=1.34.149,<2" },
+    { name = "boto3-stubs", extras = ["secretsmanager", "logs"], specifier = ">=1.43.47,<2" },
     { name = "fakeredis", specifier = ">=2.26.0,<3" },
     { name = "moto", specifier = ">=5.1.13,<6" },
     { name = "mypy", specifier = ">=2.3.0,<3" },
