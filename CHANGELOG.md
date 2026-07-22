@@ -15,6 +15,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   instead of cloning this repo and building from source. The proxy image's yq
   download is now `TARGETARCH`-aware to support the arm64 build. (#98)
 
+### Fixed
+- `/cache/flush` now reliably invalidates fleet-wide: removed the in-process
+  `@cached` layer on auth results, which was per-replica — a flush only cleared
+  the replica that received it, leaving the rest serving stale (potentially
+  compromised) keys for up to 500s — and could serve entries past the Redis
+  TTL, which is deliberately capped at credential expiration. Redis is now the
+  single source of cache truth; the aiocache dependency is dropped. (#95)
+
 ### Changed
 - Removed unused pandas, pandas-stubs and pyarrow dev dependencies. (#97)
 - Routine dependency updates via Dependabot: pyjwt, aiohttp, urllib3,
