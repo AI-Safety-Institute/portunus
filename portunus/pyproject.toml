@@ -17,7 +17,6 @@ dependencies = [
     "async-timeout>=4.0.3,<5",
     "aws-xray-sdk>=2.14.0,<3",
     "contextvars~=2.4",
-    "aiocache>=0.12.3,<0.13",
     # Pinned to the 16.x major: the relay uses the websockets.asyncio client
     # API, which has churned across majors, and CI only exercises the locked
     # 16.x line. (The asyncio API was introduced in 13.0; 12.x lacks it.)

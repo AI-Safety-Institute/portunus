@@ -10,8 +10,6 @@ import json
 import logging
 from typing import Optional, Tuple
 
-from aiocache import cached  # type: ignore[import-untyped]
-
 from portunus.config import config
 from portunus.exceptions import CacheError
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
@@ -111,7 +109,6 @@ class CacheService:
             logger.error(f"Error getting from cache: {e}")
             raise CacheError(f"Failed to retrieve from cache: {e}")
 
-    @cached(ttl=500)
     async def get_cached_auth_result(self, payload: str) -> Optional[AuthResult]:
         """
         Get an authentication result from the cache.
@@ -282,12 +279,6 @@ class CacheService:
         Raises:
             CacheError: If there's an error flushing the cache.
         """
-        # Clear the in-process cache layer first. get_cached_auth_result is
-        # wrapped with aiocache's @cached (in-memory), which sits in front of
-        # Redis; flushing only Redis would keep serving a flushed (e.g.
-        # compromised) key from process memory until its TTL expires.
-        await self.get_cached_auth_result.cache.clear()
-
         client = await self.state_service.acquire_redis_connection()
         if not client:
             logger.warning("Redis client unavailable for cache flush")
