@@ -158,7 +158,7 @@ To add a new module:
 
 ```bash
 cd proxy
-docker build -t api-key-proxy .
+docker build -t portunus-proxy .
 ```
 
 The library is installed during build:

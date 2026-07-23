@@ -48,7 +48,7 @@ sequenceDiagram
     Auth-->>AWS: (If cache miss) Fetch API Key from SecretManager
     Auth-->>Redis: (If cache miss) Cache successful auth result
 
-    Auth->>Redis: Store principal metadata against request ID
+    Auth->>Kinesis: Publish principal metadata
     Auth-->>Envoy: Return auth response
 
     Note over Envoy: Terminate request if Auth not successful
@@ -108,7 +108,7 @@ flowchart TB
     Auth <-->|Check cache| Redis
     Auth <-->|Identity verification| IAM
     Auth <-->|Fetch API Key| SecretManager
-    Auth -->|Store metadata| Redis
+    Auth -->|Publish metadata| Kinesis
     Auth -->|Auth Response| Envoy
 
     %% Request logging
