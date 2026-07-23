@@ -7,14 +7,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.7.0]
 
-### Added
-- Publish multi-arch (linux/amd64 + linux/arm64) container images for the
-  backend, proxy, and ws-echo to GitHub Container Registry, on pushes to main
-  and on version tags. Image tags mirror git tags (`v0.7.0`) so consumers can
-  pin the same string everywhere, and deployments can pull released images
-  instead of cloning this repo and building from source. The proxy image's yq
-  download is now `TARGETARCH`-aware to support the arm64 build. (#98)
-
 ### Fixed
 - `/cache/flush` now reliably invalidates fleet-wide: removed the in-process
   `@cached` layer on auth results, which was per-replica — a flush only cleared
