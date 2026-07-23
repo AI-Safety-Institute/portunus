@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.7.0]
+
+### Fixed
+- `/cache/flush` now reliably invalidates fleet-wide: removed the in-process
+  `@cached` layer on auth results, which was per-replica — a flush only cleared
+  the replica that received it, leaving the rest serving stale (potentially
+  compromised) keys for up to 500s — and could serve entries past the Redis
+  TTL, which is deliberately capped at credential expiration. Redis is now the
+  single source of cache truth; the aiocache dependency is dropped. (#95)
+
+### Changed
+- Removed unused pandas, pandas-stubs and pyarrow dev dependencies. (#97)
+- Routine dependency updates via Dependabot: pyjwt, aiohttp, urllib3,
+  boto3-stubs and the Python dev group; Envoy in the Lua test image; ruff-action
+  and setup-uv in CI. (#56, #62, #64, #70, #72, #74, #80, #84, #93, #96)
+
 ## [0.6.0]
 
 ### Changed
@@ -169,9 +185,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[0.5.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/UKGovernmentBEIS/portunus/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/UKGovernmentBEIS/portunus/releases/tag/v0.1.0
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.5...v0.6.0
+[0.5.5]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/AI-Safety-Institute/portunus/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/AI-Safety-Institute/portunus/releases/tag/v0.1.0
