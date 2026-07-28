@@ -1,0 +1,9 @@
+"""gRPC services for the Envoy ext_authz / ext_proc filters.
+
+See :mod:`portunus.grpc.server` for lifecycle. Gated on
+:attr:`portunus.config.GrpcConfig.enabled` (default off).
+"""
+
+from portunus.grpc.auth_servicer import PortunusAuthServicer
+
+__all__ = ["PortunusAuthServicer"]
