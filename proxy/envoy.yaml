@@ -110,6 +110,20 @@ static_resources:
                   envoy.filters.http.ext_proc:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
                     disabled: true
+                  # Disable the composite signing gate too. ext_authz #1 is
+                  # off here, so nothing overwrites a client-forged
+                  # x-portunus-signing-required before the composite matcher
+                  # reads it (the route_config strip runs at forward time,
+                  # after the filter chain). Without this, a forged header
+                  # dispatches the buffered signing pass — turning this
+                  # Portunus-independent liveness endpoint into a 403 when
+                  # Portunus is down and an unauthenticated 32 MiB
+                  # body-buffering surface. /healthz needs no equivalent: the
+                  # health_check filter answers it at the top of the chain,
+                  # before composite runs.
+                  envoy.filters.http.composite:
+                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                    disabled: true
               # WS route. Body modes must be STREAMED under the ext_proc
               # filter's observability_mode (see the ext_proc filter below).
               - match:

@@ -18,6 +18,35 @@ def test_custom_header_prefix_on_ping(docker_setup):
     assert response.headers.get("x-aisi-proxy-ping") == "true"
 
 
+def test_ping_ignores_forged_signing_header(docker_setup):
+    """A forged x-portunus-signing-required must not drag /ping onto the signing path.
+
+    /ping is a pure-Envoy liveness endpoint (direct_response 200) that must stay up and
+    body-free regardless of Portunus health. The composite signing gate matches on the
+    x-portunus-signing-required request header; unless the composite filter is disabled
+    on this route, a client-forged header dispatches the buffered signing ext_authz pass
+    — turning /ping into a 403 when Portunus is unhealthy and an unauthenticated 32 MiB
+    body-buffering surface. This pins the composite disable on the route.
+    """
+    # GET with the forged header — still a clean liveness 200, no auth dispatch.
+    resp = requests.get(
+        "http://localhost:8888/ping",
+        headers={"x-portunus-signing-required": "true"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("x-aisi-proxy-ping") == "true"
+
+    # POST with the forged header + a body over the 32 MiB signing cap. If the
+    # composite gate were live on /ping it would buffer and 413 (allow_partial_message
+    # is false); disabled, /ping ignores the body and direct-responds 200.
+    resp = requests.post(
+        "http://localhost:8888/ping",
+        headers={"x-portunus-signing-required": "true"},
+        data=b"x" * (33 * 1024 * 1024),
+    )
+    assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
+
+
 # Manually test with:
 # curl -X POST http://localhost:8888/post -H "Authorization: Bearer eyJjcmVkZW50aWFscyI6eyJhY2Nlc3Nfa2V5X2lkIjoiQUtJQVRFU1QiLCJzZWNyZXRfYWNjZXNzX2tleSI6IlNFQ1JFVFRFU1QiLCJzZXNzaW9uX3Rva2VuIjoiVEVTVFRPS0VOIn0sInNlY3JldF9hcm4iOiJhcm46YXdzOnNlY3JldHNtYW5hZ2VyOnVzLWVhc3QtMToxMjM0NTY3ODkwMTI6c2VjcmV0OnRlc3Qtc2VjcmV0In0=" -H "Content-Type: application/json" -d '{"key3":   "value3"   , "key1":"value1","key2" : "value2" }' # noqa: E501
 @pytest.mark.parametrize(
