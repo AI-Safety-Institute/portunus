@@ -95,6 +95,7 @@ convention = "google"
 # Third-party gRPC / protobuf / boto packages ship without type stubs (or
 # only partial ones).
 module = [
+    "brotli",
     "grpc",
     "grpc.*",
     "grpc_health.*",
