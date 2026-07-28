@@ -4,9 +4,10 @@ The operator runbook (docs/runbooks/flush-auth-cache.md) promises that one
 flush makes every subsequent request re-authenticate — its use case is key
 compromise. Any cache layer that survives flush_all silently breaks that
 promise: main's #89 hit exactly this with an in-process aiocache layer in
-front of Redis, and on the sidecar topology such a layer cannot even be
-flushed fleet-wide (the runbook execs into ONE task). This branch therefore
-has no in-process layer; this test locks the round-trip so reintroducing one
+front of Redis (removed on main by #95 — Redis is the single source of cache
+truth), and on the sidecar topology such a layer cannot even be flushed
+fleet-wide (the runbook execs into ONE task). This branch likewise has no
+in-process layer; this test locks the round-trip so reintroducing one
 without flush-clearing fails loudly.
 """
 
