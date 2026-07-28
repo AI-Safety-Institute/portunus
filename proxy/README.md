@@ -83,5 +83,6 @@ a cert-load error.
 ## Building
 
 ```bash
-docker build -t api-key-proxy .
+cd proxy
+docker build -t portunus-proxy .
 ```

@@ -8,15 +8,55 @@ AWS Glue jobs where pydantic is not available.
 
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
 
+GLUE_IMAGE = "public.ecr.aws/glue/aws-glue-libs:5"
+
+
+def _pull_glue_image() -> None:
+    """Pull the Glue image, retrying with backoff on registry rate limits.
+
+    ECR Public rate-limits unauthenticated pulls per source IP. GitHub-hosted
+    runners share egress IPs across tenants, so CI pulls intermittently fail
+    with "toomanyrequests: Rate exceeded" through no fault of ours; backing
+    off and retrying is normally enough to ride it out.
+    """
+    attempts = 5
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(
+            ["docker", "pull", GLUE_IMAGE],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        output = f"{result.stdout}\n{result.stderr}"
+        rate_limited = "toomanyrequests" in output or "Rate exceeded" in output
+        if not rate_limited:
+            pytest.fail(f"docker pull {GLUE_IMAGE} failed:\n{output}")
+        if attempt < attempts:
+            backoff = 30 * attempt
+            print(
+                f"Rate limited pulling {GLUE_IMAGE} "
+                f"(attempt {attempt}/{attempts}), retrying in {backoff}s"
+            )
+            time.sleep(backoff)
+    pytest.fail(
+        f"docker pull {GLUE_IMAGE} still rate limited after {attempts} attempts"
+    )
+
 
 @pytest.mark.slow
 def test_glue_import_without_pydantic():
     """Test JoinedLogRecord import in AWS Glue without pydantic."""
+    _pull_glue_image()
+
     # Get path to models.py
     models_path = Path(__file__).parent.parent / "portunus" / "models.py"
     assert models_path.exists(), f"models.py not found at {models_path}"
@@ -87,13 +127,12 @@ print(f"✓ Successfully imported JoinedLogRecord with {len(schema)} schema fiel
             f"{test_script}:/home/hadoop/workspace/test_import.py:ro",
             "--entrypoint",
             "bash",
-            "public.ecr.aws/glue/aws-glue-libs:5",
+            GLUE_IMAGE,
             "-c",
             bash_cmd,
         ]
 
-        # Run and capture output
-        # Note: First run may take several minutes to pull the ~10GB Glue image
+        # Run and capture output (the image was pulled above)
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=600, check=False
         )

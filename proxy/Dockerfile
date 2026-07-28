@@ -16,9 +16,16 @@ RUN apt update && apt install -y gettext wget
 
 # yq — entrypoint.sh uses it to synthesise transport socket configs as
 # JSON-encoded env vars. Checksummed: an unverified release download is a
-# supply-chain hole.
-RUN wget https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_amd64 -O /usr/bin/yq && \
-    echo "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0  /usr/bin/yq" | sha256sum -c - && \
+# supply-chain hole. TARGETARCH is amd64/arm64 depending on the platform
+# being built.
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) YQ_SHA256=1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0 ;; \
+      arm64) YQ_SHA256=05df1f6aed334f223bb3e6a967db259f7185e33650c3b6447625e16fea0ed31f ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    wget "https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_${TARGETARCH}" -O /usr/bin/yq && \
+    echo "${YQ_SHA256}  /usr/bin/yq" | sha256sum -c - && \
     chmod +x /usr/bin/yq
 
 COPY envoy.yaml /envoy/envoy.yaml

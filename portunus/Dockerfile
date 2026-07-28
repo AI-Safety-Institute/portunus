@@ -21,13 +21,20 @@ FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed3356887313
 
 # grpc_health_probe: static binary docker/ECS use to probe the
 # grpc.health.v1.Health service (Portunus serves only gRPC). musl-compatible;
-# --checksum content-addresses the pin, so bumping the version requires
-# updating the checksum in the same change.
+# the checksum content-addresses the pin, so bumping the version requires
+# updating both checksums in the same change. TARGETARCH is amd64/arm64
+# depending on the platform being built (CI publishes both).
 ARG GRPC_HEALTH_PROBE_VERSION=v0.4.36
-ADD --checksum=sha256:1335e83e90eafc602303ca2e2501a11b5e26e69891007e4175362674669630c1 \
-    --chmod=0755 \
-    https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64 \
-    /usr/local/bin/grpc_health_probe
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) GHP_SHA256=1335e83e90eafc602303ca2e2501a11b5e26e69891007e4175362674669630c1 ;; \
+      arm64) GHP_SHA256=6534343a86abb0494bb90747482e8091700628992e256137336daedc5585d3b0 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    wget -q "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH}" \
+      -O /usr/local/bin/grpc_health_probe && \
+    echo "${GHP_SHA256}  /usr/local/bin/grpc_health_probe" | sha256sum -c - && \
+    chmod 0755 /usr/local/bin/grpc_health_probe
 
 RUN mkdir -p /app && chown -R 1000:1000 /app
 USER 1000:1000
