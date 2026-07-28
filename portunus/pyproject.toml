@@ -31,6 +31,12 @@ dependencies = [
     # automatically — update that ignore rule if this pin changes.
     "uvicorn>=0.29.0,<0.47",
     "Brotli>=1.1.0,<2",
+    # gRPC + Envoy/Google protos for the ext_authz Check servicer (dormant
+    # alongside the REST path until the Envoy-gRPC cutover). xds-protos ships
+    # the stable Envoy v3 protos; googleapis-common-protos provides google.rpc.
+    "grpcio>=1.66.0,<2",
+    "xds-protos>=1.80.0",
+    "googleapis-common-protos>=1.65.0,<2",
 ]
 
 [dependency-groups]
@@ -43,6 +49,7 @@ dev = [
     "pytest>=9.0.2,<10",
     "pytest-asyncio>=1.3.0,<2",
     "fakeredis>=2.26.0,<3",
+    "freezegun>=1.5.0,<2",
 ]
 
 [project.scripts]
@@ -73,6 +80,27 @@ ignore = ["E203", "D10", "D212"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.mypy]
+
+[[tool.mypy.overrides]]
+# Third-party gRPC / protobuf / boto packages ship without type stubs (or
+# only partial ones).
+module = [
+    "brotli",
+    "grpc",
+    "grpc.*",
+    "grpc_health.*",
+    "grpc_reflection.*",
+    "google.protobuf.*",
+    "google.rpc.*",
+    "mypy_boto3_kms",
+    "aiobotocore",
+    "aiobotocore.*",
+    "aws_xray_sdk.*",
+    "envoy.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 markers = [

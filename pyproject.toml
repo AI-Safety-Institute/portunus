@@ -63,8 +63,23 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-# Brotli ships no type stubs.
-module = ["brotli"]
+# Third-party gRPC / protobuf / boto packages ship without type stubs (or
+# only partial ones). The gRPC servicers are dormant here but still type-
+# checked; the retained REST path pulls in aws_xray_sdk / aiobotocore.
+module = [
+    "brotli",
+    "grpc",
+    "grpc.*",
+    "grpc_health.*",
+    "grpc_reflection.*",
+    "google.protobuf.*",
+    "google.rpc.*",
+    "mypy_boto3_kms",
+    "aiobotocore",
+    "aiobotocore.*",
+    "aws_xray_sdk.*",
+    "envoy.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
