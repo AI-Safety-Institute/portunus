@@ -321,18 +321,6 @@ class StateService:
                     )
         return self._firehose_client
 
-    # --- Legacy REST-path clients (retained until the Envoy-gRPC cutover) ---
-    # The FastAPI/relay path publishes audit records through these; the new
-    # ext_proc path uses ``get_firehose_client`` above. Both share
-    # ``self.boto_session``. Removed in the cutover PR.
-    async def get_kinesis_firehose_client(self):
-        """Legacy Kinesis Firehose client (per-call aiobotocore context)."""
-        return self.boto_session.create_client("firehose")
-
-    async def get_kinesis_client(self):
-        """Legacy Kinesis Data Streams client (per-call aiobotocore context)."""
-        return self.boto_session.create_client("kinesis")
-
     async def close(self) -> None:
         """Tear down cached AWS clients. Called on graceful shutdown."""
         while self._cred_client_pool:
