@@ -23,30 +23,39 @@ curl -X GET http://localhost:8888/headers \
 
 ## Tests
 
+The suite has two surfaces. The fast one runs on every push; the slow one needs Docker.
+
 ```bash
-# Unit tests
-uv run pytest portunus/tests/
+# Unit tests — fast, no Docker, run in CI on every push / PR.
+cd portunus && uv run pytest -q
 
-# E2E tests (requires docker compose stack)
+# Behaviour + e2e tests — slow, require docker-compose, also run in CI.
 docker compose up --build --wait
-uv run pytest tests/
-
-# Lua tests
-cd proxy && busted lib/spec/
+uv run --group dev pytest tests/ -q
 ```
+
+Inside `tests/`:
+
+- `test_http_proxy_behaviour.py` — parameterised HTTP behaviour corpus.
+- `test_ws_proxy_behaviour.py` — WebSocket behaviours (upgrade, frames, close, abrupt disconnect).
+- `test_e2e.py` / `test_e2e_signing.py` — non-corpus HTTP + RFC 9421 signing against Anthropic test vectors.
+- `test_inspect_compat.py` — OpenAI SDK round-trip driven by Inspect AI.
+- `test_redis_cache.py` — Redis cache semantics.
+
+Tests that need the Docker stack are tagged `@pytest.mark.slow`.
 
 ## Releasing
 
 Versioning is handled automatically by [hatch-vcs](https://github.com/ofek/hatch-vcs) from git tags. To create a release:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 A GitHub Actions workflow will create a GitHub release with auto-generated notes. If the release already exists (e.g. created via `gh release create`), the workflow skips gracefully.
 
-## Linting & type checking
+## Linting and type checking
 
 ```bash
 uv run ruff check .

@@ -323,37 +323,6 @@ class SigningConfig(BaseModel):
     )
 
 
-class KinesisConfig(BaseModel):
-    """Kinesis Firehose stream names for the legacy REST audit path.
-
-    Retained through the strangler migration so the live FastAPI/relay path
-    keeps publishing; removed in the Envoy-gRPC cutover once ext_proc +
-    ``FirehoseConfig`` take over.
-    """
-
-    metadata_stream_name: Optional[str] = Field(default=None)
-    request_headers_stream_name: Optional[str] = Field(default=None)
-    request_body_stream_name: Optional[str] = Field(default=None)
-    request_trailers_stream_name: Optional[str] = Field(default=None)
-    response_headers_stream_name: Optional[str] = Field(default=None)
-    response_body_stream_name: Optional[str] = Field(default=None)
-    response_trailers_stream_name: Optional[str] = Field(default=None)
-    max_record_size: int = Field(default=900000, ge=1000)
-
-
-class RelayConfig(BaseModel):
-    """WebSocket relay settings for the legacy REST path.
-
-    Retained through the strangler migration; removed in the Envoy-gRPC
-    cutover once WebSockets are proxied by Envoy + ext_proc.
-    """
-
-    max_message_size: int = Field(default=10_485_760, ge=1024)
-    max_connection_lifetime: int = Field(default=3300, ge=60)
-    max_connections: int = Field(default=200, ge=1)
-    drain_timeout: int = Field(default=10, ge=0)
-
-
 class PortunusConfig(BaseModel):
     """Top-level Portunus configuration."""
 
@@ -377,15 +346,6 @@ class PortunusConfig(BaseModel):
     signing: SigningConfig = Field(
         default_factory=SigningConfig,
         description="KMS signing throughput / concurrency bounds",
-    )
-    # Legacy REST-path config, retained until the Envoy-gRPC cutover.
-    kinesis: KinesisConfig = Field(
-        default_factory=KinesisConfig,
-        description="Legacy Kinesis Firehose stream names (REST path)",
-    )
-    relay: RelayConfig = Field(
-        default_factory=RelayConfig,
-        description="Legacy WebSocket relay configuration (REST path)",
     )
     log_level: str = Field(
         default="INFO",
@@ -524,34 +484,6 @@ def get_config() -> PortunusConfig:
         acquire_timeout_s=float(os.environ.get("SIGNING_ACQUIRE_TIMEOUT_S", "2.0")),
     )
 
-    kinesis = KinesisConfig(
-        metadata_stream_name=os.environ.get("KINESIS_METADATA_STREAM", None),
-        request_headers_stream_name=os.environ.get(
-            "KINESIS_REQUEST_HEADERS_STREAM", None
-        ),
-        request_body_stream_name=os.environ.get("KINESIS_REQUEST_BODY_STREAM", None),
-        request_trailers_stream_name=os.environ.get(
-            "KINESIS_REQUEST_TRAILERS_STREAM", None
-        ),
-        response_headers_stream_name=os.environ.get(
-            "KINESIS_RESPONSE_HEADERS_STREAM", None
-        ),
-        response_body_stream_name=os.environ.get("KINESIS_RESPONSE_BODY_STREAM", None),
-        response_trailers_stream_name=os.environ.get(
-            "KINESIS_RESPONSE_TRAILERS_STREAM", None
-        ),
-        max_record_size=int(os.environ.get("KINESIS_MAX_RECORD_SIZE", "1000000")),
-    )
-
-    relay = RelayConfig(
-        max_message_size=int(os.environ.get("WS_MAX_MESSAGE_SIZE", "10485760")),
-        max_connection_lifetime=int(
-            os.environ.get("WS_MAX_CONNECTION_LIFETIME", "3300")
-        ),
-        max_connections=int(os.environ.get("WS_MAX_CONNECTIONS", "200")),
-        drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
-    )
-
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -562,8 +494,6 @@ def get_config() -> PortunusConfig:
         firehose=firehose,
         grpc=grpc,
         signing=signing,
-        kinesis=kinesis,
-        relay=relay,
     )
 
 
