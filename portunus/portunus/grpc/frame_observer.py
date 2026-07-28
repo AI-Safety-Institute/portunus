@@ -44,6 +44,23 @@ class ObservedFrame:
     truncated: bool = False
 
 
+@dataclass
+class _PendingMessage:
+    """A data message being reassembled across wsproto events, one per direction.
+
+    wsproto emits a ``TextMessage``/``BytesMessage`` for every ``receive_data``
+    call that carries data (``message_finished`` False until the message is
+    complete), so one logical frame that straddles ext_proc chunk boundaries —
+    or a message fragmented into multiple WS frames — arrives as several
+    events. We buffer them and surface a single :class:`ObservedFrame` on
+    ``message_finished`` so frame_index / frame counts track logical frames,
+    not chunk boundaries.
+    """
+
+    opcode: str  # "text" | "binary" — fixed by the message's first frame
+    buf: bytearray
+
+
 # Zip-bomb cap: permessage-deflate can hit 1000:1 ratios on repetitive text.
 # 16 MiB is comfortably above realistic WS payloads.
 MAX_DECOMPRESSED_PAYLOAD_BYTES = 16 * 1024 * 1024
@@ -150,6 +167,12 @@ class FrameObserver:
             Direction.REQUEST: False,
             Direction.RESPONSE: False,
         }
+        # In-progress data message per direction (reassembled across events;
+        # see :class:`_PendingMessage`). None between messages.
+        self._pending: dict[Direction, Optional[_PendingMessage]] = {
+            Direction.REQUEST: None,
+            Direction.RESPONSE: None,
+        }
 
     def desynced(self, direction: Direction) -> bool:
         """True once ``direction``'s parser hit an error and stopped observing."""
@@ -213,19 +236,39 @@ class FrameObserver:
                 return
             yield from self._map_event(direction, event)
 
-    @staticmethod
-    def _map_event(direction: Direction, event) -> Iterator[ObservedFrame]:
-        """Convert a wsproto event into one or more :class:`ObservedFrame`."""
-        if isinstance(event, TextMessage):
-            payload = (
+    def _map_event(self, direction: Direction, event) -> Iterator[ObservedFrame]:
+        """Convert a wsproto event into observed frames.
+
+        Data messages (text/binary) are reassembled across events and surfaced
+        once, on ``message_finished`` — see :class:`_PendingMessage`. Control
+        frames (ping/pong/close) are never fragmented and pass straight
+        through, even while a data message is mid-reassembly in this direction.
+        """
+        if isinstance(event, (TextMessage, BytesMessage)):
+            opcode = "text" if isinstance(event, TextMessage) else "binary"
+            data = (
                 event.data.encode("utf-8")
                 if isinstance(event.data, str)
-                else event.data
+                else bytes(event.data)
             )
-            yield _capped(direction, "text", payload)
-        elif isinstance(event, BytesMessage):
-            yield _capped(direction, "binary", bytes(event.data))
-        elif isinstance(event, Ping):
+            pending = self._pending[direction]
+            if pending is None:
+                pending = _PendingMessage(opcode=opcode, buf=bytearray())
+                self._pending[direction] = pending
+            # Bound the buffer: append while at/under the cap, then stop
+            # growing (wsproto has already decoded this event's bytes, so we
+            # never hold more than the cap plus one over-cap event — the same
+            # peak the old per-event path reached). _capped truncates + flags.
+            if len(pending.buf) <= MAX_DECOMPRESSED_PAYLOAD_BYTES:
+                pending.buf.extend(data)
+            # wsproto's incremental UTF-8 decoder never splits a codepoint
+            # across TextMessage events, so encoding each fragment then
+            # concatenating is byte-identical to encoding the whole message.
+            if event.message_finished:
+                self._pending[direction] = None
+                yield _capped(direction, pending.opcode, bytes(pending.buf))
+            return
+        if isinstance(event, Ping):
             yield ObservedFrame(
                 direction=direction, opcode="ping", payload=event.payload
             )

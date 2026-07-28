@@ -120,6 +120,77 @@ def test_parse_error_desyncs_its_direction_only_and_flags_lost_frames():
     assert observer.desynced(Direction.REQUEST) is False
 
 
+def test_frame_split_across_observe_calls_is_one_logical_frame():
+    """One WS frame delivered across two ext_proc chunks is ONE ObservedFrame.
+
+    wsproto emits a TextMessage for every receive_data call that carries data
+    (``message_finished`` False until the frame completes), so a frame whose
+    bytes straddle a chunk boundary surfaces as multiple events. Emitting an
+    ObservedFrame per event would allocate a fresh frame_index and bump the
+    per-opcode frame count for each chunk — inflating WSSummaryRecord and
+    breaking the one-frame_index-per-logical-frame invariant Glue keys on.
+    Payload bytes are unaffected (chunk_id already orders them); only the
+    frame accounting is at stake.
+    """
+    observer = build_observer(response_extensions_header=None)
+    payload = b"HELLO-WORLD-abcdefghij"
+    frame = _masked_ws_text_frame(payload)
+    split = len(frame) // 2
+
+    first = list(observer.observe(direction=Direction.REQUEST, chunk=frame[:split]))
+    second = list(observer.observe(direction=Direction.REQUEST, chunk=frame[split:]))
+    frames = first + second
+
+    assert len(frames) == 1, f"expected one logical frame, got {len(frames)}"
+    assert frames[0].opcode == "text"
+    assert frames[0].payload == payload
+    assert frames[0].truncated is False
+
+
+def test_fragmented_message_is_one_logical_frame():
+    """A fragmented WS message (continuation frames) collapses to one frame.
+
+    wsproto coalesces a data message split across multiple WebSocket frames
+    into one event stream terminated by ``message_finished``; the observer's
+    logical unit is that message, so a fragmented send must still yield a
+    single ObservedFrame carrying the reassembled payload.
+    """
+    from wsproto.frame_protocol import FrameProtocol
+
+    sender = FrameProtocol(client=True, extensions=[])
+    wire = sender.send_data(b"AAAA", fin=False) + sender.send_data(b"BBBB", fin=True)
+
+    observer = build_observer(response_extensions_header=None)
+    frames = list(observer.observe(direction=Direction.REQUEST, chunk=wire))
+
+    assert len(frames) == 1, f"expected one logical frame, got {len(frames)}"
+    assert frames[0].opcode == "binary"
+    assert frames[0].payload == b"AAAABBBB"
+
+
+def test_control_frame_between_data_chunks_keeps_its_own_frame():
+    """A ping arriving mid-data-message is its own frame; data still coalesces.
+
+    Control frames are never fragmented and must not be swallowed into an
+    in-progress data message's buffer.
+    """
+    from wsproto.frame_protocol import FrameProtocol
+
+    sender = FrameProtocol(client=True, extensions=[])
+    start = sender.send_data(b"AAAA", fin=False)
+    ping = sender.ping(b"png")
+    finish = sender.send_data(b"BBBB", fin=True)
+
+    observer = build_observer(response_extensions_header=None)
+    frames = list(
+        observer.observe(direction=Direction.REQUEST, chunk=start + ping + finish)
+    )
+
+    assert [f.opcode for f in frames] == ["ping", "binary"]
+    assert frames[0].payload == b"png"
+    assert frames[1].payload == b"AAAABBBB"
+
+
 def test_genuine_close_frame_is_still_observed_not_treated_as_desync():
     """A real wire close frame must still surface as a close ObservedFrame.
 
