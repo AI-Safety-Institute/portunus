@@ -4,7 +4,8 @@
 
 Portunus caches successful authorisation results (the resolved upstream API key
 plus principal/signing metadata) in a **single shared ElastiCache (Redis)**,
-keyed by `sha256(target_host:payload)` with a per-entry TTL. This runbook flushes
+keyed by the `sha256` of the independently-hashed `target_host` and `payload`
+digests (deliberately delimiter-free), with a per-entry TTL. This runbook flushes
 **all** of those entries fleet-wide by calling the application's own
 `CacheService.flush_all()`, which issues a Redis `FLUSHDB`.
 

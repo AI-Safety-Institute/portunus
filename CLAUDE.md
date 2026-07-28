@@ -26,7 +26,7 @@ This repo implements a secure API key proxy with two cooperating components:
 3. Portunus's `PortunusAuthServicer.Check` (in `portunus/portunus/grpc/auth_servicer.py`):
    - Validates the gRPC `initial_metadata` `x-portunus-proxy-key` (Envoy-side identity).
    - Reads `x-portunus-target-host` from the same channel (not the HTTP request) to avoid client-side host forgery.
-   - Checks the Redis cache (keyed by `sha256(payload)`); on hit, returns the cached api_key.
+   - Checks the Redis cache; on hit, returns the cached api_key. The key is the `sha256` of the **independently hashed** `target_host` and `payload` digests (`sha256(sha256(host) || sha256(payload))`, no delimiter, host normalised as on the miss path). The `target_host` binding is load-bearing: without it a bearer authorised for provider A could reuse a cached api_key through a proxy fronting provider B, bypassing the host restriction `validate_and_extract_api_key` enforces on miss. Hashing the two components separately rather than joining them means no `(host, payload)` pair can collide by shifting bytes across a separator.
    - On miss: decodes the payload, builds an STS session, calls `get-caller-identity`, fetches the secret from Secrets Manager, validates the target host if the secret is JSON-shaped, and caches the result.
    - Forwards `principal_info` / `secret_arn` to ext_proc via `CheckResponse.dynamic_metadata`; ext_proc owns the Firehose metadata publish off the auth path.
    - Returns header mutations: the real `Authorization` header (api_key from the secret), the prefix-stripped payload, and (for signing tenants) the request header `x-portunus-signing-required: true`. On the non-signing branch `_ok` adds the header to `headers_to_remove` so a client-supplied value is stripped; on the signing branch it uses `OVERWRITE_IF_EXISTS_OR_ADD` to replace any client-supplied value with `true`. Envoy applies `headers_to_add` before `headers_to_remove`, so listing the header in both would strip the value we just set. Either way, the route_config also strips `x-portunus-signing-required` inbound — defence in depth.
@@ -35,7 +35,7 @@ This repo implements a secure API key proxy with two cooperating components:
 
 For tenants whose secret carries a `signing_key` block:
 
-1. A **composite filter** in envoy.yaml matches the request header `x-portunus-signing-required: true` set by the first `Check` (via `HttpRequestHeaderMatchInput`, not dynamic_metadata — that matcher input doesn't exist in Envoy 1.36).
+1. A **composite filter** in envoy.yaml matches the request header `x-portunus-signing-required: true` set by the first `Check` (via `HttpRequestHeaderMatchInput`, not dynamic_metadata — no `HttpRequestMetadataMatchInput` exists in the pinned Envoy 1.38.x).
 2. It dispatches a **second `ext_authz` filter** that has `with_request_body` set. The body is buffered (up to 32 MiB, matching Anthropic's documented request-body ceiling). `allow_partial_message: false` — Envoy returns 413 rather than silently truncate.
 3. The same servicer re-authenticates (cache hit in prod), computes `Content-Digest` over the buffered body, and signs via KMS using the user's STS credentials. `KMS.Sign` is sync `boto3` offloaded via `asyncio.to_thread` so the gRPC.aio event loop stays free.
 4. Returns `Content-Digest`, `Signature`, and `Signature-Input` as header mutations.

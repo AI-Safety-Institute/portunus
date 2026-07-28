@@ -8,12 +8,15 @@ For architecture and request flow (ext_authz `Check`, the composite-filter signi
 
 ```
 portunus/
-  app.py            FastAPI app: operator endpoints (/ping) and
-                    gRPC server lifecycle via the lifespan context manager.
-  cli.py            Console entry point.
+  cli.py            Console entry point (generates proxy auth payloads).
   config.py         Env-driven PortunusConfig (singleton at import time).
   exceptions.py     Service exception types (AuthenticationError, CredentialsError, ...).
-  logging.py        Access-log middleware and logger configuration.
+  logging.py        StructuredLogFormatter: JSON log lines on stdout, enriched
+                    with the request_id / trace_id contextvars set by
+                    xray_service. Configured at import time.
+  metrics.py        CloudWatch EMF reporter: emits Embedded Metric Format
+                    JSON lines on a dedicated stdout logger (namespace
+                    portunus-proxy), bypassing the structured formatter.
   models.py         Pydantic request models and dataclass Firehose record types
                     (MetadataRecord, RequestBodyRecord, ResponseBodyRecord,
                     WSSummaryRecord, JoinedLogRecord). Ships standalone into the
@@ -33,8 +36,6 @@ portunus/
                          frames into a bounded publish queue.
     frame_observer.py    wsproto-driven WebSocket frame parser (PerMessageDeflate
                          finalize()'d against the upstream's Sec-WebSocket-Extensions).
-    publish_queue.py     Bounded async queue with headroom reserved for metadata
-                         vs body submits.
     proxy_auth.py        Server interceptor validating x-portunus-proxy-key on
                          the initial metadata.
 
@@ -43,15 +44,21 @@ portunus/
                                target-host validation, cached via CacheService.
     secrets_service.py         aiobotocore Secrets Manager client; boto_session
                                is constructor-injectable for tests.
-    cache_service.py           Redis-backed auth-response cache (key = sha256(payload)).
+    cache_service.py           Redis-backed auth-response cache. The key is the
+                               sha256 of the independently-hashed target_host
+                               and payload digests — no delimiter, so no
+                               (host, payload) pair can collide by shifting
+                               bytes across a separator.
     signing_service.py         RFC 9421 (HTTP Message Signatures) over AWS KMS.
                                KMS.Sign is sync boto3 offloaded via asyncio.to_thread.
     publish_service.py         Firehose publish helpers; one method per record type.
+    publish_queue.py           Bounded async queue with headroom reserved for
+                               metadata vs body submits.
     state_service.py           Redis client lifecycle.
     payload_service.py         Base64 / JSON payload encode/decode.
     arn_service.py             Secret ARN parsing.
-    secret_validation_service.py  Secret-shape validation (plaintext vs JSON, target host).
-    xray_service.py            X-Ray tracing helpers.
+    xray_service.py            X-Ray tracing helpers; owns the request_id /
+                               trace_id contextvars.
 ```
 
 ## gRPC-service environment variables
@@ -60,7 +67,7 @@ These gate the servicer process specifically; the root README documents the rest
 
 | Variable | Purpose |
 |---|---|
-| `GRPC_ENABLED` | Start the ext_authz + ext_proc server (default `false`). |
+| `GRPC_ENABLED` | Must be `true` (default `false`). The gRPC server is the process's only surface, so when it is unset/false `run()` logs "nothing to serve" and returns immediately instead of starting anything. `docker-compose.yaml` and the akp task definition both set it. |
 | `GRPC_PORT` | gRPC listen port (default `9000`). |
 | `GRPC_PROXY_API_KEY` | Pre-shared key Envoy presents in `x-portunus-proxy-key` initial metadata; enforced by `grpc/proxy_auth.py`. |
 | `GRPC_PROXY_API_KEY_OPTIONAL` | When `true`, an empty `GRPC_PROXY_API_KEY` is permitted (dev only). |
@@ -81,11 +88,17 @@ Behaviour and end-to-end tests live at the repo root in `tests/` and require `do
 
 ## Running the service locally
 
-The intended entry point is the full stack (`docker compose up --build` at the repo root), which brings up Envoy, Redis, LocalStack, and an httpbun upstream alongside Portunus. To run just the FastAPI app — useful for poking `/ping` against a live Redis — from the repo root:
+The intended entry point is the full stack (`docker compose up --build` at the repo root), which brings up Envoy, Redis, LocalStack, and an httpbun upstream alongside Portunus. That is the only way to exercise a request end to end, since the auth and audit surfaces are Envoy filter callouts rather than routes you can curl.
+
+To run the servicer process on its own — useful for pointing a `grpcurl` / gRPC client at it against a live Redis — from the repo root:
 
 ```bash
 uv sync
-cd portunus && uv run uvicorn portunus.app:portunus --reload
+GRPC_ENABLED=true AWS_REGION=eu-west-2 uv run python -m portunus.grpc.server
 ```
 
-Set `GRPC_ENABLED=false` if you don't want the gRPC server bound on the same process.
+That is the same entry point the container uses (`CMD ["python", "-m", "portunus.grpc.server"]`, also exposed as the `portunus-server` script). It serves ext_authz, ext_proc, `grpc.health.v1.Health` and reflection on `GRPC_PORT`; reflection means a client needs no local `.proto` copy. For logic changes, the unit tests are faster than a live process:
+
+```bash
+uv run pytest portunus/tests
+```

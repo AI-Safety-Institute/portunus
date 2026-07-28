@@ -29,9 +29,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (listener up, not draining; Redis-independent) and remains the ECS
   `grpc_health_probe` target — a correlated Redis outage pulls tasks from
   ALB rotation but never ECS-recycles the fleet, and the akp #177
-  Envoy→Portunus container dependency can't deadlock on Redis. The akp
-  ALB target-group health check must move from `/ping` to `/healthz`
-  (see `shared/akp-changes.md` / akp #177).
+  Envoy→Portunus container dependency can't deadlock on Redis.
+  **Requires a coordinated akp change**: the ALB target-group health-check
+  path must move from `/ping` to `/healthz`, otherwise the new endpoint is
+  never probed and target health stays keyed to Envoy liveness alone
+  (akp #177).
 - Dedicated `portunus_extproc_cluster` for the ext_proc (audit) filter.
   ext_authz and ext_proc previously shared `portunus_grpc_cluster` and
   its circuit-breaker budget (`max_requests: 2048`), so a wedged audit
@@ -44,82 +46,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (`EXPECTED_ENVOY_MINOR`, default `1.38`), so a careless resolution of
   the #31↔#34 `FROM`-line conflict back to the shutdown-SIGSEGV-prone
   1.31 fails loudly instead of shipping.
-
-### Security
-- Supply-chain pinning re-applied to the rewritten Dockerfiles (#31
-  posture, re-resolved): `envoyproxy/envoy:v1.38.3` and both
-  `python:3.12-alpine` stages pinned by digest; `uv` copied from a
-  version+digest pin instead of `:latest`; `grpc_health_probe` `ADD`
-  gains `--checksum=sha256:…`; the `yq` download is sha256-verified.
-- Operator runbook for flushing the shared auth cache fleet-wide:
-  `docs/runbooks/flush-auth-cache.md`. An operator runs
-  `aws ecs execute-command` into a Portunus task and invokes the app's own
-  `CacheService.flush_all()` (Redis `FLUSHDB`). This documents the
-  replacement for the FastAPI `POST /cache/flush` endpoint retired in the
-  0.6.0 gRPC cutover — the container ships the `redis` library but no
-  `redis-cli` / `grpcurl`, and the single shared ElastiCache means one exec
-  is fleet-wide. Requires ECS Exec on the Portunus service (akp #136).
-- Audit-integrity sentinels on body records and WS summary records.
-  Closes the gap where a publish-queue drop or a deflate-cap truncation
-  was log-only — downstream ETL could reassemble incomplete bodies and
-  treat them as complete.
-  - `RequestBodyRecord` / `ResponseBodyRecord` gain `dropped: bool` and
-    `truncated: bool` fields. When a body chunk is dropped under queue
-    pressure, a sentinel body record (`body=""`, `body_size=0`,
-    `dropped=True`, same `chunk_id`) is enqueued in its place so ETL
-    sees an explicit marker rather than a silent chunk_id gap.
-  - WS frames marked `truncated` by the deflate cap propagate that flag
-    into the published body record (was set but never published).
-  - `WSSummaryRecord` gains `dropped_client_frames` /
-    `dropped_server_frames` / `truncated_client_frames` /
-    `truncated_server_frames` as aggregate per-connection counters,
-    joinable without scanning the body stream.
-  - **Glue schema impact**: 2 new fields on request_body / response_body
-    tables, 4 new fields on ws_summary. Backwards-compatible (all
-    default `false` / `0`); akp ETL gets the new columns the next time
-    it deploys.
-- Bounded WebSocket connection lifetime via `route.max_stream_duration:
-  3300s` on the WS route. WS connections that would otherwise stay
-  pinned to a task across scale-out events now cycle every ~55 min,
-  letting newly-scaled-out tasks pick up traffic. Caps WS only — HTTP
-  / SSE routes are unaffected. Close is delivered as TCP FIN (1006
-  Abnormal Closure on the wire); SDK reconnect handles it.
-- Graceful proxy drain on `SIGTERM` via Envoy's
-  `--drain-time-s 60 --drain-strategy gradual`. Replaces the default
-  10-minute drain window which exceeded ECS `stopTimeout` and resulted
-  in SIGKILL mid-drain. WS connections still close by TCP FIN (1006);
-  injecting `1001 Going Away` would require a WASM filter, tracked as
-  a follow-up.
-
-### Changed
-- `lb_policy` on the upstream provider clusters
-  (`${TARGET_HOST}`, `ws_upstream`) is now `LEAST_REQUEST` rather than
-  `ROUND_ROBIN`. With the current `LOGICAL_DNS` cluster type only one
-  endpoint is resolved per connection so the change is decorative;
-  future moves to `STRICT_DNS` (multivalue A records) will make it
-  load-bearing.
-
-### Fixed
-- Firehose direct-PUT records are now newline-delimited so buffered S3
-  objects remain parseable as JSON Lines.
-- WebSocket summaries on normal stream close now use the non-droppable
-  publish path so dropped/truncated frame counters are preserved.
-- Auth backend calls now time out before Envoy's ext_authz deadline so
-  callers receive Portunus's structured 504 response.
-- The gRPC server receive/send message limit now has headroom above
-  Envoy's 32 MiB signed-body cap.
-- Root pytest discovery now includes `portunus/tests`, so CI collects
-  the unit tests that cover the gRPC audit and auth services.
-- WebSocket auth now validates host-restricted secrets against the WS
-  upstream host when it differs from the HTTP upstream host.
-- Oversized HTTP body chunks and WebSocket frame payloads are now split
-  before publishing so individual Firehose records stay below the limit.
-- Pre-101 WebSocket buffering now enforces the 256 KiB cap against the
-  incoming chunk instead of allowing a single chunk to overshoot it.
-- Removed the stale `CORS_ALLOWED_ORIGINS` proxy default left behind
-  after CORS support was removed from the gRPC Envoy filter chain.
-
-### Added
 - `envoy.filters.http.ext_authz` + `envoy.filters.http.ext_proc` gRPC
   pipeline replacing the previous Lua-driven REST callouts. Auth runs
   synchronously via `PortunusAuthServicer.Check`; body / header audit
@@ -147,14 +73,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   same channel (not the HTTP request) to close a host-validation
   forgery vector.
 
+### Security
+- Supply-chain pinning re-applied to the rewritten Dockerfiles (#31
+  posture, re-resolved): `envoyproxy/envoy:v1.38.3` and both
+  `python:3.12-alpine` stages pinned by digest; `uv` copied from a
+  version+digest pin instead of `:latest`; `grpc_health_probe` is fetched
+  with `wget` and verified via `sha256sum -c -` against a per-`TARGETARCH`
+  digest (amd64 and arm64 pinned separately, so a version bump must update
+  both in the same change); the `yq` download is sha256-verified the same
+  way.
+- Operator runbook for flushing the shared auth cache fleet-wide:
+  `docs/runbooks/flush-auth-cache.md`. An operator runs
+  `aws ecs execute-command` into a Portunus task and invokes the app's own
+  `CacheService.flush_all()` (Redis `FLUSHDB`). This documents the
+  replacement for the FastAPI `POST /cache/flush` endpoint that this
+  release's gRPC cutover retires (0.7.0 still shipped it) — the container
+  ships the `redis` library but no
+  `redis-cli` / `grpcurl`, and the single shared ElastiCache means one exec
+  is fleet-wide. Requires ECS Exec on the Portunus service (akp #136).
+- Audit-integrity sentinels on body records and WS summary records.
+  Closes the gap where a publish-queue drop or a deflate-cap truncation
+  was log-only — downstream ETL could reassemble incomplete bodies and
+  treat them as complete.
+  - `RequestBodyRecord` / `ResponseBodyRecord` gain `dropped: bool` and
+    `truncated: bool` fields. When a body chunk is dropped under queue
+    pressure, a sentinel body record (`body=""`, `body_size=0`,
+    `dropped=True`, same `chunk_id`) is enqueued in its place so ETL
+    sees an explicit marker rather than a silent chunk_id gap.
+  - WS frames marked `truncated` by the deflate cap propagate that flag
+    into the published body record (was set but never published).
+  - `WSSummaryRecord` gains `dropped_client_frames` /
+    `dropped_server_frames` / `truncated_client_frames` /
+    `truncated_server_frames` as aggregate per-connection counters,
+    joinable without scanning the body stream.
+  - **Glue schema impact**: 2 new fields on request_body / response_body
+    tables, 4 new fields on ws_summary. Backwards-compatible (all
+    default `false` / `0`); akp ETL gets the new columns the next time
+    it deploys.
+- Bounded WebSocket connection lifetime via `route.max_stream_duration:
+  3300s` on the WS route. WS connections that would otherwise stay
+  pinned to a task across scale-out events now cycle every ~55 min,
+  letting newly-scaled-out tasks pick up traffic. Caps WS only — HTTP
+  / SSE routes are unaffected. Close is delivered as TCP FIN (1006
+  Abnormal Closure on the wire); SDK reconnect handles it.
+- WebSocket sessions remain **excluded** from the proxy drain that shipped
+  in 0.6.0 (#90, `--drain-time-s 60 --drain-strategy immediate`): on
+  `SIGTERM` they still close as TCP FIN (1006 Abnormal Closure), not
+  `1001 Going Away`. 0.6.0 forward-referenced WS-aware draining to this
+  PR; injecting a real close frame needs a WASM filter, so it stays a
+  follow-up. `route.max_stream_duration` above is what bounds WS
+  lifetime in the meantime.
+
 ### Changed
+- `lb_policy` on the upstream provider clusters
+  (`${TARGET_HOST}`, `ws_upstream`) is now `LEAST_REQUEST` rather than
+  `ROUND_ROBIN`. With the current `LOGICAL_DNS` cluster type only one
+  endpoint is resolved per connection so the change is decorative;
+  future moves to `STRICT_DNS` (multivalue A records) will make it
+  load-bearing.
 - Request signing (Content-Digest + RFC 9421 Signature/Signature-Input)
   reimplemented as a two-filter ext_authz chain:
   - **ext_authz #1** runs on headers only — no body buffering. On
     success it returns the upstream api_key as a header mutation and
     sets the request header `x-portunus-signing-required: true|false`
-    (not `dynamic_metadata` — `HttpRequestMetadataMatchInput` doesn't
-    exist in Envoy 1.36, so the composite filter matches via
+    (not `dynamic_metadata` — no `HttpRequestMetadataMatchInput` exists
+    in the pinned Envoy 1.38.x, so the composite filter matches via
     `HttpRequestHeaderMatchInput` instead). `_ok` always lists the
     header in `headers_to_remove` and the route_config also strips
     inbound copies — single source of truth, forgery-safe.
@@ -220,6 +203,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
     ÷ 8 streams = ~1,250/s on the busiest stream, just above the
     default. The quota increase is filed by the akp companion PR;
     portunus must not assume it's in place at deploy time.
+
+### Fixed
+- Firehose direct-PUT records are now newline-delimited so buffered S3
+  objects remain parseable as JSON Lines.
+- WebSocket summaries on normal stream close now use the non-droppable
+  publish path so dropped/truncated frame counters are preserved.
+- Auth backend calls now time out before Envoy's ext_authz deadline so
+  callers receive Portunus's structured 504 response.
+- The gRPC server receive/send message limit now has headroom above
+  Envoy's 32 MiB signed-body cap.
+- Root pytest discovery now includes `portunus/tests`, so CI collects
+  the unit tests that cover the gRPC audit and auth services.
+- WebSocket auth now validates host-restricted secrets against the WS
+  upstream host when it differs from the HTTP upstream host.
+- Oversized HTTP body chunks and WebSocket frame payloads are now split
+  before publishing so individual Firehose records stay below the limit.
+- Pre-101 WebSocket buffering now enforces the 256 KiB cap against the
+  incoming chunk instead of allowing a single chunk to overshoot it.
+- Removed the stale `CORS_ALLOWED_ORIGINS` proxy default left behind
+  after CORS support was removed from the gRPC Envoy filter chain.
 
 ### Removed
 - Legacy REST `/authorise` and `/log/*` routes and their Lua-side
