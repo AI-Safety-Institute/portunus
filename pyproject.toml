@@ -13,13 +13,13 @@ dependencies = [
 dev = [
     "requests>=2.32.3,<3",
     "mypy>=2.3.0,<3",
-    "ruff>=0.6.0,<1",
-    "boto3-stubs[secretsmanager, kms]>=1.43.47,<2",
+    "ruff>=0.16.0,<1",
+    "boto3-stubs[secretsmanager, kms]>=1.43.56,<2",
     "types-requests>=2.33.0.20260712,<3",
-    "types-pyyaml>=6.0.12.20240724,<7",
-    "types-aiobotocore>=2.24.1,<4",
+    "types-pyyaml>=6.0.12.20260724,<7",
+    "types-aiobotocore>=3.8.0,<4",
     "types-aws-xray-sdk>=2.14.0.20250708,<3",
-    "pre-commit>=3.7.1,<5",
+    "pre-commit>=4.6.1,<5",
     "pytest>=8.4.1,<10",
     "pytest-asyncio>=1.1.0,<2",
     "aws-xray-sdk>=2.14.0,<3",
@@ -27,7 +27,7 @@ dev = [
     "redis>=5.0.0,<6",
     "moto>=5.1.13,<6",
     "freezegun>=1.5.0,<2",
-    "fakeredis>=2.26.0,<3",
+    "fakeredis>=2.37.0,<3",
 ]
 
 [tool.uv]
