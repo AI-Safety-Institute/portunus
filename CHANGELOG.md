@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- The backend image now honours a `UVICORN_WORKERS` env var (default 1 —
+  unchanged behaviour) so deployments can size the worker pool to the host,
+  typically one worker per vCPU. A single worker can only use one core,
+  which leaves multi-vCPU hosts underutilised and can back up the event
+  loop under load. Note that per-process limits (`relay.max_connections`,
+  the WS log queue worker pool) apply per worker, so per-container totals
+  scale with the worker count. (#116)
+
 ## [0.7.0]
 
 ### Fixed
