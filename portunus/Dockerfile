@@ -28,6 +28,9 @@ COPY portunus ./portunus
 COPY logconf.yaml .
 ENV LISTEN_PORT=8080
 ENV LOG_LEVEL=info
+# One uvicorn worker uses at most one core; deployments on multi-vCPU hosts
+# should set this to the vCPU count to use the full allocation.
+ENV UVICORN_WORKERS=1
 EXPOSE 8080
 
-CMD uvicorn portunus.app:portunus --proxy-headers --host 0.0.0.0 --port ${LISTEN_PORT} --log-level ${LOG_LEVEL} --log-config logconf.yaml --loop asyncio  --no-access-log
+CMD uvicorn portunus.app:portunus --proxy-headers --host 0.0.0.0 --port ${LISTEN_PORT} --workers ${UVICORN_WORKERS} --log-level ${LOG_LEVEL} --log-config logconf.yaml --loop asyncio --no-access-log
