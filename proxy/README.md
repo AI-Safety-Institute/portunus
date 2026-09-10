@@ -63,6 +63,36 @@ RATE_LIMIT_INTERVAL_SECONDS=60
 
 See `entrypoint.sh` for full list of environment variables and defaults.
 
+### Upstream concurrency limits
+
+The target API cluster has independent circuit breakers, shared by the workers
+in each Envoy process:
+
+| Environment variable | Default | Limit |
+| --- | --- | --- |
+| `TARGET_MAX_CONNECTIONS` | `10000` | Upstream TCP connections |
+| `TARGET_MAX_REQUESTS` | `1024` | Active upstream HTTP requests |
+| `TARGET_MAX_PENDING_REQUESTS` | `1024` | Requests waiting for a connection-pool slot |
+
+HTTP/2 multiplexes many requests over one connection. Raising the connection
+limit therefore does not raise request concurrency. Long-running requests can
+exhaust the active-request limit while CPU remains low, producing local HTTP
+503s with the `UO` response flag. For example, `TARGET_MAX_REQUESTS=4096` sets
+an active-request budget of 4,096 per proxy, subject to the other resource limits.
+Envoy's shared circuit breakers can briefly overshoot their configured limits
+when workers admit requests concurrently.
+
+Choose finite limits together with replica counts, memory capacity, backend
+audit capacity, and expected request duration. The response logger retains
+response bodies in memory. Keep enough replicas for concurrent demand; CPU-only
+autoscaling can remove capacity while requests are waiting on an upstream API.
+
+Access logs include `response_code_details` to help distinguish local rejection
+from an upstream error. The loopback admin `/stats` endpoint exposes the target
+cluster's active requests, overflow counters, circuit-breaker state, and remaining
+capacity (`track_remaining` is enabled). Export these through a trusted local
+collector if needed; the admin listener must remain private.
+
 ### Terminating TLS at the proxy
 
 By default the proxy listener is plain HTTP and TLS is expected to terminate in

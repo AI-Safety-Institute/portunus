@@ -6,6 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- The proxy accepts `TARGET_MAX_REQUESTS` and `TARGET_MAX_PENDING_REQUESTS` to
+  configure the target API's active and pending HTTP request circuit breakers.
+  Both default to 1,024, preserving existing behaviour. Remaining breaker capacity
+  is available through the private admin stats endpoint, and access logs include
+  `response_code_details` for local failure diagnosis.
 - The backend image now honours a `UVICORN_WORKERS` env var (default 1 —
   unchanged behaviour) so deployments can size the worker pool to the host,
   typically one worker per vCPU. A single worker can only use one core,
