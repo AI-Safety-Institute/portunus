@@ -39,6 +39,8 @@ dependencies = [
     "googleapis-common-protos>=1.65.0,<2",
     "orjson>=3.10.0,<4",
     "wsproto>=1.2.0,<2",
+    "grpcio-health-checking>=1.66.0,<2",
+    "grpcio-reflection>=1.66.0,<2",
 ]
 
 [dependency-groups]

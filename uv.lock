@@ -506,6 +506,32 @@ wheels = [
 ]
 
 [[package]]
+name = "grpcio-health-checking"
+version = "1.83.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cd/84/5db47abe1b8b946e8edcfcf7fb2116c7a4ab839e23126680a984c88eb424/grpcio_health_checking-1.83.0.tar.gz", hash = "sha256:ad6bc4d5a1103ad704d25ccd82def300dfa27996b185cab3e4cceeef2c6867d4", size = 17061, upload-time = "2026-07-23T15:24:23.019Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/9c/8922f2a529bf49361b4f70d6d07adfadc07d1a93eb5ee07f6f66a54445e8/grpcio_health_checking-1.83.0-py3-none-any.whl", hash = "sha256:7d8b47a5bfbc699d4aee0fc7a27f5d0265eb23a6a64db5ac2d8b749a0f8a9911", size = 19085, upload-time = "2026-07-23T15:24:07.792Z" },
+]
+
+[[package]]
+name = "grpcio-reflection"
+version = "1.83.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e5/6e/e46a65398fe4289b62f46266234321fcfb9ff96fcd69c872440c2bfaf607/grpcio_reflection-1.83.0.tar.gz", hash = "sha256:6a2a30a462ac2c3c6d149734a8fe655fa7617c17fa2cda9949006f3bf07f5b3e", size = 19203, upload-time = "2026-07-23T15:24:26.163Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/f2/21a1bbe4d35efbfb301dca50406bf643a503c041c8bafc53686c7ed180a2/grpcio_reflection-1.83.0-py3-none-any.whl", hash = "sha256:9d4151f68f18a85aa5b0eff5d493ad13f9421f96c8d9c01c840b353dc979be93", size = 22910, upload-time = "2026-07-23T15:23:37.94Z" },
+]
+
+[[package]]
 name = "gunicorn"
 version = "22.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -822,6 +848,8 @@ dependencies = [
     { name = "fastapi" },
     { name = "googleapis-common-protos" },
     { name = "grpcio" },
+    { name = "grpcio-health-checking" },
+    { name = "grpcio-reflection" },
     { name = "gunicorn" },
     { name = "httpx" },
     { name = "orjson" },
@@ -846,6 +874,8 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0,<1" },
     { name = "googleapis-common-protos", specifier = ">=1.65.0,<2" },
     { name = "grpcio", specifier = ">=1.66.0,<2" },
+    { name = "grpcio-health-checking", specifier = ">=1.66.0,<2" },
+    { name = "grpcio-reflection", specifier = ">=1.66.0,<2" },
     { name = "gunicorn", specifier = ">=22.0.0,<23" },
     { name = "httpx", specifier = ">=0.27.0,<1" },
     { name = "orjson", specifier = ">=3.10.0,<4" },
