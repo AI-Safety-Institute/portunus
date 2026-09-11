@@ -5,12 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-11
+
 ### Added
 - The proxy accepts `TARGET_MAX_REQUESTS` and `TARGET_MAX_PENDING_REQUESTS` to
   configure the target API's active and pending HTTP request circuit breakers.
   Both default to 1,024, preserving existing behaviour. Remaining breaker capacity
   is available through the private admin stats endpoint, and access logs include
   `response_code_details` for local failure diagnosis.
+
+### Changed
+- Routine Docker, Python, and GitHub Actions dependency updates.
+  (#111, #118, #121, #127, #128)
+
+## [0.8.0] - 2026-08-11
+
+### Added
 - The backend image now honours a `UVICORN_WORKERS` env var (default 1 —
   unchanged behaviour) so deployments can size the worker pool to the host,
   typically one worker per vCPU. A single worker can only use one core,
@@ -199,7 +209,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/AI-Safety-Institute/portunus/compare/v0.5.4...v0.5.5
