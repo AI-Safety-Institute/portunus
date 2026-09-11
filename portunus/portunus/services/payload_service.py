@@ -27,8 +27,8 @@ def encode_payload(credentials: dict, secret_arn: str) -> str:
             "access_key_id": credentials["AccessKeyId"],
             "secret_access_key": credentials["SecretAccessKey"],
             "session_token": credentials["SessionToken"],
+            "expiration": credentials.get("Expiration"),
         },
-        "expiration": credentials["Expiration"],
         "secret_arn": secret_arn,
     }
     json_bytes = json.dumps(payload_dict, default=str).encode("utf-8")
