@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FEDERATION_ROLE_PATH_PREFIX = "/portunus-fed/"
+
 
 class RedisConfig(BaseModel):
     """Redis configuration settings.
@@ -184,12 +186,63 @@ class RelayConfig(BaseModel):
     )
 
 
+class FederationConfig(BaseModel):
+    """Settings for minting short-lived upstream tokens via federation roles.
+
+    Attributes:
+        allowed_account_ids: AWS accounts whose federation roles a secret may
+            name. Empty disables token minting.
+        role_path_prefix: IAM path every federation role ARN must start with
+        sts_endpoint_url: STS endpoint for AssumeRole and GetWebIdentityToken.
+            None means AWS_ENDPOINT_URL if set, else the regional endpoint.
+        user_tag_key: Session tag key carrying the caller's IAM role name
+        project_tag_key: Session tag key carrying the caller's project
+    """
+
+    allowed_account_ids: list[str] = Field(
+        default_factory=list,
+        description="AWS account IDs whose federation roles may be assumed",
+    )
+    role_path_prefix: str = Field(
+        default=DEFAULT_FEDERATION_ROLE_PATH_PREFIX,
+        description="IAM path prefix required on federation role ARNs",
+    )
+    sts_endpoint_url: Optional[str] = Field(
+        default=None,
+        description="STS endpoint for federation calls (default: regional)",
+    )
+    user_tag_key: str = Field(
+        default="portunus:user",
+        description="Session tag key for the caller's IAM role name",
+    )
+    project_tag_key: str = Field(
+        default="portunus:project",
+        description="Session tag key for the caller's project",
+    )
+
+    @field_validator("allowed_account_ids")
+    def validate_account_ids(cls, v: list[str]) -> list[str]:
+        """Require 12-digit account IDs."""
+        for account_id in v:
+            if not (account_id.isdigit() and len(account_id) == 12):
+                raise ValueError(f"Invalid AWS account ID: {account_id!r}")
+        return v
+
+    @field_validator("role_path_prefix")
+    def validate_role_path_prefix(cls, v: str) -> str:
+        """IAM paths start and end with a slash."""
+        if not (v.startswith("/") and v.endswith("/")):
+            raise ValueError("role_path_prefix must start and end with '/'")
+        return v
+
+
 class PortunusConfig(BaseModel):
     """Main configuration for the Portunus service.
 
     Attributes:
         redis: Redis configuration
         aws: AWS configuration
+        federation: Federation token minting configuration
         log_level: Logging level
         api_key_header: Header name to use for the API key
         api_key_prefix: Prefix to use for the API key
@@ -211,6 +264,10 @@ class PortunusConfig(BaseModel):
     relay: RelayConfig = Field(
         default_factory=RelayConfig,
         description="WebSocket relay configuration",
+    )
+    federation: FederationConfig = Field(
+        default_factory=FederationConfig,
+        description="Federation token minting configuration",
     )
     log_level: str = Field(
         default="INFO",
@@ -241,6 +298,11 @@ class PortunusConfig(BaseModel):
     ):
         """Customize settings sources to prioritize environment variables."""
         return env_settings, init_settings, file_secret_settings
+
+
+def _split_csv(value: str) -> list[str]:
+    """Split a comma-separated env var, dropping blanks."""
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 @lru_cache()
@@ -300,6 +362,20 @@ def get_config() -> PortunusConfig:
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
     )
 
+    federation = FederationConfig(
+        allowed_account_ids=_split_csv(
+            os.environ.get("FEDERATION_ALLOWED_ACCOUNT_IDS", "")
+        ),
+        role_path_prefix=os.environ.get(
+            "FEDERATION_ROLE_PATH_PREFIX", DEFAULT_FEDERATION_ROLE_PATH_PREFIX
+        ),
+        sts_endpoint_url=os.environ.get("FEDERATION_STS_ENDPOINT_URL", None),
+        user_tag_key=os.environ.get("FEDERATION_USER_TAG_KEY", "portunus:user"),
+        project_tag_key=os.environ.get(
+            "FEDERATION_PROJECT_TAG_KEY", "portunus:project"
+        ),
+    )
+
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -308,6 +384,7 @@ def get_config() -> PortunusConfig:
         aws=aws,
         kinesis=kinesis,
         relay=relay,
+        federation=federation,
     )
 
 

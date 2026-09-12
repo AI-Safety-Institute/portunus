@@ -32,14 +32,17 @@ def _payload() -> str:
     return base64.b64encode(json.dumps(data).encode()).decode()
 
 
-def _auth_result(**overrides: str) -> AuthResult:
+def _auth_result(
+    output_header: str | None = None, output_prefix: str | None = None
+) -> AuthResult:
     return AuthResult(
         api_key="sk-test-key",
         principal_info=PrincipalInfo(
             arn="arn:aws:sts::123456789012:assumed-role/TestRole/session",
             account_id="123456789012",
         ),
-        **overrides,
+        output_header=output_header,
+        output_prefix=output_prefix,
     )
 
 
