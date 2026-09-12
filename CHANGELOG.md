@@ -10,7 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the backend choose which upstream header receives the credential and with
   what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
   `API_KEY_PREFIX`. The WebSocket relay honours the same fields (default
-  `Authorization: Bearer`).
+  `Authorization: Bearer`). (#136)
 
 ### Changed
 - The proxy removes every header in `KNOWN_AUTH_HEADERS` (new proxy env var,
@@ -19,6 +19,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   logging. The WebSocket relay does the same for forwarded and logged upgrade
   headers. Previously only `API_KEY_HEADER` was excluded from logs and
   client-supplied copies of other credential headers were forwarded upstream.
+  (#136)
 
 ## [0.9.0] - 2026-09-11
 
