@@ -16,6 +16,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as ws_connect
 
 from portunus.config import config
+from portunus.models import AuthResult
 from portunus.relay import WsCloseCode
 from portunus.relay.auth import WsAuthResult, authenticate_ws
 from portunus.relay.logger import enqueue_log, log_ws_headers, log_ws_summary
@@ -25,27 +26,38 @@ from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
 
+# Headers that may carry an upstream credential. None of them is forwarded
+# (the relay injects exactly one credential header itself) and none is logged.
+KNOWN_AUTH_HEADERS = frozenset(
+    {"authorization", "x-api-key", "x-goog-api-key", "api-key"}
+)
+
+# Used when the auth result does not name an output header/prefix.
+_DEFAULT_OUTPUT_HEADER = "Authorization"
+_DEFAULT_OUTPUT_PREFIX = "Bearer "
+
 # Headers NOT forwarded from client upgrade request to upstream.
 # Everything else passes through — avoids maintaining an allowlist
 # that would need updating for every new client/provider.
-_BLOCKED_HEADERS = frozenset(
-    {
-        # Hop-by-hop (handled by websockets library on new connection)
-        "connection",
-        "upgrade",
-        "sec-websocket-key",
-        "sec-websocket-version",
-        "sec-websocket-extensions",
-        # Auth (replaced with real API key)
-        "authorization",
-        # Routing (specific to this proxy, not the upstream)
-        "host",
-        # Proxy headers (could spoof source identity at upstream)
-        "x-forwarded-for",
-        "x-forwarded-host",
-        "x-forwarded-proto",
-        "x-real-ip",
-    }
+_BLOCKED_HEADERS = (
+    frozenset(
+        {
+            # Hop-by-hop (handled by websockets library on new connection)
+            "connection",
+            "upgrade",
+            "sec-websocket-key",
+            "sec-websocket-version",
+            "sec-websocket-extensions",
+            # Routing (specific to this proxy, not the upstream)
+            "host",
+            # Proxy headers (could spoof source identity at upstream)
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-real-ip",
+        }
+    )
+    | KNOWN_AUTH_HEADERS
 )
 _BLOCKED_HEADER_PREFIXES = ("x-portunus-",)
 
@@ -81,19 +93,43 @@ def _parse_target(websocket: WebSocket, request_id: str) -> UpstreamTarget | Non
     return UpstreamTarget(host=host, port=port, use_tls=use_tls)
 
 
-def _build_upstream_headers(websocket: WebSocket, api_key: str) -> dict[str, str]:
+def _resolve_upstream_auth(auth_result: AuthResult) -> tuple[str, str]:
+    """Return the header name and full value that carry the upstream credential.
+
+    Falls back to ``Authorization: Bearer <key>`` when the auth result does not
+    set output_header/output_prefix. An empty output_prefix means no prefix.
+    """
+    header = auth_result.output_header or _DEFAULT_OUTPUT_HEADER
+    prefix = (
+        auth_result.output_prefix
+        if auth_result.output_prefix is not None
+        else _DEFAULT_OUTPUT_PREFIX
+    )
+    return header, f"{prefix}{auth_result.api_key}"
+
+
+def _credential_headers(auth_header: str) -> frozenset[str]:
+    """Lowercased names of every header that can carry a credential."""
+    return KNOWN_AUTH_HEADERS | {auth_header.lower()}
+
+
+def _build_upstream_headers(
+    websocket: WebSocket, auth_result: AuthResult
+) -> dict[str, str]:
     """Build headers for the upstream connection.
 
-    Forwards all client headers except blocked ones, and replaces
-    the Authorization header with the real API key.
+    Forwards all client headers except blocked and credential-carrying ones,
+    then sets exactly one credential header from the auth result.
     """
-    headers = {"Authorization": f"Bearer {api_key}"}
+    auth_header, auth_value = _resolve_upstream_auth(auth_result)
+    excluded = _BLOCKED_HEADERS | _credential_headers(auth_header)
+    headers: dict[str, str] = {}
     for key, value in websocket.headers.items():
-        if key in _BLOCKED_HEADERS:
-            continue
-        if any(key.startswith(p) for p in _BLOCKED_HEADER_PREFIXES):
+        lower = key.lower()
+        if lower in excluded or lower.startswith(_BLOCKED_HEADER_PREFIXES):
             continue
         headers[key] = value
+    headers[auth_header] = auth_value
     return headers
 
 
@@ -111,7 +147,7 @@ async def _connect_upstream(
     target: UpstreamTarget,
     path: str,
     websocket: WebSocket,
-    api_key: str,
+    auth_result: AuthResult,
     request_id: str,
     max_message_size: int,
 ) -> ClientConnection | None:
@@ -120,7 +156,7 @@ async def _connect_upstream(
     Returns None if the connection fails.
     """
     uri = _build_upstream_uri(target, path, websocket)
-    headers = _build_upstream_headers(websocket, api_key)
+    headers = _build_upstream_headers(websocket, auth_result)
 
     try:
         upstream = await ws_connect(
@@ -145,12 +181,14 @@ async def _publish_connection_metadata(
     upstream_host: str,
 ) -> None:
     """Log upgrade headers and publish metadata on connection open."""
-    # Log upgrade request headers (parity with HTTP header logging).
-    # Strip internal headers and authorization (contains encoded AWS credentials).
+    # Log upgrade request headers (parity with HTTP header logging), minus the
+    # internal routing headers and anything that can carry a credential.
+    auth_header, _ = _resolve_upstream_auth(ws_auth.auth_result)
+    excluded = _credential_headers(auth_header)
     upgrade_headers = {
         k: v
         for k, v in websocket.headers.items()
-        if not k.startswith("x-portunus-") and k != "authorization"
+        if not k.startswith("x-portunus-") and k.lower() not in excluded
     }
     # Include upstream authority so downstream consumers can identify
     # which API provider handled the request.
@@ -313,7 +351,7 @@ async def handle_ws_connection(
         target,
         path,
         websocket,
-        ws_auth.api_key,
+        ws_auth.auth_result,
         request_id,
         relay_config.max_message_size,
     )
