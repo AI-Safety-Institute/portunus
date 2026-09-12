@@ -46,6 +46,23 @@ describe("proxy_utils.utils", function()
 		end)
 	end)
 
+	describe("parse_header_set - comma-separated header names", function()
+		it("should trim, lowercase and skip empty entries", function()
+			local result = utils.parse_header_set(" Authorization, X-Api-Key ,,api-key,")
+
+			assert.same({
+				authorization = true,
+				["x-api-key"] = true,
+				["api-key"] = true,
+			}, result)
+		end)
+
+		it("should return an empty set for nil or empty input", function()
+			assert.same({}, utils.parse_header_set(nil))
+			assert.same({}, utils.parse_header_set(""))
+		end)
+	end)
+
 	describe("convert_pairs_to_table - base64 encoding", function()
 		it("should base64-encode all header values", function()
 			local base64_spy = spy.new(function(_, data)

@@ -14,7 +14,7 @@ from typing import Optional
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
 from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from portunus.config import config  # noqa: E402 — also used by XRayService
 from portunus.exceptions import (
@@ -78,12 +78,20 @@ class AuthorizationResponse(BaseModel):
     Attributes:
         api_key: The API key to use for upstream requests
         request_id: Unique request ID for correlation
+        signature: Signature header value, when the secret carries a signing key
+        signature_input: Signature-Input header value, when signing
+        output_header: Upstream header that should carry the credential. When
+            None the proxy uses its configured API_KEY_HEADER.
+        output_prefix: Prefix for the credential value. When None the proxy uses
+            its configured API_KEY_PREFIX; an empty string means no prefix.
     """
 
     api_key: str
     request_id: str
     signature: Optional[str] = None
     signature_input: Optional[str] = None
+    output_header: Optional[str] = Field(default=None, min_length=1)
+    output_prefix: Optional[str] = None
 
 
 @portunus_router.post("/authorise")
@@ -207,6 +215,8 @@ async def authorise(
                 signature_input=signature_headers["Signature-Input"]
                 if signature_headers
                 else None,
+                output_header=auth_result.output_header,
+                output_prefix=auth_result.output_prefix,
             )
 
     except PayloadError as e:

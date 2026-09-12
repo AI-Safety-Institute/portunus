@@ -2,6 +2,7 @@
 -- Handles all HTTP communication with the Portunus service
 local dkjson = require("dkjson")
 local request_signing = require("proxy_utils.request_signing")
+local utils = require("proxy_utils.utils")
 
 local portunus = {}
 local portunus_client = {}
@@ -17,8 +18,9 @@ function portunus.new(config)
 		api_key = config.portunus_api_key,
 		api_key_header = config.portunus_api_key_header,
 		-- Request auth config
-		request_api_key_header = config.api_key_header,
+		request_api_key_header = (config.api_key_header or ""):lower(),
 		request_api_key_prefix = config.api_key_prefix,
+		credential_headers = utils.parse_header_set(config.known_auth_headers),
 		target_host = config.target_host,
 		-- Request signing config
 		signing_key_id = config.signing_key_id,
@@ -26,6 +28,8 @@ function portunus.new(config)
 		-- Header prefix for proxy-specific response headers
 		header_prefix = config.header_prefix,
 	}
+	-- The inbound payload header must be stripped too, even when it is not in the known list.
+	instance.credential_headers[instance.request_api_key_header] = true
 	setmetatable(instance, portunus_client)
 	return instance
 end
@@ -242,8 +246,11 @@ end
 --   "api_key": "The real API key retrieved from Secrets Manager",
 --   "request_id": "Trace or request ID for logging correlation",
 --   "signature": "Optional signature header value",
---   "signature_input": "Optional signature-input header value"
+--   "signature_input": "Optional signature-input header value",
+--   "output_header": "Optional upstream header to carry the credential",
+--   "output_prefix": "Optional prefix for the credential value"
 -- }
+-- dkjson decodes JSON null as nil, so absent and null optional fields are equivalent.
 -- @param body Raw response body string
 -- @return data, error Returns parsed data table or nil with an error message
 function portunus_client:parse_authorization_response(body)
@@ -257,6 +264,55 @@ function portunus_client:parse_authorization_response(body)
 	end
 
 	return data, nil
+end
+
+--- Resolves the upstream header that carries the credential and its full value
+-- Falls back to the configured api_key_header/api_key_prefix when the response
+-- does not set output_header/output_prefix. An empty output_prefix means no
+-- prefix; only a missing one falls back. An empty output_header is treated as absent.
+-- @param auth_response Parsed AuthorizationResponse
+-- @return header, value Lowercased header name and the value to set
+function portunus_client:resolve_upstream_auth(auth_response)
+	local header = auth_response.output_header
+	if header == nil or header == "" then
+		header = self.request_api_key_header
+	end
+	local prefix = auth_response.output_prefix
+	if prefix == nil then
+		prefix = self.request_api_key_prefix
+	end
+	return header:lower(), prefix .. auth_response.api_key
+end
+
+--- Sets the single upstream auth header and removes every other credential header
+-- @param request_handle The Envoy request handle
+-- @param auth_response Parsed AuthorizationResponse
+-- @return header Lowercased name of the header that now carries the credential
+function portunus_client:apply_upstream_auth(request_handle, auth_response)
+	local header, value = self:resolve_upstream_auth(auth_response)
+	local headers = request_handle:headers()
+	for name in pairs(self.credential_headers) do
+		if name ~= header then
+			headers:remove(name)
+		end
+	end
+	headers:replace(header, value)
+	return header
+end
+
+--- Copies headers, dropping every credential header and the upstream auth header
+-- @param headers Header name/value pairs (Envoy headers object or plain table)
+-- @param upstream_auth_header Lowercased name returned by apply_upstream_auth
+-- @return result Plain table of the remaining headers
+function portunus_client:strip_credential_headers(headers, upstream_auth_header)
+	local result = {}
+	for name, value in pairs(headers) do
+		local lower = name:lower()
+		if not self.credential_headers[lower] and lower ~= upstream_auth_header then
+			result[name] = value
+		end
+	end
+	return result
 end
 
 return portunus

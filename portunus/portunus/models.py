@@ -591,12 +591,19 @@ class AuthResult:
 
     Attributes:
         api_key (str): The API key retrieved from Secrets Manager
+        signing_key: Request signing key details, if the secret carries one
         principal_info (PrincipalInfo): Information about the authenticated principal
+        output_header: Upstream header that should carry the credential. None
+            means the proxy's configured header.
+        output_prefix: Prefix for the credential value. None means the proxy's
+            configured prefix; an empty string means no prefix.
     """
 
     api_key: str
     signing_key: Optional[SigningKey]
     principal_info: PrincipalInfo
+    output_header: Optional[str] = None
+    output_prefix: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AuthResult":
@@ -615,6 +622,8 @@ class AuthResult:
             api_key=data.get("api_key", ""),
             signing_key=data.get("signing_key", None),
             principal_info=principal_info,
+            output_header=data.get("output_header"),
+            output_prefix=data.get("output_prefix"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
