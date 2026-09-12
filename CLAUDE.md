@@ -35,7 +35,9 @@ This repo implements a secure API key proxy system with two main components:
    - Decodes base64 payload using `decode_payload`
    - Extracts AWS credentials and secret ARN
    - Creates AWS session with provided credentials
-   - Retrieves API key from AWS Secrets Manager via `services.aws_service.AwsService`
+   - Retrieves the secret from AWS Secrets Manager and parses it (`services.secret_validation_service.parse_secret`): plaintext or `{"secret", "host", "signing_key"}` is a stored key; `{"type": "anthropic_wif", ...}` describes a token to mint
+   - For mint secrets, `services.federation_service.TokenMintService` checks the federation role ARN against `FEDERATION_ALLOWED_ACCOUNT_IDS` / `FEDERATION_ROLE_PATH_PREFIX`, assumes the role with the caller's credentials (regional STS endpoint), issues an STS web identity token from that session, and exchanges it at `https://<host>/v1/oauth/token`; the result carries `output_header="authorization"`, `output_prefix="Bearer "`. Concurrent misses for one payload share a mint per process.
+   - Caches the result for min(`CACHE_DURATION`, caller credential expiry, token expiry - 5 min)
    - Publishes metadata (principal info) to Kinesis Data Streams for audit trail
    - Returns formatted API key with principal info
 4. Proxy puts the real API key in exactly one upstream header
@@ -98,6 +100,10 @@ Logging captures full request/response bodies, headers, and trailers verbatim â€
 - `REDIS_PORT`: Port for Redis server (default: 6379)
 - `REDIS_PASSWORD`: Password for Redis authentication
 - `REDIS_MAX_CONNECTIONS`: Maximum number of Redis connections
+- `FEDERATION_ALLOWED_ACCOUNT_IDS`: Comma-separated account IDs whose federation roles a mint secret may name (unset disables minting)
+- `FEDERATION_ROLE_PATH_PREFIX`: IAM path federation role ARNs must start with (default: "/portunus-fed/")
+- `FEDERATION_STS_ENDPOINT_URL`: STS endpoint for federation calls (default: `AWS_ENDPOINT_URL`, else the regional endpoint)
+- `FEDERATION_USER_TAG_KEY`, `FEDERATION_PROJECT_TAG_KEY`: Session tag keys on the identity token (defaults: "portunus:user", "portunus:project")
 
 ## Development
 - Root project includes all dependencies: `uv sync`
@@ -108,6 +114,8 @@ Logging captures full request/response bodies, headers, and trailers verbatim â€
 - `/portunus/portunus/app.py` - Main FastAPI application with endpoints
 - `/portunus/portunus/services/auth_service.py` - Authentication and authorization logic
 - `/portunus/portunus/services/aws_service.py` - AWS services integration (Secrets Manager, etc.)
+- `/portunus/portunus/services/federation_service.py` - Short-lived upstream tokens: federation role assumption, STS web identity tokens, provider exchange adapters
+- `/portunus/portunus/services/secret_validation_service.py` - Secret parsing (`parse_secret`) and target host validation
 - `/portunus/portunus/services/publish_service.py` - Publishing log events and metadata to Kinesis Data Streams
 - `/portunus/portunus/util.py` - Utility functions and helpers
 - `/portunus/portunus/models.py` - Data models and schemas, including Pydantic models for logging events and dataclasses for Kinesis records and auth/AWS types
