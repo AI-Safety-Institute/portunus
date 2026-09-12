@@ -15,7 +15,7 @@ It consists of two main components:
     - Secrets can be stored in three formats (see [Secret formats](#secret-formats)):
       - **Plaintext**: `"sk-1234567890abcdef"` (works with any proxy target)
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
-      - **Minted token**: `{"type":"anthropic_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
+      - **Minted token**: `{"type":"anthropic_wif", ...}` or `{"type":"gcp_workload_identity", ...}` (no key is stored; Portunus mints a short-lived token per caller)
   - If successful, Portunus returns the real API key to the Envoy instance
   - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default) and removes any other credential headers before allowing the request to proceed
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
@@ -201,7 +201,7 @@ A secret referenced by a payload is one of:
 |---|---|---|
 | Plaintext | `sk-1234567890abcdef` | Used as the key for any target |
 | Stored key with target check | `{"secret": "sk-...", "host": "api.example.com", "signing_key": {...}}` | Used only when the proxy's target matches `host`; `signing_key` is optional |
-| Minted token | `{"type": "anthropic_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
+| Minted token | `{"type": "anthropic_wif", ...}` or `{"type": "gcp_workload_identity", ...}` (below) | No key is stored; a short-lived token is minted per caller |
 
 JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key). JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
 
@@ -228,7 +228,32 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
 3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`, tagged with the caller's role name (`FEDERATION_USER_TAG_KEY`) and project (`FEDERATION_PROJECT_TAG_KEY`).
 4. Exchanges the token at `https://<host>/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
-The result is cached until the earliest of `CACHE_DURATION`, the caller's credential expiry, and five minutes before the token expires. Concurrent cache misses for one payload share a single mint per Portunus process. Every exchange uses a freshly issued STS token.
+Every exchange uses a freshly issued STS token.
+
+#### `gcp_workload_identity`
+
+```json
+{
+  "type": "gcp_workload_identity",
+  "host": "aiplatform.googleapis.com",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-grant/example-grant@projects.example",
+  "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-provider",
+  "service_account": "example-sa@example-project.iam.gserviceaccount.com",
+  "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+  "token_lifetime_seconds": 3600
+}
+```
+
+`scopes` (default shown), `token_lifetime_seconds` (60–3600, default 3600) and `signing_key` are optional. `audience` must be a pool provider resource name in the form shown and `service_account` an email address. Steps 1 and 2 are as for `anthropic_wif`; then Portunus:
+
+3. Assumes the federation role with the caller's own credentials, as above. No STS web identity token is issued: Portunus signs an AWS `GetCallerIdentity` request for `sts.<region>.amazonaws.com` with the session's credentials (SigV4, using [google-auth](https://github.com/googleapis/google-auth-library-python)'s request signer and the SDK's configured region, `AWS_DEFAULT_REGION`, which must be set for this type). The request is bound to `audience` through a signed `x-goog-cloud-target-resource` header.
+4. Exchanges the signed request at `https://sts.googleapis.com/v1/token` for a federated token for `audience`, then calls `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/<service_account>:generateAccessToken` with `scopes` and `token_lifetime_seconds`. The access token is returned with `output_header: "authorization"` and `output_prefix: "Bearer "`.
+
+Google verifies the signed request against AWS itself, so the federation role needs no IAM permissions for this type. The workload identity pool provider's attribute condition sees the assumed-role ARN (`arn:aws:sts::<account>:assumed-role/<role name>/<caller role name>`, which drops the IAM path), and the service account must grant `roles/iam.workloadIdentityUser` to the matching pool principal. Both are deployment concerns.
+
+#### Caching and the federation role
+
+Minted results are cached until the earliest of `CACHE_DURATION`, the caller's credential expiry, and five minutes before the token expires. Concurrent cache misses for one payload share a single mint per Portunus process.
 
 The federation role itself (trust policy, identity policy, who may assume it) is a deployment concern. The CLI's default session policy allows `sts:AssumeRole` on `arn:aws:iam::<caller account>:role/portunus-fed/*`; pass `--federation-role-path` if the deployment uses a different path.
 

@@ -582,13 +582,11 @@ class MintSecretBase(BaseModel):
             proxy's target like the static ``host`` field.
         federation_role_arn: IAM role whose trust policy admits the caller.
             Must sit under the deployment's federation role path.
-        token_duration_seconds: Cap on the STS identity token lifetime.
         signing_key: Request signing key, if the provider requires one.
     """
 
     host: str = Field(min_length=1)
     federation_role_arn: str = Field(min_length=1)
-    token_duration_seconds: int = Field(default=3600, ge=60, le=3600)
     signing_key: Optional[SigningKey] = None
 
 
@@ -598,6 +596,9 @@ class AnthropicWifSecret(MintSecretBase):
     The federation session requests an STS web identity token for ``audience``
     and exchanges it at ``https://<host>/v1/oauth/token`` (RFC 7523 JWT
     bearer grant) using the identifiers below.
+
+    Attributes:
+        token_duration_seconds: Cap on the STS identity token lifetime.
     """
 
     type: Literal["anthropic_wif"]
@@ -606,12 +607,51 @@ class AnthropicWifSecret(MintSecretBase):
     service_account_id: str = Field(min_length=1)
     workspace_id: str = Field(min_length=1)
     audience: str = Field(default="https://api.anthropic.com", min_length=1)
+    token_duration_seconds: int = Field(default=3600, ge=60, le=3600)
 
 
-# Every secret shape. A new mint provider (e.g. gcp_workload_identity)
-# subclasses MintSecretBase, joins this union, and gets an exchange branch in
+GCP_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+# Workload identity pool providers are always project-number scoped and global.
+GCP_POOL_PROVIDER_PATTERN = (
+    r"^//iam\.googleapis\.com/projects/\d+/locations/global/"
+    r"workloadIdentityPools/[^/\s]+/providers/[^/\s]+$"
+)
+# Email shape only; the value is interpolated into the impersonation URL path.
+GCP_SERVICE_ACCOUNT_PATTERN = r"^[^\s/@:]+@[^\s/@:]+$"
+
+
+class GcpWorkloadIdentitySecret(MintSecretBase):
+    """Mint a Google service-account access token via workload identity federation.
+
+    The federation session's credentials sign an AWS ``GetCallerIdentity``
+    request, which Google STS exchanges for a federated token for
+    ``audience``; that token then impersonates ``service_account`` through the
+    IAM Credentials ``generateAccessToken`` API.
+
+    Attributes:
+        audience: Full resource name of the workload identity pool provider,
+            ``//iam.googleapis.com/projects/<number>/locations/global/``
+            ``workloadIdentityPools/<pool>/providers/<provider>``.
+        service_account: Email of the service account to impersonate.
+        scopes: OAuth scopes requested for the access token.
+        token_lifetime_seconds: Requested access token lifetime.
+    """
+
+    type: Literal["gcp_workload_identity"]
+    audience: str = Field(pattern=GCP_POOL_PROVIDER_PATTERN)
+    service_account: str = Field(pattern=GCP_SERVICE_ACCOUNT_PATTERN)
+    scopes: list[Annotated[str, Field(min_length=1)]] = Field(
+        default=[GCP_CLOUD_PLATFORM_SCOPE], min_length=1
+    )
+    token_lifetime_seconds: int = Field(default=3600, ge=60, le=3600)
+
+
+# Every secret shape. A new mint provider subclasses MintSecretBase, joins this
+# union, and gets an exchange branch in
 # services.federation_service.TokenMintService.
-SecretsManagerSecret = Union[SecretsManagerAuthPayload, AnthropicWifSecret]
+SecretsManagerSecret = Union[
+    SecretsManagerAuthPayload, AnthropicWifSecret, GcpWorkloadIdentitySecret
+]
 TypedSecret = Annotated[SecretsManagerSecret, Field(discriminator="type")]
 """SecretsManagerSecret discriminated on ``type``, for validating JSON input."""
 

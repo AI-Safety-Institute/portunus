@@ -31,6 +31,7 @@ dependencies = [
     # automatically — update that ignore rule if this pin changes.
     "uvicorn>=0.29.0,<0.47",
     "Brotli>=1.1.0,<2",
+    "google-auth>=2.58.0,<3",
 ]
 
 [dependency-groups]
