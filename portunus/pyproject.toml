@@ -31,6 +31,9 @@ dependencies = [
     # automatically — update that ignore rule if this pin changes.
     "uvicorn>=0.29.0,<0.47",
     "Brotli>=1.1.0,<2",
+    # >=2.29.0: RequestSigner.get_request_options takes AwsSecurityCredentials
+    # (earlier releases took a dict).
+    "google-auth>=2.29.0,<3",
 ]
 
 [dependency-groups]
