@@ -38,9 +38,10 @@ This repo implements a secure API key proxy system with two main components:
    - Retrieves API key from AWS Secrets Manager via `services.aws_service.AwsService`
    - Publishes metadata (principal info) to Kinesis Data Streams for audit trail
    - Returns formatted API key with principal info
-4. Proxy replaces original authorization header with actual API key
-   - `request_handle:headers():replace(API_KEY_HEADER, api_key)`
-   - For testing compatibility, the Bearer prefix is not added to the API key
+4. Proxy puts the real API key in exactly one upstream header
+   - `portunus:apply_upstream_auth(request_handle, auth_response)` in `lua.lua`
+   - The header is the response's optional `output_header` (else `API_KEY_HEADER`), the value is the optional `output_prefix` (else `API_KEY_PREFIX`) followed by the key
+   - Every other header in `KNOWN_AUTH_HEADERS`, plus the inbound `API_KEY_HEADER`, is removed from the upstream request
 5. Proxy forwards the modified request to target API
 6. Target API processes request using the real API key
 
@@ -77,13 +78,14 @@ The proxy is designed to handle streaming responses efficiently:
 ### Security Model
 Portunus service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay) do not authenticate callers. The proxy sends `PORTUNUS_API_KEY` in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`) on every service call, but Portunus does not validate it — deployments must enforce access in front of the service (authenticating sidecar and/or network isolation). Documented in README "Security Model".
 
-Logging captures full request/response bodies, headers, and trailers verbatim — everything except the provider API key header (`API_KEY_HEADER`), which is dropped in Lua before logging because the real upstream key is substituted into it. This is intentional (comprehensive audit trail); no secret redaction happens in Portunus. Any redaction/filtering/access-tiering is a downstream (ETL/query-layer) concern. Documented in README "Security Model" → "Logged data".
+Logging captures full request/response bodies, headers, and trailers verbatim — everything except the headers that can carry a credential (`API_KEY_HEADER`, the upstream auth header, and every name in `KNOWN_AUTH_HEADERS`), which are dropped in Lua before logging. The WebSocket relay applies the same exclusions to logged upgrade headers. This is intentional (comprehensive audit trail); no secret redaction happens in Portunus. Any redaction/filtering/access-tiering is a downstream (ETL/query-layer) concern. Documented in README "Security Model" → "Logged data".
 
 ### Environment Variables
 - `PORTUNUS_API_KEY`: Shared secret the proxy attaches to Portunus service calls (validated by the deployment layer, not by Portunus)
 - `PORTUNUS_API_KEY_HEADER`: Header carrying the shared secret (default: "x-api-key")
 - `API_KEY_HEADER`: Header name to use for API key (default: "authorization")
 - `API_KEY_PREFIX`: Prefix for API key (default: "Bearer ")
+- `KNOWN_AUTH_HEADERS`: Comma-separated headers that may carry an upstream credential; all but the one the proxy sets are removed upstream and all are excluded from header logging (default: "authorization,x-api-key,x-goog-api-key,api-key")
 - `RATE_LIMIT_PERCENT_ENABLED`: Enable rate limiting (0-100 percentage of traffic)
 - `RATE_LIMIT_INTERVAL_SECONDS`: Time window for rate limiting (seconds)
 - `RATE_LIMIT_REQUESTS_PER_INTERVAL`: Maximum number of requests allowed per interval

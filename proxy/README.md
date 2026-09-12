@@ -29,7 +29,7 @@ proxy/
    - Extracts auth payload from header
    - Calls Portunus `/authorise` endpoint (with caching)
    - Retrieves real API key from response
-   - Replaces auth header with real API key
+   - Sets the upstream auth header (the response's `output_header`, else `API_KEY_HEADER`) to the real API key and removes the other `KNOWN_AUTH_HEADERS`
    - Optionally signs request (Anthropic signature format)
 3. **Envoy** forwards modified request to target API
 4. **Target API** processes request with real credentials
@@ -43,6 +43,7 @@ Configuration is injected via environment variables using `envsubst` in `entrypo
 # Core settings
 API_KEY_HEADER=authorization
 API_KEY_PREFIX="Bearer "
+KNOWN_AUTH_HEADERS=authorization,x-api-key,x-goog-api-key,api-key
 TARGET_HOST=api.example.com
 TARGET_HOST_USE_TLS=true
 
