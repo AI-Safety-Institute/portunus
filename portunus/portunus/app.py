@@ -604,6 +604,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Redis connections")
     await state_service.close_redis_client()
     logger.info("Redis connections closed")
+    await auth_service.mint_service.aclose()
 
 
 portunus = FastAPI(title="Portunus", lifespan=lifespan)

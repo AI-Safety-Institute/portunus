@@ -12,9 +12,10 @@ It consists of two main components:
     - The payload is a base64-encoded JSON blob containing temporary AWS credentials and a reference to a Secrets Manager secret ARN
   - A Lua filter within Envoy forwards this payload to the Portunus `/authorise` endpoint
   - Portunus uses the credentials from the payload to fetch the referenced secret, which should contain the actual API key. Network restrictions prevent clients from doing this directly.
-    - Secrets can be stored in two formats:
+    - Secrets can be stored in three formats (see [Secret formats](#secret-formats)):
       - **Plaintext**: `"sk-1234567890abcdef"` (works with any proxy target)
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
+      - **Minted token**: `{"type":"anthropic_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
   - If successful, Portunus returns the real API key to the Envoy instance
   - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default) and removes any other credential headers before allowing the request to proceed
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
@@ -186,6 +187,50 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `KINESIS_RESPONSE_HEADERS_STREAM` | Kinesis stream for response headers | - |
 | `KINESIS_RESPONSE_BODY_STREAM` | Kinesis stream for response bodies | - |
 | `KINESIS_RESPONSE_TRAILERS_STREAM` | Kinesis stream for response trailers | - |
+| `FEDERATION_ALLOWED_ACCOUNT_IDS` | Comma-separated AWS account IDs whose federation roles a secret may name. Unset disables token minting | - |
+| `FEDERATION_ROLE_PATH_PREFIX` | IAM path federation role ARNs must start with | `/portunus-fed/` |
+| `FEDERATION_STS_ENDPOINT_URL` | STS endpoint for federation calls. Defaults to `AWS_ENDPOINT_URL` if set, else `https://sts.<region>.amazonaws.com` | - |
+| `FEDERATION_USER_TAG_KEY` | Session tag key carrying the caller's IAM role name on identity tokens | `portunus:user` |
+| `FEDERATION_PROJECT_TAG_KEY` | Session tag key carrying the caller's project on identity tokens | `portunus:project` |
+
+### Secret formats
+
+A secret referenced by a payload is one of:
+
+| Format | Example | Behaviour |
+|---|---|---|
+| Plaintext | `sk-1234567890abcdef` | Used as the key for any target |
+| Stored key with target check | `{"secret": "sk-...", "host": "api.example.com", "signing_key": {...}}` | Used only when the proxy's target matches `host`; `signing_key` is optional |
+| Minted token | `{"type": "anthropic_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
+
+JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key). JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
+
+#### `anthropic_wif`
+
+```json
+{
+  "type": "anthropic_wif",
+  "host": "api.anthropic.com",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-grant/example-grant@projects.example",
+  "federation_rule_id": "fr_example",
+  "organization_id": "org_example",
+  "service_account_id": "sa_example",
+  "workspace_id": "ws_example",
+  "audience": "https://api.anthropic.com",
+  "token_duration_seconds": 3600
+}
+```
+
+`audience` (default shown), `token_duration_seconds` (60–3600, default 3600) and `signing_key` are optional. On a cache miss Portunus:
+
+1. Verifies the caller with STS and fetches the secret, as for stored keys.
+2. Checks `federation_role_arn` is in `FEDERATION_ALLOWED_ACCOUNT_IDS` and under `FEDERATION_ROLE_PATH_PREFIX`. Nothing else is called if this fails.
+3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`, tagged with the caller's role name (`FEDERATION_USER_TAG_KEY`) and project (`FEDERATION_PROJECT_TAG_KEY`).
+4. Exchanges the token at `https://<host>/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
+
+The result is cached until the earliest of `CACHE_DURATION`, the caller's credential expiry, and five minutes before the token expires. Concurrent cache misses for one payload share a single mint per Portunus process. Every exchange uses a freshly issued STS token.
+
+The federation role itself (trust policy, identity policy, who may assume it) is a deployment concern. The CLI's default session policy allows `sts:AssumeRole` on `arn:aws:iam::<caller account>:role/portunus-fed/*`; pass `--federation-role-path` if the deployment uses a different path.
 
 ## Local Development
 
@@ -220,7 +265,9 @@ You can use `encode_payload()` to construct an authorization payload programmati
 from portunus.services.payload_service import encode_payload
 
 # credentials dict from STS assume-role or get-session-token
-payload = encode_payload(credentials, "arn:aws:secretsmanager:eu-west-2:123456789012:secret:my-api-key")
+payload = encode_payload(
+    credentials, "arn:aws:secretsmanager:eu-west-2:123456789012:secret:my-api-key"
+)
 ```
 
 ### Running Tests
