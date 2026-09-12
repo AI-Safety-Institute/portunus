@@ -107,6 +107,35 @@ def test_auth_succeeds_with_plain_text_key(
     assert response_data["headers"]["Authorization"] == api_key_prefix + docker_setup
 
 
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_client_credential_headers_are_stripped(
+    api_key_prefix: str, api_key_header: str, docker_setup
+):
+    """Other known credential headers sent by the client never reach the upstream."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    response = requests.get(
+        "http://localhost:8888/get",
+        headers={
+            api_key_header: f"{api_key_prefix}{payload}",
+            "x-api-key": "client-supplied",
+            "x-goog-api-key": "client-supplied",
+            "api-key": "client-supplied",
+            "x-not-a-credential": "kept",
+        },
+    )
+
+    assert response.status_code == 200, response.content
+    upstream_headers = {k.lower(): v for k, v in response.json()["headers"].items()}
+    assert upstream_headers["authorization"] == api_key_prefix + docker_setup
+    assert upstream_headers["x-not-a-credential"] == "kept"
+    for name in ("x-api-key", "x-goog-api-key", "api-key"):
+        assert name not in upstream_headers
+
+
 # Manually test with:
 # curl -X POST http://localhost:8888/post -H "Authorization: Bearer eyJjcmVkZW50aWFscyI6eyJhY2Nlc3Nfa2V5X2lkIjoiQUtJQVRFU1QiLCJzZWNyZXRfYWNjZXNzX2tleSI6IlNFQ1JFVFRFU1QiLCJzZXNzaW9uX3Rva2VuIjoiVEVTVFRPS0VOIn0sInNlY3JldF9hcm4iOiJhcm46YXdzOnNlY3JldHNtYW5hZ2VyOnVzLWVhc3QtMToxMjM0NTY3ODkwMTI6c2VjcmV0OnRlc3Qtc2VjcmV0In0=" -H "Content-Type: application/json" -d '{"key3":   "value3"   , "key1":"value1","key2" : "value2" }' # noqa: E501
 @pytest.mark.parametrize(

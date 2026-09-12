@@ -9,6 +9,7 @@ local logging = proxy_utils.logging
 local config = {
 	api_key_header = "${API_KEY_HEADER}",
 	api_key_prefix = "${API_KEY_PREFIX}",
+	known_auth_headers = "${KNOWN_AUTH_HEADERS}",
 	portunus_host = "${PORTUNUS_HOST}",
 	portunus_api_key = "${PORTUNUS_API_KEY}",
 	portunus_api_key_header = "${PORTUNUS_API_KEY_HEADER}",
@@ -75,7 +76,7 @@ function envoy_on_request(request_handle)
 	-- 4. Extracts authorization payload from headers
 	-- 5. Calls Portunus service to retrieve real API key
 	-- 6. Handles errors from Portunus service
-	-- 7. Replaces authorization header with real API key
+	-- 7. Sets the upstream auth header to the real credential and strips other credential headers
 	-- 8. Adds Content-Digest and Signature headers if applicable
 	-- 9. Logs request body, headers, and trailers
 
@@ -180,9 +181,8 @@ function envoy_on_request(request_handle)
 			:dynamicMetadata()
 			:set("envoy.filters.http.lua", "request_id", auth_response.request_id)
 
-		-- Replace the authorization header with the real API key retrieved from Secrets Manager
-		-- Note: The header originally contained config.api_key_prefix + auth payload
-		request_handle:headers():replace(config.api_key_header, config.api_key_prefix .. auth_response.api_key)
+		-- Also strips the inbound header that held the auth payload when it differs.
+		local upstream_auth_header = portunus:apply_upstream_auth(request_handle, auth_response)
 
 		-- Add Content-Digest and Signature headers if present
 		request_handle:headers():replace("Content-Digest", content_digest)
@@ -194,13 +194,8 @@ function envoy_on_request(request_handle)
 		-- Log the request body
 		portunus:log_request_body(request_handle, auth_response.request_id, full_request_body)
 
-		-- Log request headers but exclude api_key_header for security
-		local request_headers = {}
-		for k, v in pairs(request_handle:headers()) do
-			if k ~= config.api_key_header then
-				request_headers[k] = v
-			end
-		end
+		-- Log request headers, excluding every header that can carry a credential
+		local request_headers = portunus:strip_credential_headers(request_handle:headers(), upstream_auth_header)
 		portunus:log_request_headers(
 			request_handle,
 			auth_response.request_id,

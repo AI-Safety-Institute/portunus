@@ -29,4 +29,19 @@ function utils.get_full_request_body(request_handle)
 	return full_request_body
 end
 
+--- Parses a comma-separated list of header names into a lookup set
+-- Names are trimmed and lowercased; empty entries are skipped.
+-- @param list Comma-separated header names (nil is treated as empty)
+-- @return set Table mapping each lowercased header name to true
+function utils.parse_header_set(list)
+	local set = {}
+	for name in (list or ""):gmatch("[^,]+") do
+		local trimmed = name:match("^%s*(.-)%s*$"):lower()
+		if trimmed ~= "" then
+			set[trimmed] = true
+		end
+	end
+	return set
+end
+
 return utils
