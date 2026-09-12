@@ -1,6 +1,7 @@
 """Tests for parsing typed Secrets Manager secrets."""
 
 import json
+import logging
 
 import pytest
 
@@ -128,6 +129,19 @@ class TestParseSecret:
     def test_unknown_type_raises(self):
         with pytest.raises(AuthenticationError):
             parse_secret('{"type": "gcp_workload_identity", "host": "x"}')
+
+    def test_validation_logs_omit_secret_contents(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
+
+        with pytest.raises(AuthenticationError):
+            parse_secret('{"type": "static", "apiKey": "sk-live-typed"}')
+        with pytest.raises(AuthenticationError):
+            parse_secret('{"type": "other", "secret": "sk-live-unknown-type"}')
+        parse_secret('{"apiKey": "sk-live-untyped"}')
+
+        assert "static.secret: missing" in caplog.text
+        for value in ("sk-live-typed", "sk-live-unknown-type", "sk-live-untyped"):
+            assert value not in caplog.text
 
 
 class TestValidateSecretForMintTypes:

@@ -25,6 +25,18 @@ logger = logging.getLogger("api.access")
 _typed_secret: TypeAdapter[SecretsManagerSecret] = TypeAdapter(TypedSecret)
 
 
+def _validation_summary(error: ValidationError) -> str:
+    """Field paths and error types only.
+
+    ``str(error)`` embeds each failing input value, and for a missing field or
+    an unknown ``type`` that is the whole secret.
+    """
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
+        for item in error.errors(include_input=False, include_url=False)
+    )
+
+
 def parse_secret(secret_string: str) -> SecretsManagerSecret:
     """Parse a raw Secrets Manager value into a typed secret.
 
@@ -48,18 +60,23 @@ def parse_secret(secret_string: str) -> SecretsManagerSecret:
             return SecretsManagerAuthPayload.model_validate(data)
         except ValidationError as e:
             logger.info(
-                "JSON secret with unrecognised schema, using JSON as API key",
-                exc_info=e,
+                "JSON secret with unrecognised schema, using JSON as API key "
+                f"({_validation_summary(e)})"
             )
             return SecretsManagerAuthPayload(api_key=secret_string)
 
     try:
         return _typed_secret.validate_python(data)
     except ValidationError as e:
-        logger.error(f"Secret of type {data.get('type')!r} failed validation: {e}")
+        logger.error(
+            f"Secret of type {data.get('type')!r} failed validation: "
+            f"{_validation_summary(e)}"
+        )
+        # Not chained: the ValidationError holds the secret's contents and
+        # would print them in any traceback.
         raise AuthenticationError(
             "Secret has an unsupported type or invalid fields"
-        ) from e
+        ) from None
 
 
 class SecretValidationService:

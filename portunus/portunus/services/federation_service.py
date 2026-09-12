@@ -391,14 +391,14 @@ class TokenMintService:
             self.federation_config.allowed_account_ids,
             self.federation_config.role_path_prefix,
         )
+        if not isinstance(secret, AnthropicWifSecret):
+            raise AuthenticationError(
+                f"No token exchange for secret type {type(secret).__name__}"
+            )
         identity = await self.sts.assume_federation_role(
             credentials, principal, secret.federation_role_arn
         )
-        if isinstance(secret, AnthropicWifSecret):
-            proof = await self.sts.web_identity_token(
-                identity, secret.audience, secret.token_duration_seconds
-            )
-            return await self.anthropic.exchange(proof.token, secret)
-        raise AuthenticationError(
-            f"No token exchange for secret type {type(secret).__name__}"
+        proof = await self.sts.web_identity_token(
+            identity, secret.audience, secret.token_duration_seconds
         )
+        return await self.anthropic.exchange(proof.token, secret)

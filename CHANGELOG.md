@@ -48,6 +48,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `AuthPayload.from_contents` ignored the credential expiration that
   `encode_payload` (and the CLI) write at the top level of the payload, so
   `seconds_until_expiration()` was always None. Both locations are now read.
+- A JSON secret that failed schema validation was logged with the pydantic
+  error, which embeds the secret's contents. Only field paths and error
+  types are logged now.
 - The WebSocket relay forwarded the proxy's shared-secret header
   (`PORTUNUS_API_KEY_HEADER`, default `x-api-key`), which Envoy adds to every
   upgrade request it routes to Portunus, to the upstream and included it in the
