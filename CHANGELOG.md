@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- `/authorise` responses may carry `output_header` and `output_prefix`, letting
+  the backend choose which upstream header receives the credential and with
+  what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
+  `API_KEY_PREFIX`. The WebSocket relay honours the same fields (default
+  `Authorization: Bearer`). Cached authorization results carry both fields.
+  (#136)
+
+### Changed
+- The proxy removes every header in `KNOWN_AUTH_HEADERS` (new proxy env var,
+  default `authorization,x-api-key,x-goog-api-key,api-key`) other than the one
+  it sets from the upstream request, and excludes all of them from header
+  logging. The WebSocket relay does the same for forwarded and logged upgrade
+  headers. Previously only `API_KEY_HEADER` was excluded from logs and
+  client-supplied copies of other credential headers were forwarded upstream.
+  (#136)
+
+### Fixed
+- The WebSocket relay forwarded the proxy's shared-secret header
+  (`PORTUNUS_API_KEY_HEADER`, default `x-api-key`), which Envoy adds to every
+  upgrade request it routes to Portunus, to the upstream and included it in the
+  logged upgrade headers. With the default header name it is now stripped from
+  both. (#136)
+
 ## [0.9.0] - 2026-09-11
 
 ### Added

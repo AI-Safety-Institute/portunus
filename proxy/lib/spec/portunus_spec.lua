@@ -16,12 +16,37 @@ describe("proxy_utils.portunus", function()
 			portunus_api_key_header = "x-api-key",
 			api_key_header = "authorization",
 			api_key_prefix = "Bearer ",
+			known_auth_headers = "authorization,x-api-key,x-goog-api-key,api-key",
 			target_host = "api.example.com",
 			signing_key_id = "",
 			kms_key_arn = "",
 		}
 		portunus_client = portunus_module.new(config)
 	end)
+
+	--- Builds a fake Envoy headers object backed by a lowercased store
+	local function fake_headers(initial)
+		local store = {}
+		for name, value in pairs(initial or {}) do
+			store[name:lower()] = value
+		end
+		local headers = { store = store }
+		headers.remove = spy.new(function(_, name)
+			store[name:lower()] = nil
+		end)
+		headers.replace = spy.new(function(_, name, value)
+			store[name:lower()] = value
+		end)
+		return headers
+	end
+
+	local function handle_for(headers)
+		return {
+			headers = function()
+				return headers
+			end,
+		}
+	end
 
 	-- ========================================
 	-- Pure Logic Tests (no Envoy dependencies)
@@ -131,6 +156,16 @@ describe("proxy_utils.portunus", function()
 			assert.is_nil(data.signature)
 		end)
 
+		it("should treat null output fields as absent", function()
+			local body = '{"api_key": "sk", "request_id": "req", "output_header": null, "output_prefix": null}'
+
+			local data, err = portunus_client:parse_authorization_response(body)
+
+			assert.is_nil(err)
+			assert.is_nil(data.output_header)
+			assert.is_nil(data.output_prefix)
+		end)
+
 		it("should return error for invalid responses", function()
 			local data, err = portunus_client:parse_authorization_response("not json")
 			assert.is_nil(data)
@@ -143,6 +178,171 @@ describe("proxy_utils.portunus", function()
 			data, err = portunus_client:parse_authorization_response('{"api_key": "sk-test-789"}')
 			assert.is_nil(data)
 			assert.equals("Invalid response from auth service", err)
+		end)
+	end)
+
+	describe("new - credential header set", function()
+		it("should lowercase the known auth headers and include api_key_header", function()
+			local client = portunus_module.new({
+				api_key_header = "X-Custom-Auth",
+				api_key_prefix = "",
+				known_auth_headers = "Authorization, x-api-key",
+			})
+
+			assert.same({
+				authorization = true,
+				["x-api-key"] = true,
+				["x-custom-auth"] = true,
+			}, client.credential_headers)
+			assert.equals("x-custom-auth", client.request_api_key_header)
+		end)
+
+		it("should fall back to only api_key_header when the known list is empty", function()
+			local client = portunus_module.new({
+				api_key_header = "authorization",
+				api_key_prefix = "Bearer ",
+				known_auth_headers = "",
+			})
+
+			assert.same({ authorization = true }, client.credential_headers)
+		end)
+	end)
+
+	describe("resolve_upstream_auth - header and prefix selection", function()
+		it("should default to the configured header and prefix", function()
+			local header, value = portunus_client:resolve_upstream_auth({ api_key = "sk-1", request_id = "r" })
+
+			assert.equals("authorization", header)
+			assert.equals("Bearer sk-1", value)
+		end)
+
+		it("should honour output_header and output_prefix", function()
+			local header, value = portunus_client:resolve_upstream_auth({
+				api_key = "sk-1",
+				request_id = "r",
+				output_header = "X-Goog-Api-Key",
+				output_prefix = "Token ",
+			})
+
+			assert.equals("x-goog-api-key", header)
+			assert.equals("Token sk-1", value)
+		end)
+
+		it("should treat an empty output_header as absent", function()
+			local header = portunus_client:resolve_upstream_auth({
+				api_key = "sk-1",
+				request_id = "r",
+				output_header = "",
+			})
+
+			assert.equals("authorization", header)
+		end)
+
+		it("should treat an empty output_prefix as no prefix", function()
+			local header, value = portunus_client:resolve_upstream_auth({
+				api_key = "sk-1",
+				request_id = "r",
+				output_prefix = "",
+			})
+
+			assert.equals("authorization", header)
+			assert.equals("sk-1", value)
+		end)
+	end)
+
+	describe("apply_upstream_auth - upstream credential placement", function()
+		local client_headers = {
+			authorization = "Bearer payload",
+			["x-api-key"] = "client-supplied",
+			["x-goog-api-key"] = "client-supplied",
+			["api-key"] = "client-supplied",
+			["content-type"] = "application/json",
+		}
+
+		it("should replace api_key_header and remove the other credential headers by default", function()
+			local headers = fake_headers(client_headers)
+
+			local result = portunus_client:apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
+
+			assert.equals("authorization", result)
+			assert.same({
+				authorization = "Bearer sk-1",
+				["content-type"] = "application/json",
+			}, headers.store)
+			assert.spy(headers.remove).was_not.called_with(match._, "authorization")
+			assert.spy(headers.replace).was.called(1)
+		end)
+
+		it("should move the credential to output_header and remove the inbound header", function()
+			local headers = fake_headers(client_headers)
+
+			local result = portunus_client:apply_upstream_auth(handle_for(headers), {
+				api_key = "sk-1",
+				request_id = "r",
+				output_header = "x-goog-api-key",
+				output_prefix = "",
+			})
+
+			assert.equals("x-goog-api-key", result)
+			assert.same({
+				["x-goog-api-key"] = "sk-1",
+				["content-type"] = "application/json",
+			}, headers.store)
+			assert.spy(headers.remove).was.called_with(match._, "authorization")
+		end)
+
+		it("should remove an api_key_header that is not in the known list", function()
+			local client = portunus_module.new({
+				api_key_header = "x-custom-auth",
+				api_key_prefix = "",
+				known_auth_headers = "authorization,x-api-key",
+			})
+			local headers = fake_headers({
+				["x-custom-auth"] = "payload",
+				["x-api-key"] = "client-supplied",
+				accept = "*/*",
+			})
+
+			client:apply_upstream_auth(handle_for(headers), {
+				api_key = "sk-1",
+				request_id = "r",
+				output_header = "authorization",
+				output_prefix = "Bearer ",
+			})
+
+			assert.same({
+				authorization = "Bearer sk-1",
+				accept = "*/*",
+			}, headers.store)
+		end)
+	end)
+
+	describe("strip_credential_headers - header logging filter", function()
+		it("should drop credential headers case-insensitively and keep the rest", function()
+			local result = portunus_client:strip_credential_headers({
+				[":path"] = "/v1/messages",
+				Authorization = "Bearer sk-1",
+				["X-Api-Key"] = "sk-1",
+				["x-goog-api-key"] = "sk-1",
+				["api-key"] = "sk-1",
+				["content-type"] = "application/json",
+				["user-agent"] = "client",
+			}, "authorization")
+
+			assert.same({
+				[":path"] = "/v1/messages",
+				["content-type"] = "application/json",
+				["user-agent"] = "client",
+			}, result)
+		end)
+
+		it("should also drop an upstream auth header outside the known list", function()
+			local result = portunus_client:strip_credential_headers({
+				["x-custom-token"] = "sk-1",
+				["content-type"] = "application/json",
+			}, "x-custom-token")
+
+			assert.same({ ["content-type"] = "application/json" }, result)
 		end)
 	end)
 

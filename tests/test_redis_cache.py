@@ -225,11 +225,13 @@ async def test_cache_and_retrieve_with_none_signing_key(docker_setup, request):
     assert result is True, "Failed to cache auth response"
 
     # Now retrieve it - this is where the bug was occurring
-    cached_response = await _cache_service.get_cached_auth_response(payload)
+    cached_response = await _cache_service.get_cached_auth_result(payload)
 
     # Verify we got the data back without error
     assert cached_response is not None, "Failed to retrieve cached auth response"
-    retrieved_api_key, retrieved_principal_info, retrieved_signing_key = cached_response
+    retrieved_api_key = cached_response.api_key
+    retrieved_principal_info = cached_response.principal_info
+    retrieved_signing_key = cached_response.signing_key
 
     # Verify the data is correct
     assert retrieved_api_key == api_key, "Retrieved API key doesn't match"
@@ -277,11 +279,13 @@ async def test_cache_and_retrieve_with_signing_key(docker_setup, request):
     assert result is True, "Failed to cache auth response"
 
     # Retrieve it
-    cached_response = await _cache_service.get_cached_auth_response(payload)
+    cached_response = await _cache_service.get_cached_auth_result(payload)
 
     # Verify we got the data back
     assert cached_response is not None, "Failed to retrieve cached auth response"
-    retrieved_api_key, retrieved_principal_info, retrieved_signing_key = cached_response
+    retrieved_api_key = cached_response.api_key
+    retrieved_principal_info = cached_response.principal_info
+    retrieved_signing_key = cached_response.signing_key
 
     # Verify the data is correct
     assert retrieved_api_key == api_key, "Retrieved API key doesn't match"

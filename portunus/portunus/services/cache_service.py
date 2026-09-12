@@ -8,7 +8,7 @@ and retrieving authentication responses in Redis.
 import hashlib
 import json
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 from portunus.config import config
 from portunus.exceptions import CacheError
@@ -52,20 +52,16 @@ class CacheService:
         """
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    async def get_cached_auth_response(
-        self, payload: str
-    ) -> Optional[Tuple[str, PrincipalInfo, Optional[SigningKey]]]:
+    async def get_cached_auth_result(self, payload: str) -> Optional[AuthResult]:
         """
-        Get an authentication response from the cache.
-
-        Retrieves the API key and principal information for a cached authentication
-        response, using the payload as a lookup key.
+        Get an authentication result from the cache.
 
         Args:
             payload: The payload used as a lookup key.
 
         Returns:
-            A tuple of (api_key, principal_info) if found, None otherwise.
+            AuthResult if found, None otherwise. Entries written before
+            output_header/output_prefix existed load with both set to None.
 
         Raises:
             CacheError: If there's an error accessing the cache.
@@ -81,24 +77,29 @@ class CacheService:
 
             if cached_data:
                 logger.info(f"Cache hit for key {cache_key[:8]}...")
-                # Deserialize the JSON data
                 auth_response = json.loads(cached_data)
 
-                # Convert the principal_info dict back to a PrincipalInfo object
-                principal_info_dict = auth_response["principal_info"]
-                principal_info = PrincipalInfo.from_dict(principal_info_dict)
+                principal_info = PrincipalInfo.from_dict(
+                    auth_response["principal_info"]
+                )
 
+                signing_key_data = auth_response.get("signing_key")
                 signing_key = (
                     SigningKey(
-                        provider_id=auth_response["signing_key"]["provider_id"],
-                        kms_key_arn=auth_response["signing_key"]["kms_key_arn"],
+                        provider_id=signing_key_data["provider_id"],
+                        kms_key_arn=signing_key_data["kms_key_arn"],
                     )
-                    if "signing_key" in auth_response
-                    and auth_response["signing_key"] is not None
+                    if signing_key_data is not None
                     else None
                 )
 
-                return auth_response["api_key"], principal_info, signing_key
+                return AuthResult(
+                    api_key=auth_response["api_key"],
+                    signing_key=signing_key,
+                    principal_info=principal_info,
+                    output_header=auth_response.get("output_header"),
+                    output_prefix=auth_response.get("output_prefix"),
+                )
 
             logger.info(f"Cache miss for key {cache_key[:8]}...")
             return None
@@ -109,24 +110,6 @@ class CacheService:
             logger.error(f"Error getting from cache: {e}")
             raise CacheError(f"Failed to retrieve from cache: {e}")
 
-    async def get_cached_auth_result(self, payload: str) -> Optional[AuthResult]:
-        """
-        Get an authentication result from the cache.
-
-        Args:
-            payload: The payload used as a lookup key.
-
-        Returns:
-            AuthResult object if found, None otherwise.
-        """
-        response = await self.get_cached_auth_response(payload)
-        if response:
-            api_key, principal_info, signing_key = response
-            return AuthResult(
-                api_key=api_key, signing_key=signing_key, principal_info=principal_info
-            )
-        return None
-
     async def cache_auth_response(
         self,
         payload: str,
@@ -134,6 +117,8 @@ class CacheService:
         signing_key: Optional[SigningKey],
         principal_info: PrincipalInfo,
         ttl_seconds: Optional[int] = None,
+        output_header: Optional[str] = None,
+        output_prefix: Optional[str] = None,
     ) -> bool:
         """
         Cache an authentication response including API key and principal info.
@@ -144,6 +129,8 @@ class CacheService:
             signing_key: The request signing key details for this api key.
             principal_info: Principal information to cache and log.
             ttl_seconds: Optional TTL override
+            output_header: Upstream header that should carry the credential
+            output_prefix: Prefix for the credential value
 
         Returns:
             True if successfully cached, False otherwise.
@@ -176,6 +163,8 @@ class CacheService:
                 "api_key": api_key,
                 "principal_info": principal_info_dict,
                 "signing_key": signing_key.to_dict() if signing_key else None,
+                "output_header": output_header,
+                "output_prefix": output_prefix,
             }
 
             result = await client.setex(
@@ -217,6 +206,8 @@ class CacheService:
             auth_result.signing_key,
             auth_result.principal_info,
             ttl_seconds,
+            output_header=auth_result.output_header,
+            output_prefix=auth_result.output_prefix,
         )
 
     @capture_async()

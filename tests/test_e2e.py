@@ -1,13 +1,16 @@
 # disable line length check for this file because many strings are hard to break cleanly
 # ruff: noqa: E501
+import base64
 import json
 import re
+import time
+import uuid
 
 import pytest
 import requests
 
 # Import from conftest
-from conftest import encode_base64
+from conftest import encode_base64, read_kinesis_records
 
 
 def test_custom_header_prefix_on_ping(docker_setup):
@@ -105,6 +108,84 @@ def test_auth_succeeds_with_plain_text_key(
     # The current behavior is just returning the API key without prefix
     # This makes the test pass with the current implementation
     assert response_data["headers"]["Authorization"] == api_key_prefix + docker_setup
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_client_credential_headers_are_stripped(
+    api_key_prefix: str, api_key_header: str, docker_setup
+):
+    """Other known credential headers sent by the client never reach the upstream."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    response = requests.get(
+        "http://localhost:8888/get",
+        headers={
+            api_key_header: f"{api_key_prefix}{payload}",
+            "x-api-key": "client-supplied",
+            "x-goog-api-key": "client-supplied",
+            "api-key": "client-supplied",
+            "x-not-a-credential": "kept",
+        },
+    )
+
+    assert response.status_code == 200, response.content
+    upstream_headers = {k.lower(): v for k, v in response.json()["headers"].items()}
+    assert upstream_headers["authorization"] == api_key_prefix + docker_setup
+    assert upstream_headers["x-not-a-credential"] == "kept"
+    for name in ("x-api-key", "x-goog-api-key", "api-key"):
+        assert name not in upstream_headers
+
+
+def _wait_for_request_headers_record(request_id: str, timeout: float = 30) -> dict:
+    """Poll the request-headers stream until the record for request_id appears."""
+    deadline = time.time() + timeout
+    while True:
+        for record in read_kinesis_records("portunus-stream-request-headers"):
+            if record.get("request_id") == request_id:
+                return record
+        if time.time() > deadline:
+            pytest.fail(f"No request headers record for {request_id} in Kinesis")
+        time.sleep(1)
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_credential_headers_are_not_logged(
+    api_key_prefix: str, api_key_header: str, docker_setup
+):
+    """The logged request headers carry no credential header, by name or value."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    marker = f"marker-{uuid.uuid4()}"
+    response = requests.get(
+        "http://localhost:8888/get",
+        headers={
+            api_key_header: f"{api_key_prefix}{payload}",
+            "x-api-key": "client-supplied",
+            "x-goog-api-key": "client-supplied",
+            "api-key": "client-supplied",
+            "x-test-marker": marker,
+        },
+    )
+    assert response.status_code == 200, response.content
+
+    record = _wait_for_request_headers_record(response.headers["X-Amzn-Trace-Id"])
+    logged = {
+        name.lower(): base64.b64decode(value).decode()
+        for name, value in record["raw_headers"].items()
+    }
+    assert logged["x-test-marker"] == marker
+    for name in ("authorization", "x-api-key", "x-goog-api-key", "api-key"):
+        assert name not in logged
+    for value in logged.values():
+        assert docker_setup not in value
+        assert payload not in value
+        assert "client-supplied" not in value
 
 
 # Manually test with:
