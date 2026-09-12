@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import threading
 import urllib.parse
 from collections.abc import Callable
@@ -12,8 +13,6 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from botocore.exceptions import ClientError
-from google.auth import aws as google_aws
-from google.auth import exceptions as google_exceptions
 
 from portunus.config import FederationConfig
 from portunus.exceptions import (
@@ -32,18 +31,20 @@ from portunus.models import (
 from portunus.services.federation_service import (
     AWS_SUBJECT_TOKEN_TYPE,
     FEDERATION_SESSION_SECONDS,
+    GOOGLE_ACCESS_TOKEN_TYPE,
+    GOOGLE_IAM_SCOPE,
     GOOGLE_STS_TOKEN_URL,
+    GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE,
     IDENTITY_TOKEN_SECONDS,
     JWT_BEARER_GRANT_TYPE,
     AnthropicTokenExchange,
     FederationIdentity,
     GcpTokenExchange,
-    HttpxRequest,
     MintedToken,
-    SessionCredentialsSupplier,
     StsFederationService,
     TokenMintService,
     WebIdentityToken,
+    aws_subject_token,
     caller_project,
     caller_role_name,
     validate_federation_role_arn,
@@ -450,64 +451,57 @@ class TestAnthropicTokenExchange:
             await adapter.exchange("header.payload.signature", _secret())
 
 
-class TestSessionCredentialsSupplier:
-    def test_returns_the_session_credentials_and_region(self):
-        supplier = SessionCredentialsSupplier(_identity().credentials, REGION)
-        context, request = MagicMock(), MagicMock()
+def _decode_subject_token(token: str) -> tuple[dict, dict[str, str]]:
+    """Decode an aws4_request subject token into (request, lower-cased headers)."""
+    request = json.loads(urllib.parse.unquote(token))
+    headers = {h["key"].lower(): h["value"] for h in request["headers"]}
+    return request, headers
 
-        credentials = supplier.get_aws_security_credentials(context, request)
 
-        assert credentials == google_aws.AwsSecurityCredentials(
-            access_key_id="ASIAFED",
-            secret_access_key="fed-secret",
-            session_token="fed-token",
+_SIGV4_AUTHORIZATION = re.compile(
+    r"^AWS4-HMAC-SHA256 Credential=ASIAFED/\d{8}/eu-west-2/sts/aws4_request, "
+    r"SignedHeaders=(?P<signed>[a-z0-9;-]+), Signature=[0-9a-f]{64}$"
+)
+
+
+class TestAwsSubjectToken:
+    def test_is_a_signed_regional_get_caller_identity_request(self):
+        token = aws_subject_token(_identity().credentials, REGION, GCP_AUDIENCE)
+
+        request, headers = _decode_subject_token(token)
+        assert request["method"] == "POST"
+        assert request["url"] == (
+            f"https://sts.{REGION}.amazonaws.com"
+            "?Action=GetCallerIdentity&Version=2011-06-15"
         )
-        assert supplier.get_aws_region(context, request) == REGION
-        request.assert_not_called()
+        assert headers["host"] == f"sts.{REGION}.amazonaws.com"
+        assert headers["x-amz-security-token"] == "fed-token"
+        assert headers["x-goog-cloud-target-resource"] == GCP_AUDIENCE
+        assert re.fullmatch(r"\d{8}T\d{6}Z", headers["x-amz-date"])
+        match = _SIGV4_AUTHORIZATION.fullmatch(headers["authorization"])
+        assert match is not None
+        signed = set(match["signed"].split(";"))
+        assert {"host", "x-amz-date", "x-goog-cloud-target-resource"} <= signed
+        assert "x-amz-security-token" in signed
 
+    def test_never_contains_the_secret_key(self):
+        token = aws_subject_token(_identity().credentials, REGION, GCP_AUDIENCE)
 
-class TestHttpxRequest:
-    def test_maps_request_and_response(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.method == "POST"
-            assert request.headers["x-example"] == "1"
-            assert request.content == b"payload"
-            return httpx.Response(201, headers={"x-reply": "yes"}, content=b"body")
+        assert "fed-secret" not in urllib.parse.unquote(token)
 
-        transport = HttpxRequest(httpx.Client(transport=httpx.MockTransport(handler)))
+    def test_omits_the_session_token_header_for_long_lived_keys(self):
+        credentials = AwsCredentials(access_key_id="AKIAFED", secret_access_key="s")
 
-        response = transport(
-            "https://example.com/token",
-            method="POST",
-            body=b"payload",
-            headers={"x-example": "1"},
-        )
-
-        assert response.status == 201
-        assert response.headers["x-reply"] == "yes"
-        assert response.data == b"body"
-
-    def test_connection_failure_is_a_transport_error(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("connection refused")
-
-        transport = HttpxRequest(httpx.Client(transport=httpx.MockTransport(handler)))
-
-        with pytest.raises(google_exceptions.TransportError):
-            transport("https://example.com/token")
-
-    def test_unsupported_options_are_rejected(self):
-        transport = HttpxRequest(
-            httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+        _, headers = _decode_subject_token(
+            aws_subject_token(credentials, REGION, GCP_AUDIENCE)
         )
 
-        with pytest.raises(google_exceptions.TransportError, match="cert"):
-            transport("https://example.com/token", cert=("client.crt", "client.key"))
+        assert "x-amz-security-token" not in headers
 
 
 GOOGLE_STS_RESPONSE = {
     "access_token": "federated-token",
-    "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    "issued_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
     "token_type": "Bearer",
     "expires_in": 3600,
 }
@@ -558,15 +552,14 @@ def _gcp_exchange(
         requests.append((threading.get_ident(), request))
         return handler(request)
 
-    client = httpx.Client(transport=httpx.MockTransport(transport_handler))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(transport_handler))
     return GcpTokenExchange(http_client=client), requests
 
 
-def _subject_token(request: httpx.Request) -> tuple[dict[str, list[str]], dict]:
-    """Split a Google STS exchange request into its form and decoded subject token."""
+def _sts_form(request: httpx.Request) -> dict[str, str]:
     form = urllib.parse.parse_qs(request.content.decode(), strict_parsing=True)
-    subject_token = json.loads(urllib.parse.unquote(form.pop("subject_token")[0]))
-    return form, subject_token
+    assert all(len(values) == 1 for values in form.values())
+    return {key: values[0] for key, values in form.items()}
 
 
 class TestGcpTokenExchange:
@@ -577,32 +570,25 @@ class TestGcpTokenExchange:
         minted = await adapter.exchange(_identity(), REGION, _gcp_secret())
 
         (_, sts_request), (_, iam_request) = requests
-        form, subject_token = _subject_token(sts_request)
+        assert sts_request.method == "POST"
+        form = _sts_form(sts_request)
+        subject_token = form.pop("subject_token")
         assert form == {
-            "grant_type": ["urn:ietf:params:oauth:grant-type:token-exchange"],
-            "audience": [GCP_AUDIENCE],
-            "scope": ["https://www.googleapis.com/auth/iam"],
-            "requested_token_type": ["urn:ietf:params:oauth:token-type:access_token"],
-            "subject_token_type": [AWS_SUBJECT_TOKEN_TYPE],
+            "grant_type": GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE,
+            "audience": GCP_AUDIENCE,
+            "scope": GOOGLE_IAM_SCOPE,
+            "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
+            "subject_token_type": AWS_SUBJECT_TOKEN_TYPE,
         }
-        assert subject_token["method"] == "POST"
-        assert subject_token["url"] == (
-            f"https://sts.{REGION}.amazonaws.com"
-            "?Action=GetCallerIdentity&Version=2011-06-15"
-        )
-        headers = {h["key"].lower(): h["value"] for h in subject_token["headers"]}
-        assert headers["host"] == f"sts.{REGION}.amazonaws.com"
+        request, headers = _decode_subject_token(subject_token)
+        assert request["url"].startswith(f"https://sts.{REGION}.amazonaws.com?")
         assert headers["x-amz-security-token"] == "fed-token"
         assert headers["x-goog-cloud-target-resource"] == GCP_AUDIENCE
-        assert headers["authorization"].startswith(
-            "AWS4-HMAC-SHA256 Credential=ASIAFED/"
-        )
         assert "fed-secret" not in sts_request.content.decode()
 
         assert iam_request.method == "POST"
         assert iam_request.headers["authorization"] == "Bearer federated-token"
         assert json.loads(iam_request.content) == {
-            "delegates": None,
             "scope": [GCP_CLOUD_PLATFORM_SCOPE],
             "lifetime": "3600s",
         }
@@ -612,13 +598,14 @@ class TestGcpTokenExchange:
         )
 
     @pytest.mark.asyncio
-    async def test_refresh_runs_off_the_event_loop_thread(self):
+    async def test_requests_run_on_the_event_loop_thread(self):
+        # The app's X-Ray context is task-local; a worker thread would have
+        # no segment (or another task's) for the instrumented HTTP client.
         adapter, requests = _gcp_exchange(_google())
 
         await adapter.exchange(_identity(), REGION, _gcp_secret())
 
-        assert {thread for thread, _ in requests} != {threading.get_ident()}
-        assert len({thread for thread, _ in requests}) == 1
+        assert {thread for thread, _ in requests} == {threading.get_ident()}
 
     @pytest.mark.asyncio
     async def test_scopes_and_lifetime_come_from_the_secret(self):
@@ -639,6 +626,26 @@ class TestGcpTokenExchange:
         assert body["lifetime"] == "900s"
 
     @pytest.mark.asyncio
+    async def test_fractional_expire_time_is_parsed(self):
+        adapter, _ = _gcp_exchange(
+            _google(
+                iam=httpx.Response(
+                    200,
+                    json={
+                        "accessToken": "ya29.example",
+                        "expireTime": "2026-01-01T13:00:00.123456789Z",
+                    },
+                )
+            )
+        )
+
+        minted = await adapter.exchange(_identity(), REGION, _gcp_secret())
+
+        assert minted.expires_at == datetime(
+            2026, 1, 1, 13, 0, 0, 123456, tzinfo=timezone.utc
+        )
+
+    @pytest.mark.asyncio
     async def test_sts_rejection_raises_without_leaking_credentials(self, caplog):
         caplog.set_level(logging.ERROR, logger="api.access")
         adapter, requests = _gcp_exchange(
@@ -650,23 +657,28 @@ class TestGcpTokenExchange:
             )
         )
 
-        with pytest.raises(AuthenticationError, match="failed") as exc_info:
+        with pytest.raises(AuthenticationError, match="HTTP 400") as exc_info:
             await adapter.exchange(_identity(), REGION, _gcp_secret())
 
         assert len(requests) == 1
         assert "invalid_grant" in caplog.text
-        for value in ("fed-secret", "fed-token"):
+        for value in ("fed-secret", "fed-token", "ASIAFED", "GetCallerIdentity"):
             assert value not in str(exc_info.value)
             assert value not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_impersonation_rejection_raises(self):
-        adapter, _ = _gcp_exchange(
+    async def test_impersonation_rejection_raises_without_leaking_tokens(self, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        adapter, requests = _gcp_exchange(
             _google(iam=httpx.Response(403, json={"error": {"code": 403}}))
         )
 
-        with pytest.raises(AuthenticationError, match="failed"):
+        with pytest.raises(AuthenticationError, match="HTTP 403") as exc_info:
             await adapter.exchange(_identity(), REGION, _gcp_secret())
+
+        assert len(requests) == 2
+        assert "federated-token" not in str(exc_info.value)
+        assert "federated-token" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_transport_failure_raises(self):
@@ -676,14 +688,40 @@ class TestGcpTokenExchange:
             await adapter.exchange(_identity(), REGION, _gcp_secret())
 
     @pytest.mark.asyncio
-    async def test_response_without_a_token_raises(self):
-        adapter, _ = _gcp_exchange(
-            _google(
-                iam=httpx.Response(200, json={"expireTime": "2026-01-01T13:00:00Z"})
-            )
+    async def test_empty_federated_token_stops_before_impersonation(self):
+        adapter, requests = _gcp_exchange(
+            _google(sts=httpx.Response(200, json={"access_token": ""}))
         )
 
-        with pytest.raises(AuthenticationError, match="failed"):
+        with pytest.raises(AuthenticationError, match="empty token"):
+            await adapter.exchange(_identity(), REGION, _gcp_secret())
+
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            ({"expireTime": "2026-01-01T13:00:00Z"}, "empty token"),
+            ({"accessToken": "ya29.example"}, "malformed"),
+            ({"accessToken": "ya29.example", "expireTime": "soon"}, "malformed"),
+        ],
+    )
+    async def test_impersonation_response_without_a_usable_token_raises(
+        self, body: dict, message: str
+    ):
+        adapter, _ = _gcp_exchange(_google(iam=httpx.Response(200, json=body)))
+
+        with pytest.raises(AuthenticationError, match=message):
+            await adapter.exchange(_identity(), REGION, _gcp_secret())
+
+    @pytest.mark.asyncio
+    async def test_non_json_success_body_raises(self):
+        adapter, _ = _gcp_exchange(
+            _google(sts=httpx.Response(200, content=b"<html>upstream</html>"))
+        )
+
+        with pytest.raises(AuthenticationError, match="malformed"):
             await adapter.exchange(_identity(), REGION, _gcp_secret())
 
 

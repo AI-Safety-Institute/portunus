@@ -244,10 +244,10 @@ Every exchange uses a freshly issued STS token.
 }
 ```
 
-`scopes` (default shown), `token_lifetime_seconds` (60–3600, default 3600) and `signing_key` are optional. Steps 1 and 2 are as for `anthropic_wif`; then Portunus:
+`scopes` (default shown), `token_lifetime_seconds` (60–3600, default 3600) and `signing_key` are optional. `audience` must be a pool provider resource name in the form shown and `service_account` an email address. Steps 1 and 2 are as for `anthropic_wif`; then Portunus:
 
-3. Assumes the federation role with the caller's own credentials, as above. No STS web identity token is issued: the session's credentials sign an AWS `GetCallerIdentity` request for `sts.<region>.amazonaws.com`, using the SDK's configured region (`AWS_DEFAULT_REGION`, which must be set for this type).
-4. Exchanges the signed request at `https://sts.googleapis.com/v1/token` for a federated token for `audience` (via [google-auth](https://github.com/googleapis/google-auth-library-python)), then calls `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/<service_account>:generateAccessToken` with `scopes` and `token_lifetime_seconds`. The access token is returned with `output_header: "authorization"` and `output_prefix: "Bearer "`.
+3. Assumes the federation role with the caller's own credentials, as above. No STS web identity token is issued: Portunus signs an AWS `GetCallerIdentity` request for `sts.<region>.amazonaws.com` with the session's credentials (SigV4, using [google-auth](https://github.com/googleapis/google-auth-library-python)'s request signer and the SDK's configured region, `AWS_DEFAULT_REGION`, which must be set for this type). The request is bound to `audience` through a signed `x-goog-cloud-target-resource` header.
+4. Exchanges the signed request at `https://sts.googleapis.com/v1/token` for a federated token for `audience`, then calls `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/<service_account>:generateAccessToken` with `scopes` and `token_lifetime_seconds`. The access token is returned with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
 Google verifies the signed request against AWS itself, so the federation role needs no IAM permissions for this type. The workload identity pool provider's attribute condition sees the assumed-role ARN (`arn:aws:sts::<account>:assumed-role/<role name>/<caller role name>`, which drops the IAM path), and the service account must grant `roles/iam.workloadIdentityUser` to the matching pool principal. Both are deployment concerns.
 

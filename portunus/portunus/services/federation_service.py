@@ -10,28 +10,27 @@ Minting has two independent parts:
    and project.
 2. Exchange: trade the proof for a provider bearer token. Each provider gets
    its own adapter. :class:`AnthropicTokenExchange` posts the JWT to the
-   provider's OAuth endpoint; :class:`GcpTokenExchange` has the session sign
-   an AWS ``GetCallerIdentity`` request for Google STS and impersonates a
-   service account with the result.
+   provider's OAuth endpoint; :class:`GcpTokenExchange` signs an AWS
+   ``GetCallerIdentity`` request with the session's credentials, which Google
+   STS verifies against AWS, and impersonates a service account with the
+   result.
 
 :class:`TokenMintService` sequences the two for a given secret type.
 """
 
-import asyncio
+import json
 import logging
 import re
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Mapping, Optional, Sequence
+from typing import Optional, Sequence
 
 import httpx
 from aiobotocore.config import AioConfig
 from aiobotocore.session import AioSession, get_session
 from botocore.exceptions import ClientError
 from google.auth import aws as google_aws
-from google.auth import exceptions as google_exceptions
-from google.auth import transport as google_transport
-from google.auth.external_account import SupplierContext
 
 from portunus.config import FederationConfig, config
 from portunus.exceptions import (
@@ -57,7 +56,15 @@ FEDERATION_SESSION_SECONDS = 3600
 IDENTITY_TOKEN_SECONDS = 900
 IDENTITY_TOKEN_SIGNING_ALGORITHM = "RS256"
 AWS_SUBJECT_TOKEN_TYPE = "urn:ietf:params:aws:token-type:aws4_request"
+# Google replays the signed request here; it must be the regional endpoint.
+AWS_GET_CALLER_IDENTITY_URL = (
+    "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15"
+)
 GOOGLE_STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
+GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
+GOOGLE_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+# The only scope the federated token needs: calling generateAccessToken.
+GOOGLE_IAM_SCOPE = "https://www.googleapis.com/auth/iam"
 GOOGLE_IAM_CREDENTIALS_URL = (
     "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
     "{service_account}:generateAccessToken"
@@ -376,104 +383,77 @@ class AnthropicTokenExchange:
         )
 
 
-class SessionCredentialsSupplier(google_aws.AwsSecurityCredentialsSupplier):
-    """Hands one federation session's credentials to google-auth.
+def aws_subject_token(credentials: AwsCredentials, region: str, audience: str) -> str:
+    """Serialize a SigV4-signed ``GetCallerIdentity`` request for Google STS.
 
-    google-auth's built-in supplier reads the process environment and the
-    instance metadata service, neither of which holds the per-caller session.
+    Google proves the caller's AWS identity by sending this request to AWS
+    itself. The serialization is Google's ``aws4_request`` subject token: a
+    URL-encoded JSON object with ``url``, ``method`` and a ``headers`` list.
+    https://cloud.google.com/iam/docs/reference/sts/rest/v1/TopLevel/token
+
+    Args:
+        credentials: The federation session's credentials
+        region: AWS region whose STS endpoint the request names
+        audience: The workload identity pool provider resource name
     """
-
-    def __init__(self, credentials: AwsCredentials, region: str) -> None:
-        self._credentials = credentials
-        self._region = region
-
-    def get_aws_security_credentials(
-        self, context: SupplierContext, request: google_transport.Request
-    ) -> google_aws.AwsSecurityCredentials:
-        return google_aws.AwsSecurityCredentials(
-            access_key_id=self._credentials.access_key_id,
-            secret_access_key=self._credentials.secret_access_key,
-            session_token=self._credentials.session_token,
+    signer = google_aws.RequestSigner(region)
+    signed = signer.get_request_options(
+        google_aws.AwsSecurityCredentials(
+            access_key_id=credentials.access_key_id,
+            secret_access_key=credentials.secret_access_key,
+            session_token=credentials.session_token,
+        ),
+        AWS_GET_CALLER_IDENTITY_URL.format(region=region),
+        "POST",
+        # Signed, so the request cannot be presented for another provider.
+        additional_headers={"x-goog-cloud-target-resource": audience},
+    )
+    return urllib.parse.quote(
+        json.dumps(
+            {
+                "url": signed["url"],
+                "method": signed["method"],
+                "headers": [
+                    {"key": key, "value": value}
+                    for key, value in signed["headers"].items()
+                ],
+            }
         )
-
-    def get_aws_region(
-        self, context: SupplierContext, request: google_transport.Request
-    ) -> str:
-        return self._region
+    )
 
 
-class _HttpxResponse(google_transport.Response):
-    def __init__(self, response: httpx.Response) -> None:
-        self._response = response
-
-    @property
-    def status(self) -> int:
-        return self._response.status_code
-
-    @property
-    def headers(self) -> Mapping[str, str]:
-        return self._response.headers
-
-    @property
-    def data(self) -> bytes:
-        return self._response.content
-
-
-class HttpxRequest(google_transport.Request):
-    """google-auth transport over a synchronous httpx client."""
-
-    def __init__(self, client: httpx.Client) -> None:
-        self._client = client
-
-    def __call__(
-        self,
-        url: str,
-        method: str = "GET",
-        body: Optional[bytes] = None,
-        headers: Optional[Mapping[str, str]] = None,
-        timeout: Optional[float] = None,
-        **kwargs: object,
-    ) -> _HttpxResponse:
-        if kwargs:
-            raise google_exceptions.TransportError(
-                f"Unsupported transport options: {sorted(kwargs)}"
-            )
-        try:
-            response = self._client.request(
-                method,
-                url,
-                content=body,
-                headers=headers,
-                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
-            )
-        except httpx.HTTPError as e:
-            raise google_exceptions.TransportError(e) from e
-        return _HttpxResponse(response)
+def _rfc3339(value: object) -> datetime:
+    """Parse a Google ``Timestamp`` JSON value into an aware datetime."""
+    if not isinstance(value, str):
+        raise ValueError("timestamp is not a string")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 class GcpTokenExchange:
     """Exchange adapter for Google workload identity federation.
 
-    google-auth does the exchange: it signs an AWS ``GetCallerIdentity``
-    request with the federation session's credentials, trades it at Google
-    STS for a federated token, and impersonates the service account with
-    that. Its client is blocking, so each refresh runs in a worker thread.
+    Two calls: Google STS trades the signed ``GetCallerIdentity`` request for
+    a federated token scoped to the IAM Credentials API, which then issues an
+    access token for the secret's service account.
     """
 
-    def __init__(self, http_client: Optional[httpx.Client] = None) -> None:
+    def __init__(self, http_client: Optional[httpx.AsyncClient] = None) -> None:
         self._http_client = http_client
 
     @property
-    def http_client(self) -> httpx.Client:
+    def http_client(self) -> httpx.AsyncClient:
         """Shared client, created on first use so the pool outlives one call."""
         if self._http_client is None:
-            self._http_client = httpx.Client(timeout=_EXCHANGE_TIMEOUT)
+            self._http_client = httpx.AsyncClient(timeout=_EXCHANGE_TIMEOUT)
         return self._http_client
 
     async def aclose(self) -> None:
         """Close the HTTP client, if one was created."""
         if self._http_client is not None:
-            self._http_client.close()
+            await self._http_client.aclose()
             self._http_client = None
 
     @capture_async()
@@ -492,42 +472,86 @@ class GcpTokenExchange:
 
         Raises:
             AuthenticationError: Google STS or IAM Credentials refused, the
-                transport failed, or no token came back.
+                transport failed, or a response was malformed.
         """
-        credentials = google_aws.Credentials(
-            audience=secret.audience,
-            subject_token_type=AWS_SUBJECT_TOKEN_TYPE,
-            token_url=GOOGLE_STS_TOKEN_URL,
-            service_account_impersonation_url=GOOGLE_IAM_CREDENTIALS_URL.format(
-                service_account=secret.service_account
-            ),
-            service_account_impersonation_options={
-                "token_lifetime_seconds": secret.token_lifetime_seconds
+        exchange = f"Google STS exchange for {secret.service_account}"
+        federated = await self._post_json(
+            exchange,
+            GOOGLE_STS_TOKEN_URL,
+            data={
+                "grant_type": GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE,
+                "audience": secret.audience,
+                "scope": GOOGLE_IAM_SCOPE,
+                "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
+                "subject_token_type": AWS_SUBJECT_TOKEN_TYPE,
+                "subject_token": aws_subject_token(
+                    identity.credentials, region, secret.audience
+                ),
             },
-            scopes=secret.scopes,
-            aws_security_credentials_supplier=SessionCredentialsSupplier(
-                identity.credentials, region
-            ),
         )
-        try:
-            await asyncio.to_thread(credentials.refresh, HttpxRequest(self.http_client))
-        except google_exceptions.GoogleAuthError as e:
-            logger.error(
-                f"Google token exchange for {secret.service_account} failed: "
-                f"{type(e).__name__}: {str(e)[:500]}"
-            )
-            raise AuthenticationError(
-                f"Google token exchange for {secret.service_account} failed"
-            ) from e
+        federated_token = federated.get("access_token")
+        if not isinstance(federated_token, str) or not federated_token:
+            raise AuthenticationError(f"{exchange} returned an empty token")
 
-        token = credentials.token
-        expiry = credentials.expiry
-        if not isinstance(token, str) or not token or not isinstance(expiry, datetime):
+        impersonation = f"Impersonation of {secret.service_account}"
+        access = await self._post_json(
+            impersonation,
+            GOOGLE_IAM_CREDENTIALS_URL.format(service_account=secret.service_account),
+            headers={"Authorization": f"Bearer {federated_token}"},
+            json_body={
+                "scope": secret.scopes,
+                "lifetime": f"{secret.token_lifetime_seconds}s",
+            },
+        )
+        token = access.get("accessToken")
+        try:
+            expires_at = _rfc3339(access.get("expireTime"))
+        except ValueError as e:
+            logger.error(f"{impersonation} returned an unparseable expireTime")
             raise AuthenticationError(
-                f"Google token exchange for {secret.service_account} returned no token"
+                f"{impersonation} returned a malformed response"
+            ) from e
+        if not isinstance(token, str) or not token:
+            raise AuthenticationError(f"{impersonation} returned an empty token")
+        return MintedToken(token=token, expires_at=expires_at)
+
+    async def _post_json(
+        self,
+        step: str,
+        url: str,
+        *,
+        data: Optional[dict[str, str]] = None,
+        json_body: Optional[dict[str, object]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, object]:
+        """POST and return the JSON object in a 200 response.
+
+        Raises:
+            AuthenticationError: Transport failure, non-200 response, or a
+                body that is not a JSON object. Messages and logs carry the
+                step name and Google's response, never request contents.
+        """
+        try:
+            response = await self.http_client.post(
+                url, data=data, json=json_body, headers=headers
             )
-        # google-auth expiries are naive UTC datetimes.
-        return MintedToken(token=token, expires_at=expiry.replace(tzinfo=timezone.utc))
+        except httpx.HTTPError as e:
+            logger.error(f"{step} failed: {type(e).__name__}: {e}")
+            raise AuthenticationError(f"{step} failed") from e
+        if response.status_code != 200:
+            logger.error(
+                f"{step} returned HTTP {response.status_code}: {response.text[:500]}"
+            )
+            raise AuthenticationError(f"{step} returned HTTP {response.status_code}")
+        try:
+            body = response.json()
+        except ValueError as e:
+            logger.error(f"{step} returned a malformed body")
+            raise AuthenticationError(f"{step} returned a malformed response") from e
+        if not isinstance(body, dict):
+            logger.error(f"{step} returned a non-object body")
+            raise AuthenticationError(f"{step} returned a malformed response")
+        return body
 
 
 class TokenMintService:

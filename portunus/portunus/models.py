@@ -611,6 +611,13 @@ class AnthropicWifSecret(MintSecretBase):
 
 
 GCP_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+# Workload identity pool providers are always project-number scoped and global.
+GCP_POOL_PROVIDER_PATTERN = (
+    r"^//iam\.googleapis\.com/projects/\d+/locations/global/"
+    r"workloadIdentityPools/[^/\s]+/providers/[^/\s]+$"
+)
+# Email shape only; the value is interpolated into the impersonation URL path.
+GCP_SERVICE_ACCOUNT_PATTERN = r"^[^\s/@:]+@[^\s/@:]+$"
 
 
 class GcpWorkloadIdentitySecret(MintSecretBase):
@@ -631,9 +638,11 @@ class GcpWorkloadIdentitySecret(MintSecretBase):
     """
 
     type: Literal["gcp_workload_identity"]
-    audience: str = Field(min_length=1)
-    service_account: str = Field(min_length=1)
-    scopes: list[str] = Field(default=[GCP_CLOUD_PLATFORM_SCOPE], min_length=1)
+    audience: str = Field(pattern=GCP_POOL_PROVIDER_PATTERN)
+    service_account: str = Field(pattern=GCP_SERVICE_ACCOUNT_PATTERN)
+    scopes: list[Annotated[str, Field(min_length=1)]] = Field(
+        default=[GCP_CLOUD_PLATFORM_SCOPE], min_length=1
+    )
     token_lifetime_seconds: int = Field(default=3600, ge=60, le=3600)
 
 
