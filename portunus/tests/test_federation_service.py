@@ -474,10 +474,11 @@ class TestTokenMintService:
         class OtherSecret(MintSecretBase):
             type: Literal["other"] = "other"
 
-        service, _, anthropic = self._service()
+        service, sts, anthropic = self._service()
         secret = OtherSecret(host="api.example.com", federation_role_arn=ROLE_ARN)
 
         with pytest.raises(AuthenticationError, match="OtherSecret"):
             await service.mint(CALLER_CREDENTIALS, CALLER, secret)
 
+        sts.assume_federation_role.assert_not_awaited()
         anthropic.exchange.assert_not_awaited()
