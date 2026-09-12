@@ -4,26 +4,34 @@ Short-lived upstream tokens minted from federation roles.
 Minting has two independent parts:
 
 1. Identity proof (:class:`StsFederationService`): with the caller's own
-   credentials, assume the secret's federation role, then have that session
-   request an STS web identity token. The result is a signed JWT whose subject
-   is the federation role and whose tags carry the caller's role name and
-   project.
-2. Exchange (:class:`AnthropicTokenExchange`): trade the JWT for a provider
-   bearer token. Each provider gets its own adapter.
+   credentials, assume the secret's federation role. For JWT providers that
+   session then requests an STS web identity token, a signed JWT whose
+   subject is the federation role and whose tags carry the caller's role name
+   and project.
+2. Exchange: trade the proof for a provider bearer token. Each provider gets
+   its own adapter. :class:`AnthropicTokenExchange` posts the JWT to the
+   provider's OAuth endpoint; :class:`GcpTokenExchange` has the session sign
+   an AWS ``GetCallerIdentity`` request for Google STS and impersonates a
+   service account with the result.
 
 :class:`TokenMintService` sequences the two for a given secret type.
 """
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import httpx
 from aiobotocore.config import AioConfig
 from aiobotocore.session import AioSession, get_session
 from botocore.exceptions import ClientError
+from google.auth import aws as google_aws
+from google.auth import exceptions as google_exceptions
+from google.auth import transport as google_transport
+from google.auth.external_account import SupplierContext
 
 from portunus.config import FederationConfig, config
 from portunus.exceptions import (
@@ -34,6 +42,7 @@ from portunus.exceptions import (
 from portunus.models import (
     AnthropicWifSecret,
     AwsCredentials,
+    GcpWorkloadIdentitySecret,
     MintSecretBase,
     PrincipalInfo,
 )
@@ -47,6 +56,12 @@ FEDERATION_SESSION_SECONDS = 3600
 # 60-3600 s; a secret's token_duration_seconds may cap it further.
 IDENTITY_TOKEN_SECONDS = 900
 IDENTITY_TOKEN_SIGNING_ALGORITHM = "RS256"
+AWS_SUBJECT_TOKEN_TYPE = "urn:ietf:params:aws:token-type:aws4_request"
+GOOGLE_STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
+GOOGLE_IAM_CREDENTIALS_URL = (
+    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+    "{service_account}:generateAccessToken"
+)
 
 # IAM's character classes are ASCII; re.ASCII keeps \w from admitting more.
 _IAM_ROLE_ARN = re.compile(
@@ -171,6 +186,17 @@ class StsFederationService:
         self.boto_session = boto_session or get_session()
         self.federation_config = federation_config or config.federation
 
+    def region(self) -> str:
+        """The SDK's configured AWS region.
+
+        Raises:
+            ConfigurationError: No region configured.
+        """
+        region = self.boto_session.get_config_variable("region")
+        if not region:
+            raise ConfigurationError("AWS region is not configured")
+        return str(region)
+
     def endpoint_url(self) -> str:
         """Resolve the STS endpoint for federation calls.
 
@@ -180,12 +206,7 @@ class StsFederationService:
         explicit = self.federation_config.sts_endpoint_url or config.aws.endpoint_url
         if explicit:
             return explicit
-        region = self.boto_session.get_config_variable("region")
-        if not region:
-            raise ConfigurationError(
-                "AWS region is required to build the regional STS endpoint"
-            )
-        return f"https://sts.{region}.amazonaws.com"
+        return f"https://sts.{self.region()}.amazonaws.com"
 
     @capture_async()
     async def assume_federation_role(
@@ -355,6 +376,160 @@ class AnthropicTokenExchange:
         )
 
 
+class SessionCredentialsSupplier(google_aws.AwsSecurityCredentialsSupplier):
+    """Hands one federation session's credentials to google-auth.
+
+    google-auth's built-in supplier reads the process environment and the
+    instance metadata service, neither of which holds the per-caller session.
+    """
+
+    def __init__(self, credentials: AwsCredentials, region: str) -> None:
+        self._credentials = credentials
+        self._region = region
+
+    def get_aws_security_credentials(
+        self, context: SupplierContext, request: google_transport.Request
+    ) -> google_aws.AwsSecurityCredentials:
+        return google_aws.AwsSecurityCredentials(
+            access_key_id=self._credentials.access_key_id,
+            secret_access_key=self._credentials.secret_access_key,
+            session_token=self._credentials.session_token,
+        )
+
+    def get_aws_region(
+        self, context: SupplierContext, request: google_transport.Request
+    ) -> str:
+        return self._region
+
+
+class _HttpxResponse(google_transport.Response):
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+
+    @property
+    def status(self) -> int:
+        return self._response.status_code
+
+    @property
+    def headers(self) -> Mapping[str, str]:
+        return self._response.headers
+
+    @property
+    def data(self) -> bytes:
+        return self._response.content
+
+
+class HttpxRequest(google_transport.Request):
+    """google-auth transport over a synchronous httpx client."""
+
+    def __init__(self, client: httpx.Client) -> None:
+        self._client = client
+
+    def __call__(
+        self,
+        url: str,
+        method: str = "GET",
+        body: Optional[bytes] = None,
+        headers: Optional[Mapping[str, str]] = None,
+        timeout: Optional[float] = None,
+        **kwargs: object,
+    ) -> _HttpxResponse:
+        if kwargs:
+            raise google_exceptions.TransportError(
+                f"Unsupported transport options: {sorted(kwargs)}"
+            )
+        try:
+            response = self._client.request(
+                method,
+                url,
+                content=body,
+                headers=headers,
+                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+            )
+        except httpx.HTTPError as e:
+            raise google_exceptions.TransportError(e) from e
+        return _HttpxResponse(response)
+
+
+class GcpTokenExchange:
+    """Exchange adapter for Google workload identity federation.
+
+    google-auth does the exchange: it signs an AWS ``GetCallerIdentity``
+    request with the federation session's credentials, trades it at Google
+    STS for a federated token, and impersonates the service account with
+    that. Its client is blocking, so each refresh runs in a worker thread.
+    """
+
+    def __init__(self, http_client: Optional[httpx.Client] = None) -> None:
+        self._http_client = http_client
+
+    @property
+    def http_client(self) -> httpx.Client:
+        """Shared client, created on first use so the pool outlives one call."""
+        if self._http_client is None:
+            self._http_client = httpx.Client(timeout=_EXCHANGE_TIMEOUT)
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the HTTP client, if one was created."""
+        if self._http_client is not None:
+            self._http_client.close()
+            self._http_client = None
+
+    @capture_async()
+    async def exchange(
+        self,
+        identity: FederationIdentity,
+        region: str,
+        secret: GcpWorkloadIdentitySecret,
+    ) -> MintedToken:
+        """Obtain an access token for ``secret.service_account``.
+
+        Args:
+            identity: The assumed federation-role session
+            region: AWS region the signed ``GetCallerIdentity`` request names
+            secret: The ``gcp_workload_identity`` secret
+
+        Raises:
+            AuthenticationError: Google STS or IAM Credentials refused, the
+                transport failed, or no token came back.
+        """
+        credentials = google_aws.Credentials(
+            audience=secret.audience,
+            subject_token_type=AWS_SUBJECT_TOKEN_TYPE,
+            token_url=GOOGLE_STS_TOKEN_URL,
+            service_account_impersonation_url=GOOGLE_IAM_CREDENTIALS_URL.format(
+                service_account=secret.service_account
+            ),
+            service_account_impersonation_options={
+                "token_lifetime_seconds": secret.token_lifetime_seconds
+            },
+            scopes=secret.scopes,
+            aws_security_credentials_supplier=SessionCredentialsSupplier(
+                identity.credentials, region
+            ),
+        )
+        try:
+            await asyncio.to_thread(credentials.refresh, HttpxRequest(self.http_client))
+        except google_exceptions.GoogleAuthError as e:
+            logger.error(
+                f"Google token exchange for {secret.service_account} failed: "
+                f"{type(e).__name__}: {str(e)[:500]}"
+            )
+            raise AuthenticationError(
+                f"Google token exchange for {secret.service_account} failed"
+            ) from e
+
+        token = credentials.token
+        expiry = credentials.expiry
+        if not isinstance(token, str) or not token or not isinstance(expiry, datetime):
+            raise AuthenticationError(
+                f"Google token exchange for {secret.service_account} returned no token"
+            )
+        # google-auth expiries are naive UTC datetimes.
+        return MintedToken(token=token, expires_at=expiry.replace(tzinfo=timezone.utc))
+
+
 class TokenMintService:
     """Mint an upstream token for a secret that describes how to obtain one."""
 
@@ -362,15 +537,18 @@ class TokenMintService:
         self,
         sts: Optional[StsFederationService] = None,
         anthropic: Optional[AnthropicTokenExchange] = None,
+        gcp: Optional[GcpTokenExchange] = None,
         federation_config: Optional[FederationConfig] = None,
     ) -> None:
         self.federation_config = federation_config or config.federation
         self.sts = sts or StsFederationService(federation_config=self.federation_config)
         self.anthropic = anthropic or AnthropicTokenExchange()
+        self.gcp = gcp or GcpTokenExchange()
 
     async def aclose(self) -> None:
         """Release adapter resources."""
         await self.anthropic.aclose()
+        await self.gcp.aclose()
 
     @capture_async()
     async def mint(
@@ -385,20 +563,28 @@ class TokenMintService:
             AuthenticationError: Role not allowed, STS refused, or the
                 exchange failed.
             CredentialsError: Caller credentials expired or not an assumed role.
+            ConfigurationError: A ``gcp_workload_identity`` secret with no AWS
+                region configured.
         """
         validate_federation_role_arn(
             secret.federation_role_arn,
             self.federation_config.allowed_account_ids,
             self.federation_config.role_path_prefix,
         )
-        if not isinstance(secret, AnthropicWifSecret):
-            raise AuthenticationError(
-                f"No token exchange for secret type {type(secret).__name__}"
+        if isinstance(secret, AnthropicWifSecret):
+            identity = await self.sts.assume_federation_role(
+                credentials, principal, secret.federation_role_arn
             )
-        identity = await self.sts.assume_federation_role(
-            credentials, principal, secret.federation_role_arn
+            proof = await self.sts.web_identity_token(
+                identity, secret.audience, secret.token_duration_seconds
+            )
+            return await self.anthropic.exchange(proof.token, secret)
+        if isinstance(secret, GcpWorkloadIdentitySecret):
+            region = self.sts.region()
+            identity = await self.sts.assume_federation_role(
+                credentials, principal, secret.federation_role_arn
+            )
+            return await self.gcp.exchange(identity, region, secret)
+        raise AuthenticationError(
+            f"No token exchange for secret type {type(secret).__name__}"
         )
-        proof = await self.sts.web_identity_token(
-            identity, secret.audience, secret.token_duration_seconds
-        )
-        return await self.anthropic.exchange(proof.token, secret)

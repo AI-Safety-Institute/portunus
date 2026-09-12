@@ -7,7 +7,9 @@ import pytest
 
 from portunus.exceptions import AuthenticationError
 from portunus.models import (
+    GCP_CLOUD_PLATFORM_SCOPE,
     AnthropicWifSecret,
+    GcpWorkloadIdentitySecret,
     SecretsManagerAuthPayload,
     SigningKey,
 )
@@ -25,6 +27,16 @@ WIF_SECRET = {
     "organization_id": "org_example",
     "service_account_id": "sa_example",
     "workspace_id": "ws_example",
+}
+GCP_SECRET = {
+    "type": "gcp_workload_identity",
+    "host": "aiplatform.googleapis.com",
+    "federation_role_arn": ROLE_ARN,
+    "audience": (
+        "//iam.googleapis.com/projects/123456789/locations/global/"
+        "workloadIdentityPools/example-pool/providers/example-provider"
+    ),
+    "service_account": "example-sa@example-project.iam.gserviceaccount.com",
 }
 
 
@@ -126,9 +138,61 @@ class TestParseSecret:
         with pytest.raises(AuthenticationError):
             parse_secret(json.dumps(data))
 
+    def test_gcp_workload_identity_secret(self):
+        secret = parse_secret(json.dumps(GCP_SECRET))
+
+        assert isinstance(secret, GcpWorkloadIdentitySecret)
+        assert secret.host == "aiplatform.googleapis.com"
+        assert secret.federation_role_arn == ROLE_ARN
+        assert secret.audience == GCP_SECRET["audience"]
+        assert secret.service_account == GCP_SECRET["service_account"]
+        assert secret.scopes == [GCP_CLOUD_PLATFORM_SCOPE]
+        assert secret.token_lifetime_seconds == 3600
+        assert secret.signing_key is None
+
+    def test_gcp_workload_identity_overrides(self):
+        raw = json.dumps(
+            {
+                **GCP_SECRET,
+                "scopes": ["https://www.googleapis.com/auth/generative-language"],
+                "token_lifetime_seconds": 900,
+                "signing_key": {"provider_id": "key1", "kms_key_arn": "arn:kms"},
+            }
+        )
+
+        secret = parse_secret(raw)
+
+        assert isinstance(secret, GcpWorkloadIdentitySecret)
+        assert secret.scopes == ["https://www.googleapis.com/auth/generative-language"]
+        assert secret.token_lifetime_seconds == 900
+        assert secret.signing_key == SigningKey(
+            provider_id="key1", kms_key_arn="arn:kms"
+        )
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"audience": None},
+            {"audience": ""},
+            {"service_account": None},
+            {"service_account": ""},
+            {"host": ""},
+            {"federation_role_arn": None},
+            {"scopes": []},
+            {"scopes": "https://www.googleapis.com/auth/cloud-platform"},
+            {"token_lifetime_seconds": 30},
+            {"token_lifetime_seconds": 7200},
+        ],
+    )
+    def test_gcp_workload_identity_missing_or_invalid_fields_raise(self, changes: dict):
+        data = {k: v for k, v in {**GCP_SECRET, **changes}.items() if v is not None}
+
+        with pytest.raises(AuthenticationError):
+            parse_secret(json.dumps(data))
+
     def test_unknown_type_raises(self):
         with pytest.raises(AuthenticationError):
-            parse_secret('{"type": "gcp_workload_identity", "host": "x"}')
+            parse_secret('{"type": "example_unknown", "host": "x"}')
 
     def test_validation_logs_omit_secret_contents(self, caplog):
         caplog.set_level(logging.INFO, logger="api.access")

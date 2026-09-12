@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the earliest of `CACHE_DURATION`, the caller's credential expiry and five
   minutes before the token expires; concurrent misses for one payload share
   a mint per process.
+- The `gcp_workload_identity` secret type mints Google service-account access
+  tokens. The federation session's credentials sign an AWS `GetCallerIdentity`
+  request that Google STS exchanges for a federated token (workload identity
+  federation), which then impersonates the named service account for the
+  secret's `scopes` and `token_lifetime_seconds`. Requires `AWS_DEFAULT_REGION`.
+  Adds a runtime dependency on `google-auth`.
 - The CLI's default session policy allows `sts:AssumeRole` on
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
   overrides the path).
