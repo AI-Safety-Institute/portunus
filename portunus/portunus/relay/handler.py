@@ -188,7 +188,8 @@ async def _publish_connection_metadata(
     upgrade_headers = {
         k: v
         for k, v in websocket.headers.items()
-        if not k.startswith("x-portunus-") and k.lower() not in excluded
+        if k.lower() not in excluded
+        and not k.lower().startswith(_BLOCKED_HEADER_PREFIXES)
     }
     # Include upstream authority so downstream consumers can identify
     # which API provider handled the request.
