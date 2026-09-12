@@ -31,6 +31,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
   provider's token endpoint cannot be reached or answers 5xx/429, or when
   minting exceeds its 6 s deadline.
+- The `gcp_workload_identity` secret type mints Google service-account access
+  tokens. The federation session's credentials sign an AWS `GetCallerIdentity`
+  request that Google STS exchanges for a federated token (workload identity
+  federation), which then impersonates the named service account for the
+  secret's `scopes` and `token_lifetime_seconds`. Requires `AWS_DEFAULT_REGION`.
+  Adds a runtime dependency on `google-auth`.
 - The CLI's default session policy allows `sts:AssumeRole` on every role under
   the federation role path in the caller's account,
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
