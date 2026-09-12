@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import time
-from base64 import b64encode
+from base64 import b64decode, b64encode
 from datetime import datetime
 from pathlib import Path
 
@@ -162,6 +162,63 @@ def encode_base64(data: dict, secret_name: str = "test-api-key") -> str:
         )
 
     return b64encode(json.dumps(data).encode("utf-8")).decode("utf-8")
+
+
+def read_kinesis_records(stream_name: str) -> list[dict]:
+    """Read all records from a Kinesis stream in localstack."""
+    shard_result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "kinesis",
+            "get-shard-iterator",
+            "--stream-name",
+            stream_name,
+            "--shard-id",
+            "shardId-000000000000",
+            "--shard-iterator-type",
+            "TRIM_HORIZON",
+            "--region",
+            "eu-west-2",
+            "--query",
+            "ShardIterator",
+            "--output",
+            "text",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if shard_result.returncode != 0:
+        return []
+
+    shard_iterator = shard_result.stdout.strip()
+    records_result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "kinesis",
+            "get-records",
+            "--shard-iterator",
+            shard_iterator,
+            "--region",
+            "eu-west-2",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if records_result.returncode != 0:
+        return []
+
+    response = json.loads(records_result.stdout)
+    records = []
+    for r in response.get("Records", []):
+        data = b64decode(r["Data"])
+        records.append(json.loads(data))
+    return records
 
 
 def create_localstack_secret(secret_name: str, secret_value: str) -> None:

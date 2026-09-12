@@ -2,15 +2,19 @@
 
 import base64
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from portunus.app import AuthorizationResponse, portunus
-from portunus.models import AuthResult, PrincipalInfo
+from portunus.models import AuthPayload, AuthResult, PrincipalInfo
+from portunus.services.auth_service import AuthService
+from portunus.services.cache_service import CacheService
+from portunus.services.state_service import StateService
 
 SECRET_ARN = "arn:aws:secretsmanager:eu-west-2:123456789012:secret:test-api-key"
 
@@ -105,6 +109,73 @@ class TestAuthResultOutputFields:
 
         assert result.output_header is None
         assert result.output_prefix is None
+
+
+def _cache_backed_by(client: fakeredis.aioredis.FakeRedis) -> CacheService:
+    state_service = MagicMock(spec=StateService)
+    state_service.acquire_redis_connection = AsyncMock(return_value=client)
+    return CacheService(state_service=state_service)
+
+
+@pytest_asyncio.fixture
+async def fake_redis():
+    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    yield client
+    await client.aclose()
+
+
+class TestCacheRoundTrip:
+    @pytest.mark.asyncio
+    async def test_output_fields_survive_the_cache(self, fake_redis):
+        """A cache hit returns the same output fields as the original result."""
+        cache = _cache_backed_by(fake_redis)
+        stored = _auth_result(output_header="x-goog-api-key", output_prefix="")
+
+        assert await cache.cache_auth_result("payload", stored, ttl_seconds=60)
+        cached = await cache.get_cached_auth_result("payload")
+
+        assert cached is not None
+        assert cached.output_header == "x-goog-api-key"
+        assert cached.output_prefix == ""
+        assert cached.api_key == stored.api_key
+
+    @pytest.mark.asyncio
+    async def test_entry_without_output_fields_loads_as_none(self, fake_redis):
+        """Entries written before the fields existed still load."""
+        cache = _cache_backed_by(fake_redis)
+        legacy = {
+            "api_key": "sk-legacy",
+            "principal_info": _auth_result().principal_info.to_dict(),
+            "signing_key": None,
+        }
+        await fake_redis.set(cache.generate_cache_key("payload"), json.dumps(legacy))
+
+        cached = await cache.get_cached_auth_result("payload")
+
+        assert cached is not None
+        assert cached.api_key == "sk-legacy"
+        assert cached.output_header is None
+        assert cached.output_prefix is None
+
+
+class TestAuthenticateCacheHit:
+    @pytest.mark.asyncio
+    async def test_cached_result_is_returned_unchanged(self):
+        """authenticate() must not rebuild a cached result and drop fields."""
+        cached = _auth_result(output_header="x-goog-api-key", output_prefix="")
+        cache_service = MagicMock()
+        cache_service.get_cached_auth_result = AsyncMock(return_value=cached)
+        service = AuthService(
+            secrets_service=MagicMock(boto_session=MagicMock()),
+            cache_service=cache_service,
+            validation_service=MagicMock(),
+        )
+
+        result = await service.authenticate(
+            AuthPayload.from_contents(_payload()), "req"
+        )
+
+        assert result is cached
 
 
 @pytest.fixture

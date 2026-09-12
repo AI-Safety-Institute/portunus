@@ -155,11 +155,7 @@ class AuthService:
                         payload.raw
                     )
                     if cached_result:
-                        return AuthResult(
-                            api_key=cached_result.api_key,
-                            signing_key=cached_result.signing_key,
-                            principal_info=cached_result.principal_info,
-                        )
+                        return cached_result
             except (TimeoutError, RedisTimeoutError) as e:
                 logger.warning(
                     f"Cache read timed out during auth for {request_id} "

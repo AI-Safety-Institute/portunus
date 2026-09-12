@@ -268,7 +268,7 @@ class TestPublishConnectionMetadata:
             )
 
         log_mock.assert_awaited_once()
-        logged_headers = log_mock.await_args.args[2]
+        logged_headers = log_mock.await_args_list[0].args[2]
         assert logged_headers == {
             "user-agent": "test-client",
             "authority": "upstream.example.com",
@@ -296,7 +296,7 @@ class TestPublishConnectionMetadata:
                 "upstream.example.com",
             )
 
-        logged_headers = log_mock.await_args.args[2]
+        logged_headers = log_mock.await_args_list[0].args[2]
         assert "x-custom-token" not in logged_headers
         assert logged_headers["user-agent"] == "test-client"
 
