@@ -1,7 +1,7 @@
 # ---- Builder: compile the Lua rocks and fetch yq ----
 # Kept on the same Envoy base so the compiled rock (sha2.so) is ABI-compatible
 # with the runtime image's embedded LuaJIT.
-FROM envoyproxy/envoy:v1.38.3@sha256:5f7c43e1147412fdb3af578c651c67478a3df818eae89d2261e707e06c209cdb AS builder
+FROM envoyproxy/envoy:v1.38.4@sha256:447f857a01460642ef08ca2ab51136a44b9101fc2fa6bca2d1ae534466fa62f5 AS builder
 
 # luarocks (and the C toolchain its recommends pull in) builds the native rocks;
 # wget fetches yq. None of this reaches the runtime image.
@@ -28,7 +28,7 @@ RUN luarocks-5.1 make proxy-utils-1.0-0.rockspec
 WORKDIR /
 
 # ---- Runtime: clean Envoy image with only what's needed at run time ----
-FROM envoyproxy/envoy:v1.38.3@sha256:5f7c43e1147412fdb3af578c651c67478a3df818eae89d2261e707e06c209cdb
+FROM envoyproxy/envoy:v1.38.4@sha256:447f857a01460642ef08ca2ab51136a44b9101fc2fa6bca2d1ae534466fa62f5
 
 # gettext-base provides envsubst; wget is REQUIRED at runtime — entrypoint.sh
 # drives the SIGTERM drain through the Envoy admin API with it.
