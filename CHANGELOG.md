@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Secrets may describe a token to mint instead of holding a key. The
+  `anthropic_wif` type names a federation role, which Portunus assumes with
+  the caller's credentials to obtain an STS web identity token and exchange
+  it at the provider's `/v1/oauth/token` endpoint for a short-lived bearer
+  token, returned with `output_header: authorization`. Federation role ARNs
+  must be in `FEDERATION_ALLOWED_ACCOUNT_IDS` (new env var; unset disables
+  minting) and under `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`).
+  `FEDERATION_STS_ENDPOINT_URL`, `FEDERATION_USER_TAG_KEY` and
+  `FEDERATION_PROJECT_TAG_KEY` are also new. Minted results are cached until
+  the earliest of `CACHE_DURATION`, the caller's credential expiry and five
+  minutes before the token expires; concurrent misses for one payload share
+  a mint per process.
+- The CLI's default session policy allows `sts:AssumeRole` on
+  `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
+  overrides the path).
 - `/authorise` responses may carry `output_header` and `output_prefix`, letting
   the backend choose which upstream header receives the credential and with
   what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
@@ -14,6 +29,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (#136)
 
 ### Changed
+- JSON secrets that carry a `type` are validated strictly against that type
+  and rejected on failure. JSON without a `type` keeps the previous
+  behaviour (stored key, or used verbatim when it matches no schema).
+- Cached authorization results now expire no later than the caller's
+  credentials, and never later than `CACHE_DURATION`. Previously the
+  payload's credential expiration was never read (see Fixed), so entries
+  lived for the full `CACHE_DURATION`.
 - The proxy removes the header the auth payload arrived in (`API_KEY_HEADER`)
   from the upstream request and sets the header the credential is written to
   (`output_header`, else `API_KEY_HEADER`); when both name the same header this
