@@ -187,8 +187,8 @@ async def authorise(
                 # but don't fail the whole request
                 segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
                 logger.critical(
-                    f"Publishing metadata to kinesis timeout out for {trace_id}: {e}, ",
-                    "although may have succeeded",
+                    f"Publishing metadata to kinesis timeout out for {trace_id}: {e}, "
+                    "although may have succeeded"
                 )
             except Exception as e:
                 # Add exception to X-Ray trace for visibility
