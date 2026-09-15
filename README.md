@@ -239,7 +239,7 @@ Every exchange uses a freshly issued STS token.
 {
   "type": "gcp_workload_identity",
   "host": "aiplatform.googleapis.com",
-  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-grant/example-grant@projects.example",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example",
   "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-provider",
   "service_account": "example-sa@example-project.iam.gserviceaccount.com",
   "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
