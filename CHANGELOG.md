@@ -31,7 +31,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
   provider's token endpoint cannot be reached or answers 5xx/429, or when
   minting exceeds its 6 s deadline.
-- The `gcp_workload_identity` secret type mints Google service-account access
+- The `gcp_wif` secret type mints Google service-account access
   tokens. Portunus signs an AWS `GetCallerIdentity` request with the
   federation session's credentials, exchanges it at Google STS for a
   federated token (workload identity federation), and impersonates the named

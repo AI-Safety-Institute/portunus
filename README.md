@@ -15,7 +15,7 @@ It consists of two main components:
     - Secrets can be stored in three formats (see [Secret formats](#secret-formats)):
       - **Plaintext**: `"sk-1234567890abcdef"` (works with any proxy target)
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
-      - **Minted token**: `{"type":"anthropic_wif", ...}` or `{"type":"gcp_workload_identity", ...}` (no key is stored; Portunus mints a short-lived token per caller)
+      - **Minted token**: `{"type":"anthropic_wif", ...}` or `{"type":"gcp_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
   - If successful, Portunus returns the real API key to the Envoy instance
   - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default), removing the `API_KEY_HEADER` header when the two differ, before allowing the request to proceed. Every other header is forwarded untouched
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
@@ -203,7 +203,7 @@ A secret referenced by a payload is one of:
 |---|---|---|
 | Plaintext | `sk-1234567890abcdef` | Used as the key for any target |
 | Stored key with target check | `{"secret": "sk-...", "host": "api.example.com", "signing_key": {...}}` | Used only when the proxy's target matches `host`; `signing_key` is optional |
-| Minted token | `{"type": "anthropic_wif", ...}` or `{"type": "gcp_workload_identity", ...}` (below) | No key is stored; a short-lived token is minted per caller |
+| Minted token | `{"type": "anthropic_wif", ...}` or `{"type": "gcp_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
 
 JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key). JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
 
@@ -233,11 +233,11 @@ If STS or the token endpoint cannot be reached or answers 5xx/429, or steps 3–
 
 Every exchange uses a freshly issued STS token.
 
-#### `gcp_workload_identity`
+#### `gcp_wif`
 
 ```json
 {
-  "type": "gcp_workload_identity",
+  "type": "gcp_wif",
   "host": "aiplatform.googleapis.com",
   "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example",
   "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-provider",

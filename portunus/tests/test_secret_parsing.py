@@ -9,7 +9,7 @@ from portunus.exceptions import AuthenticationError
 from portunus.models import (
     GCP_CLOUD_PLATFORM_SCOPE,
     AnthropicWifSecret,
-    GcpWorkloadIdentitySecret,
+    GcpWifSecret,
     SecretsManagerAuthPayload,
     SigningKey,
 )
@@ -29,7 +29,7 @@ WIF_SECRET = {
     "workspace_id": "ws_example",
 }
 GCP_SECRET = {
-    "type": "gcp_workload_identity",
+    "type": "gcp_wif",
     "host": "aiplatform.googleapis.com",
     "federation_role_arn": ROLE_ARN,
     "audience": (
@@ -135,10 +135,10 @@ class TestParseSecret:
         with pytest.raises(AuthenticationError):
             parse_secret(json.dumps(data))
 
-    def test_gcp_workload_identity_secret(self):
+    def test_gcp_wif_secret(self):
         secret = parse_secret(json.dumps(GCP_SECRET))
 
-        assert isinstance(secret, GcpWorkloadIdentitySecret)
+        assert isinstance(secret, GcpWifSecret)
         assert secret.host == "aiplatform.googleapis.com"
         assert secret.federation_role_arn == ROLE_ARN
         assert secret.audience == GCP_SECRET["audience"]
@@ -146,7 +146,7 @@ class TestParseSecret:
         assert secret.scopes == [GCP_CLOUD_PLATFORM_SCOPE]
         assert secret.token_lifetime_seconds == 3600
 
-    def test_gcp_workload_identity_overrides(self):
+    def test_gcp_wif_overrides(self):
         raw = json.dumps(
             {
                 **GCP_SECRET,
@@ -157,7 +157,7 @@ class TestParseSecret:
 
         secret = parse_secret(raw)
 
-        assert isinstance(secret, GcpWorkloadIdentitySecret)
+        assert isinstance(secret, GcpWifSecret)
         assert secret.scopes == ["https://www.googleapis.com/auth/generative-language"]
         assert secret.token_lifetime_seconds == 900
 
@@ -169,7 +169,7 @@ class TestParseSecret:
             {"unknown": 1},
         ],
     )
-    def test_gcp_workload_identity_rejects_unknown_fields(self, extra: dict):
+    def test_gcp_wif_rejects_unknown_fields(self, extra: dict):
         with pytest.raises(AuthenticationError, match="invalid fields"):
             parse_secret(json.dumps({**GCP_SECRET, **extra}))
 
@@ -194,7 +194,7 @@ class TestParseSecret:
             {"token_lifetime_seconds": 7200},
         ],
     )
-    def test_gcp_workload_identity_missing_or_invalid_fields_raise(self, changes: dict):
+    def test_gcp_wif_missing_or_invalid_fields_raise(self, changes: dict):
         data = {k: v for k, v in {**GCP_SECRET, **changes}.items() if v is not None}
 
         with pytest.raises(AuthenticationError):

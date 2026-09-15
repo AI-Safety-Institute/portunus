@@ -31,7 +31,7 @@ from portunus.models import (
     GCP_CLOUD_PLATFORM_SCOPE,
     AnthropicWifSecret,
     AwsCredentials,
-    GcpWorkloadIdentitySecret,
+    GcpWifSecret,
     MintSecretBase,
     PrincipalInfo,
 )
@@ -111,16 +111,16 @@ def _secret(**overrides: object) -> AnthropicWifSecret:
     return AnthropicWifSecret.model_validate(data)
 
 
-def _gcp_secret(**overrides: object) -> GcpWorkloadIdentitySecret:
+def _gcp_secret(**overrides: object) -> GcpWifSecret:
     data: dict[str, object] = {
-        "type": "gcp_workload_identity",
+        "type": "gcp_wif",
         "host": "aiplatform.googleapis.com",
         "federation_role_arn": ROLE_ARN,
         "audience": GCP_AUDIENCE,
         "service_account": GCP_SERVICE_ACCOUNT,
     }
     data.update(overrides)
-    return GcpWorkloadIdentitySecret.model_validate(data)
+    return GcpWifSecret.model_validate(data)
 
 
 def _identity() -> FederationIdentity:

@@ -43,7 +43,7 @@ from portunus.exceptions import (
 from portunus.models import (
     AnthropicWifSecret,
     AwsCredentials,
-    GcpWorkloadIdentitySecret,
+    GcpWifSecret,
     MintSecretBase,
     PrincipalInfo,
 )
@@ -542,14 +542,14 @@ class GcpTokenExchange:
         self,
         identity: FederationIdentity,
         region: str,
-        secret: GcpWorkloadIdentitySecret,
+        secret: GcpWifSecret,
     ) -> MintedToken:
         """Obtain an access token for ``secret.service_account``.
 
         Args:
             identity: The assumed federation-role session
             region: AWS region the signed ``GetCallerIdentity`` request names
-            secret: The ``gcp_workload_identity`` secret
+            secret: The ``gcp_wif`` secret
 
         Raises:
             AuthenticationError: Google STS or IAM Credentials refused, the
@@ -674,7 +674,7 @@ class TokenMintService:
                 or an identity field unusable as a session tag.
             UpstreamServiceError: STS or the provider was unavailable, or
                 minting exceeded ``MINT_DEADLINE_SECONDS``.
-            ConfigurationError: A ``gcp_workload_identity`` secret with no AWS
+            ConfigurationError: A ``gcp_wif`` secret with no AWS
                 region configured.
         """
         validate_federation_role_arn(
@@ -682,7 +682,7 @@ class TokenMintService:
             self.federation_config.allowed_account_ids,
             self.federation_config.role_path_prefix,
         )
-        if not isinstance(secret, (AnthropicWifSecret, GcpWorkloadIdentitySecret)):
+        if not isinstance(secret, (AnthropicWifSecret, GcpWifSecret)):
             raise AuthenticationError(
                 f"No token exchange for secret type {type(secret).__name__}"
             )

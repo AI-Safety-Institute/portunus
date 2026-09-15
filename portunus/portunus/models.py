@@ -617,7 +617,7 @@ GCP_POOL_PROVIDER_PATTERN = (
 GCP_SERVICE_ACCOUNT_PATTERN = r"^[^\s/@:]+@[^\s/@:]+$"
 
 
-class GcpWorkloadIdentitySecret(MintSecretBase):
+class GcpWifSecret(MintSecretBase):
     """Mint a Google service-account access token via workload identity federation.
 
     The federation session's credentials sign an AWS ``GetCallerIdentity``
@@ -634,7 +634,7 @@ class GcpWorkloadIdentitySecret(MintSecretBase):
         token_lifetime_seconds: Requested access token lifetime.
     """
 
-    type: Literal["gcp_workload_identity"]
+    type: Literal["gcp_wif"]
     audience: str = Field(pattern=GCP_POOL_PROVIDER_PATTERN)
     service_account: str = Field(pattern=GCP_SERVICE_ACCOUNT_PATTERN)
     scopes: list[Annotated[str, Field(min_length=1)]] = Field(
@@ -647,7 +647,7 @@ class GcpWorkloadIdentitySecret(MintSecretBase):
 # union, and gets an exchange branch in
 # services.federation_service.TokenMintService.
 SecretsManagerSecret = Union[
-    SecretsManagerAuthPayload, AnthropicWifSecret, GcpWorkloadIdentitySecret
+    SecretsManagerAuthPayload, AnthropicWifSecret, GcpWifSecret
 ]
 TypedSecret = Annotated[SecretsManagerSecret, Field(discriminator="type")]
 """SecretsManagerSecret discriminated on ``type``, for validating JSON input."""
