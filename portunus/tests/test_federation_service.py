@@ -40,7 +40,7 @@ from portunus.services.federation_service import (
 ACCOUNT = "123456789012"
 OTHER_ACCOUNT = "210987654321"
 ROLE_ARN = (
-    f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/example-grant/"
+    f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/"
     "example-grant@projects.example"
 )
 CALLER_ROLE = "UserProfile_TestUser_example"
@@ -98,28 +98,76 @@ def _client_error(code: str, operation: str) -> ClientError:
 
 
 class TestValidateFederationRoleArn:
-    def test_accepts_role_under_prefix_in_allowed_account(self):
+    def test_accepts_a_namespaced_role_under_the_prefix_in_an_allowed_account(
+        self,
+    ):
         validate_federation_role_arn(ROLE_ARN, [ACCOUNT], "/portunus-fed/")
 
     @pytest.mark.parametrize(
         "arn",
         [
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/Type.1/a_b+c=d,e@f~g/name",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/t/s/{'n' * 64}",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/t/s/n",
+        ],
+    )
+    def test_accepts_iam_path_and_role_name_charsets(self, arn: str):
+        validate_federation_role_arn(arn, [ACCOUNT], "/portunus-fed/")
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            # The former grant-first shape: one segment under the prefix.
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/example-grant/"
+            "example-grant@projects.example",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/name",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/extra/name",
+        ],
+    )
+    def test_rejects_other_than_two_segments_under_the_prefix(self, arn: str):
+        with pytest.raises(AuthenticationError, match="two path segments"):
+            validate_federation_role_arn(arn, [ACCOUNT], "/portunus-fed/")
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
             f"arn:aws:iam::{ACCOUNT}:role/example-grant@projects.example",
-            f"arn:aws:iam::{ACCOUNT}:role/other/example-grant/name",
-            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed-x/example-grant/name",
-            f"arn:aws:iam::{OTHER_ACCOUNT}:role/portunus-fed/example-grant/name",
-            f"arn:aws:iam::{ACCOUNT}:user/portunus-fed/example-grant/name",
+            f"arn:aws:iam::{ACCOUNT}:role/other/projects/example/name",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed-x/projects/example/name",
+            f"arn:aws:iam::{ACCOUNT}:role/x/portunus-fed/projects/example/name",
+        ],
+    )
+    def test_rejects_roles_outside_the_path_prefix(self, arn: str):
+        with pytest.raises(AuthenticationError, match="role path"):
+            validate_federation_role_arn(arn, [ACCOUNT], "/portunus-fed/")
+
+    def test_rejects_roles_in_other_accounts(self):
+        arn = f"arn:aws:iam::{OTHER_ACCOUNT}:role/portunus-fed/projects/example/name"
+        with pytest.raises(AuthenticationError, match="allowed account"):
+            validate_federation_role_arn(arn, [ACCOUNT], "/portunus-fed/")
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            f"arn:aws:iam::{ACCOUNT}:user/portunus-fed/projects/example/name",
             f"arn:aws:sts::{ACCOUNT}:assumed-role/portunus-fed/name",
+            f"arn:aws:iam::{ACCOUNT[:-1]}:role/portunus-fed/projects/example/name",
             f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/",
-            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed//name",
-            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/example-grant/name\n",
-            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/example-grant/na me",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed//example/name",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects//name",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/name\n",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/na me",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/exa mple/name",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/ex\u00e4mple/name",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/name:x",
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/{'n' * 65}",
             "not-an-arn",
             "",
         ],
     )
-    def test_rejects_arns_outside_the_allowed_set(self, arn: str):
-        with pytest.raises(AuthenticationError):
+    def test_rejects_malformed_role_arns(self, arn: str):
+        with pytest.raises(AuthenticationError, match="not an IAM role ARN"):
             validate_federation_role_arn(arn, [ACCOUNT], "/portunus-fed/")
 
     def test_empty_allowlist_disables_minting(self):
@@ -127,7 +175,7 @@ class TestValidateFederationRoleArn:
             validate_federation_role_arn(ROLE_ARN, [], "/portunus-fed/")
 
     def test_path_prefix_is_configurable(self):
-        arn = f"arn:aws:iam::{ACCOUNT}:role/custom-fed/grant/name"
+        arn = f"arn:aws:iam::{ACCOUNT}:role/custom-fed/projects/example/name"
         validate_federation_role_arn(arn, [ACCOUNT], "/custom-fed/")
         with pytest.raises(AuthenticationError, match="role path"):
             validate_federation_role_arn(ROLE_ARN, [ACCOUNT], "/custom-fed/")
@@ -458,7 +506,7 @@ class TestTokenMintService:
         service, sts, anthropic = self._service()
         secret = _secret(
             federation_role_arn=(
-                f"arn:aws:iam::{OTHER_ACCOUNT}:role/portunus-fed/grant/name"
+                f"arn:aws:iam::{OTHER_ACCOUNT}:role/portunus-fed/projects/example/name"
             )
         )
 
