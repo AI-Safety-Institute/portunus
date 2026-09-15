@@ -578,8 +578,10 @@ class MintSecretBase(BaseModel):
     Attributes:
         host: Target host the token is valid for; also validated against the
             proxy's target like the static ``host`` field.
-        federation_role_arn: IAM role whose trust policy admits the caller.
-            Must sit under the deployment's federation role path.
+        federation_role_arn: IAM role whose trust policy admits the caller:
+            ``arn:aws:iam::<account>:role<prefix><namespace>/<name>``, with
+            ``<prefix>`` the deployment's federation role path and
+            ``<namespace>`` exactly two path segments.
         token_duration_seconds: Cap on the STS identity token lifetime.
         signing_key: Request signing key, if the provider requires one.
     """

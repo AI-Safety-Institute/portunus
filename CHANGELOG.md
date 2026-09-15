@@ -11,16 +11,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the caller's credentials to obtain an STS web identity token and exchange
   it at the provider's `/v1/oauth/token` endpoint for a short-lived bearer
   token, returned with `output_header: authorization`. Federation role ARNs
-  must be in `FEDERATION_ALLOWED_ACCOUNT_IDS` (new env var; unset disables
-  minting) and under `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`).
+  must be `arn:aws:iam::<account>:role<prefix><namespace>/<name>` with
+  `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS` (new env var; unset disables
+  minting), `<prefix>` `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`)
+  and `<namespace>` exactly two path segments, e.g.
+  `arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example`.
   `FEDERATION_STS_ENDPOINT_URL`, `FEDERATION_USER_TAG_KEY` and
   `FEDERATION_PROJECT_TAG_KEY` are also new. Minted results are cached until
   the earliest of `CACHE_DURATION`, the caller's credential expiry and five
   minutes before the token expires; concurrent misses for one payload share
   a mint per process.
-- The CLI's default session policy allows `sts:AssumeRole` on
-  `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
-  overrides the path).
+- The CLI's default session policy allows `sts:AssumeRole` on the federation
+  roles in the secret's namespace, taken from the first two path segments of
+  the secret's name: a secret named `projects/example/<name>` gets
+  `arn:aws:iam::<caller account>:role/portunus-fed/projects/example/*`
+  (`--federation-role-path` overrides the path). A secret with fewer than two
+  leading path segments gets no `sts:AssumeRole` statement.
 - `/authorise` responses may carry `output_header` and `output_prefix`, letting
   the backend choose which upstream header receives the credential and with
   what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /

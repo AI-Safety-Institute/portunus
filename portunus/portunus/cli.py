@@ -13,29 +13,29 @@ from portunus.services.payload_service import encode_payload
 
 TEMP_CRED_DURATION_SECONDS = 12 * 60 * 60
 
-DEFAULT_POLICY_TEMPLATE = {
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "SecretsManagerAccess",
-            "Effect": "Allow",
-            "Action": ["secretsmanager:GetSecretValue"],
-            "Resource": "{secret_arn}",
-        },
-        {
-            "Sid": "KMSSignAccess",
-            "Effect": "Allow",
-            "Action": ["kms:Sign"],
-            "Resource": "*",
-        },
-        {
-            "Sid": "FederationRoleAccess",
-            "Effect": "Allow",
-            "Action": ["sts:AssumeRole"],
-            "Resource": "{federation_role_arn_pattern}",
-        },
-    ],
-}
+
+def _federation_role_pattern(
+    secret_arn: str, account_id: str, federation_role_path: str
+) -> str | None:
+    """The federation roles a payload for ``secret_arn`` may assume.
+
+    Federation roles sit at ``role<federation_role_path><namespace>/<name>``
+    and secrets are named ``<namespace>/<name>``, ``<namespace>`` being two
+    path segments, so the first two segments of the secret's name select the
+    roles in its namespace. The last segment (the secret's own name plus
+    Secrets Manager's random suffix) plays no part.
+
+    Returns None when the name has fewer than two leading path segments; the
+    default policy then grants no sts:AssumeRole.
+    """
+    _, _, name = secret_arn.partition(":secret:")
+    segments = name.split("/")
+    if len(segments) < 3 or not (segments[0] and segments[1]):
+        return None
+    return (
+        f"arn:aws:iam::{account_id}:role{federation_role_path}"
+        f"{segments[0]}/{segments[1]}/*"
+    )
 
 
 def _build_default_policy(
@@ -45,16 +45,37 @@ def _build_default_policy(
 ) -> str:
     """Build the default session policy for one secret.
 
-    Grants GetSecretValue on ``secret_arn``, kms:Sign, and sts:AssumeRole on
-    the federation roles under ``federation_role_path`` in the caller's
-    account (needed when the secret mints a token rather than storing one).
+    Grants GetSecretValue on ``secret_arn``, kms:Sign, and (when the secret's
+    name places it in a namespace) sts:AssumeRole on the federation roles of
+    that namespace under ``federation_role_path`` in the caller's account.
     """
-    policy = json.loads(json.dumps(DEFAULT_POLICY_TEMPLATE))
-    policy["Statement"][0]["Resource"] = secret_arn
-    policy["Statement"][2]["Resource"] = (
-        f"arn:aws:iam::{account_id}:role{federation_role_path}*"
+    statements: list[dict[str, object]] = [
+        {
+            "Sid": "SecretsManagerAccess",
+            "Effect": "Allow",
+            "Action": ["secretsmanager:GetSecretValue"],
+            "Resource": secret_arn,
+        },
+        {
+            "Sid": "KMSSignAccess",
+            "Effect": "Allow",
+            "Action": ["kms:Sign"],
+            "Resource": "*",
+        },
+    ]
+    role_pattern = _federation_role_pattern(
+        secret_arn, account_id, federation_role_path
     )
-    return json.dumps(policy)
+    if role_pattern is not None:
+        statements.append(
+            {
+                "Sid": "PortunusFederationAssumeRole",
+                "Effect": "Allow",
+                "Action": ["sts:AssumeRole"],
+                "Resource": role_pattern,
+            }
+        )
+    return json.dumps({"Version": "2012-10-17", "Statement": statements})
 
 
 def _load_policy(policy_arg: str) -> str:
@@ -81,7 +102,7 @@ def encode_credentials(
         secret_arn: The ARN of the secret in AWS Secrets Manager.
         policy: Optional IAM session policy JSON string. If None, uses the
             default policy (secretsmanager:GetSecretValue, kms:Sign, and
-            sts:AssumeRole on the caller account's federation roles).
+            sts:AssumeRole on the federation roles in the secret's namespace).
         federation_role_path: IAM path of the federation roles the default
             policy allows assuming.
 

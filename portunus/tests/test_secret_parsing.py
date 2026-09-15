@@ -16,7 +16,7 @@ from portunus.services.secret_validation_service import (
     parse_secret,
 )
 
-ROLE_ARN = "arn:aws:iam::123456789012:role/portunus-fed/example-grant/example-grant@projects.example"  # noqa: E501
+ROLE_ARN = "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example"  # noqa: E501
 WIF_SECRET = {
     "type": "anthropic_wif",
     "host": "api.example.com",

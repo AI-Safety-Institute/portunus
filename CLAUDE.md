@@ -36,7 +36,7 @@ This repo implements a secure API key proxy system with two main components:
    - Extracts AWS credentials and secret ARN
    - Creates AWS session with provided credentials
    - Retrieves the secret from AWS Secrets Manager and parses it (`services.secret_validation_service.parse_secret`): plaintext or `{"secret", "host", "signing_key"}` is a stored key; `{"type": "anthropic_wif", ...}` describes a token to mint
-   - For mint secrets, `services.federation_service.TokenMintService` checks the federation role ARN against `FEDERATION_ALLOWED_ACCOUNT_IDS` / `FEDERATION_ROLE_PATH_PREFIX`, assumes the role with the caller's credentials (regional STS endpoint), issues an STS web identity token from that session, and exchanges it at `https://<host>/v1/oauth/token`; the result carries `output_header="authorization"`, `output_prefix="Bearer "`. Concurrent misses for one payload share a mint per process.
+   - For mint secrets, `services.federation_service.TokenMintService` checks the federation role ARN (`arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><namespace>/<name>`, `<namespace>` being exactly two path segments) against `FEDERATION_ALLOWED_ACCOUNT_IDS` / `FEDERATION_ROLE_PATH_PREFIX`, assumes the role with the caller's credentials (regional STS endpoint), issues an STS web identity token from that session, and exchanges it at `https://<host>/v1/oauth/token`; the result carries `output_header="authorization"`, `output_prefix="Bearer "`. Concurrent misses for one payload share a mint per process.
    - Caches the result for min(`CACHE_DURATION`, caller credential expiry, token expiry - 5 min)
    - Publishes metadata (principal info) to Kinesis Data Streams for audit trail
    - Returns formatted API key with principal info
