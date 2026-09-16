@@ -63,6 +63,16 @@ RATE_LIMIT_INTERVAL_SECONDS=60
 
 See `entrypoint.sh` for full list of environment variables and defaults.
 
+### Upstream concurrency limits
+
+Limits per Envoy process:
+
+| Environment variable | Default | Limit |
+| --- | --- | --- |
+| `TARGET_MAX_CONNECTIONS` | `10000` | Upstream TCP connections |
+| `TARGET_MAX_REQUESTS` | `1024` | Active upstream HTTP requests |
+| `TARGET_MAX_PENDING_REQUESTS` | `1024` | Requests waiting for a connection-pool slot |
+
 ### Terminating TLS at the proxy
 
 By default the proxy listener is plain HTTP and TLS is expected to terminate in
