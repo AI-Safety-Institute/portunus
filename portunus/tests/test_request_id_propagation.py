@@ -289,6 +289,7 @@ def test_formatter_emits_request_id_and_omits_when_unset():
 @pytest.mark.asyncio
 async def test_publish_queue_failure_logs_carry_request_id(caplog):
     """Workers log outside request context; the id must travel on the task."""
+
     async def batch_sender(stream, records):
         return 0
 

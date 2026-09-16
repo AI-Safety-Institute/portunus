@@ -23,7 +23,6 @@ import sys
 
 import pytest
 import websockets.exceptions as wse
-
 from websockets.asyncio.client import connect as _ws_connect  # noqa: E402
 from websockets.exceptions import ConnectionClosed
 
