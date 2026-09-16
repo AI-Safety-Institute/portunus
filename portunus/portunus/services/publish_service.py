@@ -41,7 +41,7 @@ _MAX_BATCH_BYTES = 4 * 1024 * 1024
 
 def _serialize(record_data: Dict[str, Any]) -> bytes:
     """Serialize a record dict to newline-terminated JSON bytes."""
-    return orjson.dumps(record_data, default=str) + b"\n"
+    return orjson.dumps(record_data, default=str, option=orjson.OPT_APPEND_NEWLINE)
 
 
 def _chunk_records(records: List[bytes]) -> List[List[bytes]]:

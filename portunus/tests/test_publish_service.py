@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -206,3 +207,36 @@ def test_build_metadata_returns_none_when_stream_unconfigured(monkeypatch) -> No
         request_id="r1", timestamp="t", principal_info={}
     )
     assert result is None
+
+
+@pytest.mark.parametrize("direction", ["request", "response"])
+def test_body_record_preserves_binary_content_and_json_line_framing(
+    monkeypatch, direction
+):
+    monkeypatch.setattr(config.firehose, f"{direction}_body_stream_name", "body-stream")
+    body = bytes(range(256)) + b"\n"
+    service = _service(_FakeFirehoseClient())
+    build = getattr(service, f"build_{direction}_body")
+    result = build(
+        request_id="quoted\nidentifier",
+        body_bytes=body,
+        timestamp="2026-01-01T00:00:00Z",
+        chunk_id=3,
+        num_chunks=0,
+        final_chunk=True,
+        frame_index=2,
+    )
+    assert result is not None
+    stream, data = result
+    assert stream == "body-stream"
+    assert data.endswith(b"\n") and len(data.splitlines()) == 1
+    record = json.loads(data)
+    assert base64.b64decode(record["body"]) == body
+    assert record["body_size"] == len(body)
+    assert record["request_id"] == "quoted\nidentifier"
+    assert record["record_type"] == f"{direction}_body"
+    assert (record["chunk_id"], record["final_chunk"], record["frame_index"]) == (
+        3,
+        True,
+        2,
+    )

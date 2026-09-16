@@ -3,7 +3,10 @@
 import hashlib
 import json
 import logging
+import time
 from typing import Optional
+
+import redis.asyncio as aioredis
 
 from portunus.config import config
 from portunus.exceptions import CacheError
@@ -74,14 +77,11 @@ class CacheService:
         self, payload: str, target_host: Optional[str] = None
     ) -> Optional[AuthResult]:
         """Look up a cached AuthResult by (payload, target_host)."""
-        client = await self.state_service.acquire_redis_connection()
-        if not client:
-            logger.warning("Redis client unavailable for cache lookup")
-            return None
-
         try:
             cache_key = self.generate_cache_key(payload, target_host)
-            cached_data = await client.get(cache_key)
+            cached_data = await self.state_service.execute_redis(
+                lambda client: client.get(cache_key)
+            )
 
             if not cached_data:
                 logger.debug("Cache miss for key %s...", cache_key[:8])
@@ -121,11 +121,6 @@ class CacheService:
         target_host: Optional[str] = None,
     ) -> bool:
         """Cache an AuthResult keyed by (payload, target_host)."""
-        client = await self.state_service.acquire_redis_connection()
-        if not client:
-            logger.warning("Redis client unavailable for caching")
-            return False
-
         try:
             cache_key = self.generate_cache_key(payload, target_host)
             effective_ttl = (
@@ -150,9 +145,21 @@ class CacheService:
                 ),
             }
 
-            result = await client.setex(
-                cache_key, effective_ttl, json.dumps(auth_response)
-            )
+            expires_at = time.monotonic() + effective_ttl
+            encoded_response = json.dumps(auth_response)
+
+            async def store(client: aioredis.Redis) -> bool:
+                # Pool waits must consume the credential-bounded cache lifetime.
+                remaining_ms = int((expires_at - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    return False
+                return bool(
+                    await client.psetex(cache_key, remaining_ms, encoded_response)
+                )
+
+            result = await self.state_service.execute_redis(store)
+            if not result:
+                return False
 
             logger.info(
                 f"Cached auth response for principal: "
@@ -175,13 +182,12 @@ class CacheService:
         Raises:
             CacheError: If flushing fails.
         """
-        client = await self.state_service.acquire_redis_connection()
-        if not client:
-            logger.warning("Redis client unavailable for cache flush")
-            return False
-
         try:
-            await client.flushdb()
+            result = await self.state_service.execute_redis(
+                lambda client: client.flushdb()
+            )
+            if not result:
+                return False
             logger.info("Flushed all auth cache entries")
             return True
         except Exception as e:

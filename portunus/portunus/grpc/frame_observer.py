@@ -276,6 +276,9 @@ class FrameObserver:
                 else bytes(event.data)
             )
             pending = self._pending[direction]
+            if pending is None and event.message_finished:
+                yield _capped(direction, opcode, data)
+                return
             if pending is None:
                 pending = _PendingMessage(opcode=opcode, buf=bytearray())
                 self._pending[direction] = pending
