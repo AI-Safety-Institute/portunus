@@ -164,7 +164,7 @@ class CacheService:
             logger.info(
                 f"Cached auth response for principal: "
                 f"{auth_result.principal_info.arn}, "
-                f"expires in {effective_ttl}s)"
+                f"TTL capped at {effective_ttl}s"
             )
 
             return bool(result)
