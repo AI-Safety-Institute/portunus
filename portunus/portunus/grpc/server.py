@@ -429,7 +429,9 @@ async def stop_grpc_server(
     SIGTERM Envoy holds it open for its own longer drain, so ``server.stop``
     consumes its whole budget; without the reserve the queue would get a
     0-second flush window and cancel every buffered record even with a healthy
-    sink. The total stays bounded by ``grace_seconds``.
+    sink. These phases share ``grace_seconds``. Running signing threads can
+    still delay process exit beyond the coroutine's drain budget; their SDK
+    I/O limits constrain ordinary network stalls, not arbitrary thread hangs.
     """
     if runtime is None:
         return
@@ -500,12 +502,8 @@ async def stop_grpc_server(
             },
         )
 
-    # Tear down the KMS signing executor within the remaining drain deadline.
-    # ``server.stop`` already ended all RPCs, so the executor is normally idle
-    # and this returns at once — but a hung KMS.Sign thread would make
-    # ``shutdown(wait=True)`` join forever, so it runs off-loop under a timeout.
-    # On timeout (or an exhausted budget) fall back to a non-blocking shutdown
-    # so a wedged KMS can never push process exit past the ECS stopTimeout.
+    # Bound the coroutine's wait; Python still joins running threads at exit.
+    # SDK I/O limits constrain ordinary stalls, not arbitrary worker hangs.
     teardown_budget = max(0.0, deadline - loop.time())
     torn_down = False
     if teardown_budget > 0:
@@ -516,8 +514,8 @@ async def stop_grpc_server(
         except TimeoutError:
             logger.warning(
                 "KMS signing executor did not shut down within the "
-                "remaining %.1fs drain budget; continuing exit without "
-                "joining its threads",
+                "remaining %.1fs drain budget; continuing the async drain "
+                "while running workers may still delay process exit",
                 teardown_budget,
             )
     if not torn_down:
