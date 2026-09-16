@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
 import grpc
-from envoy.service.auth.v3 import external_auth_pb2_grpc
+from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
+from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
 from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
@@ -321,6 +322,8 @@ async def start_grpc_server(
     # .proto copy.
     reflection.enable_server_reflection(
         (
+            external_auth_pb2.DESCRIPTOR.services_by_name["Authorization"].full_name,
+            proc_pb2.DESCRIPTOR.services_by_name["ExternalProcessor"].full_name,
             health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
             reflection.SERVICE_NAME,
         ),
