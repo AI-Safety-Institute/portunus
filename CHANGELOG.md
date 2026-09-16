@@ -12,6 +12,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   of the backend's CPU per request under load, which capped the OpenAI proxy
   at roughly 500 requests/s with the backend fleet at its maximum task count.
   A single worker now handles about 7x the request rate.
+- A cache read that times out during authentication now rejects the request
+  (503 on HTTP, close code 1013 on WebSocket) instead of falling back to the
+  full STS + Secrets Manager path. Under overload the timeout is a symptom of
+  a starved event loop, and the fallback added ~1 s of work per request that
+  Envoy had already abandoned. Other cache errors still fall back as before.
 
 ## [0.9.0] - 2026-09-11
 

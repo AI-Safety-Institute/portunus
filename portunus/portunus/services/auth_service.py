@@ -11,6 +11,7 @@ import logging
 from typing import Optional
 
 from botocore.exceptions import ClientError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
 from portunus.exceptions import (
@@ -143,6 +144,8 @@ class AuthService:
             PayloadError: If the payload cannot be decoded
             CredentialsError: If the AWS credentials are invalid or expired
             AuthenticationError: If there's an error during authentication
+            TimeoutError: If the cache read times out; the request is rejected
+                rather than falling back to STS and Secrets Manager
         """
         # Check cache first for better performance
         if payload.raw:
@@ -157,8 +160,15 @@ class AuthService:
                             signing_key=cached_result.signing_key,
                             principal_info=cached_result.principal_info,
                         )
+            except (TimeoutError, RedisTimeoutError) as e:
+                logger.warning(
+                    f"Cache read timed out during auth for {request_id} "
+                    f"({type(e).__name__}); rejecting rather than falling back to "
+                    "full authentication"
+                )
+                raise TimeoutError("Cache read timed out during authentication") from e
             except Exception as e:
-                logger.error(f"Cache read error during auth: {e}")
+                logger.error(f"Cache read error during auth: {type(e).__name__}: {e}")
 
         # If not in cache, proceed with full authentication
         try:

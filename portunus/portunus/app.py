@@ -117,6 +117,7 @@ async def authorise(
         401: Unauthorized - invalid payload or credentials
         403: Forbidden - AWS permissions error accessing the secret
         500: Internal server error
+        503: Service unavailable - authorization timed out (backend overloaded)
     """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
@@ -222,7 +223,8 @@ async def authorise(
         response.status_code = e.http_status_code
         return ErrorResponse(message=e.message, debug_id=trace_id)
     except TimeoutError as e:
-        logger.critical(f"Authorization processing timed out for {trace_id}")
+        reason = str(e) or "request deadline exceeded"
+        logger.critical(f"Authorization processing timed out for {trace_id}: {reason}")
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         response.status_code = 503
         return ErrorResponse(

@@ -10,6 +10,8 @@ import json
 import logging
 from typing import Optional, Tuple
 
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from portunus.config import config
 from portunus.exceptions import CacheError
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
@@ -68,7 +70,8 @@ class CacheService:
             A tuple of (api_key, principal_info) if found, None otherwise.
 
         Raises:
-            CacheError: If there's an error accessing the cache.
+            redis.exceptions.TimeoutError: If the Redis read times out.
+            CacheError: If there's any other error accessing the cache.
         """
         client = await self.state_service.acquire_redis_connection()
         if not client:
@@ -105,6 +108,9 @@ class CacheService:
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding cached data: {e}")
             return None
+        # Left unwrapped so AuthService can tell a timeout from other failures.
+        except RedisTimeoutError:
+            raise
         except Exception as e:
             logger.error(f"Error getting from cache: {e}")
             raise CacheError(f"Failed to retrieve from cache: {e}")
