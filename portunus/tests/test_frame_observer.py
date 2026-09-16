@@ -9,6 +9,7 @@ from __future__ import annotations
 from wsproto.connection import Connection, ConnectionType
 from wsproto.events import Ping, TextMessage
 from wsproto.extensions import PerMessageDeflate
+from wsproto.frame_protocol import FrameProtocol
 
 from portunus.grpc.frame_observer import (
     MAX_DECOMPRESSED_PAYLOAD_BYTES,
@@ -29,10 +30,7 @@ def test_capped_passes_through_payloads_under_the_cap():
 
 
 def test_capped_truncates_oversize_payloads_and_sets_the_flag():
-    """Anything above ``MAX_DECOMPRESSED_PAYLOAD_BYTES`` is sliced and the.
-
-    ``truncated`` flag set (downstream's only signal it was capped).
-    """
+    """Oversized payloads are capped and marked truncated."""
     payload = b"X" * (MAX_DECOMPRESSED_PAYLOAD_BYTES + 1024)
     frame = _capped(Direction.RESPONSE, "binary", payload)
     assert len(frame.payload) == MAX_DECOMPRESSED_PAYLOAD_BYTES
@@ -186,8 +184,6 @@ def test_fragmented_message_is_one_logical_frame():
     logical unit is that message, so a fragmented send must still yield a
     single ObservedFrame carrying the reassembled payload.
     """
-    from wsproto.frame_protocol import FrameProtocol
-
     sender = FrameProtocol(client=True, extensions=[])
     wire = sender.send_data(b"AAAA", fin=False) + sender.send_data(b"BBBB", fin=True)
 
@@ -205,8 +201,6 @@ def test_control_frame_between_data_chunks_keeps_its_own_frame():
     Control frames are never fragmented and must not be swallowed into an
     in-progress data message's buffer.
     """
-    from wsproto.frame_protocol import FrameProtocol
-
     sender = FrameProtocol(client=True, extensions=[])
     start = sender.send_data(b"AAAA", fin=False)
     ping = sender.ping(b"png")

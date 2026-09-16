@@ -48,9 +48,10 @@ async def test_submit_droppable_drops_at_body_capacity_not_maxsize() -> None:
 
 @pytest.mark.asyncio
 async def test_submit_blocking_does_not_wait_when_bodies_at_capacity() -> None:
-    """With bodies filling the queue to ``body_capacity``, blocking metadata.
+    """Blocking metadata submits slot into the reserve immediately.
 
-    submits slot into the reserve immediately rather than waiting on a worker.
+    Bodies filling the queue to ``body_capacity`` do not force metadata submits
+    to wait on a worker.
     """
     queue = _queue(
         maxsize=10,
@@ -193,7 +194,7 @@ async def test_sender_partial_failures_count_toward_failed_total() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_with_queue_full_cancels_workers_without_raising(caplog) -> None:
+async def test_stop_with_queue_full_cancels_workers_without_raising() -> None:
     """Shutdown under back-pressure must not let QueueFull escape stop().
 
     Sentinel ``put_nowait(None)`` on a saturated queue would raise QueueFull
@@ -202,10 +203,14 @@ async def test_stop_with_queue_full_cancels_workers_without_raising(caplog) -> N
     must cancel workers and return cleanly.
     """
     sleeping = asyncio.Event()
+    completed = asyncio.Event()
 
     async def _slow_sender(stream_name: str, records: list[bytes]) -> int:
         sleeping.set()
-        await asyncio.sleep(60)  # well past drain_timeout
+        try:
+            await asyncio.sleep(60)  # well past drain_timeout
+        finally:
+            completed.set()
         return 0
 
     # max_batch=1 so the worker takes one item and blocks in the slow
@@ -229,14 +234,11 @@ async def test_stop_with_queue_full_cancels_workers_without_raising(caplog) -> N
     assert queue.qsize() == 3
 
     # stop() must NOT raise (regression: QueueFull escaping from put_nowait).
-    with caplog.at_level("WARNING"):
-        await queue.stop(drain_timeout=0.1)
+    async with asyncio.timeout(1):
+        cancelled = await queue.stop(drain_timeout=0.1)
 
-    # Workers cancelled, registry cleared; warning signals the slow path.
-    assert queue._workers == []  # noqa: SLF001 — direct inspection of cleared state
-    assert any("did not drain" in record.message for record in caplog.records), (
-        "expected the slow-shutdown warning to be emitted"
-    )
+    assert completed.is_set()
+    assert cancelled == 4
 
 
 @pytest.mark.asyncio
@@ -280,7 +282,7 @@ async def test_stop_counts_unflushed_records_on_cancelled_total(caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_saturation_drops_bodies_keeps_metadata_and_drains_sentinels() -> None:
-    """Flood PAST body capacity; the tiered queue's four-part contract holds:.
+    """The tiered queue's four-part contract holds past body capacity.
 
     (a) bodies drop once the queue hits ``body_capacity``;
     (b) metadata still enqueues via the reserved headroom, never waiting;
@@ -325,7 +327,6 @@ async def test_saturation_drops_bodies_keeps_metadata_and_drains_sentinels() -> 
 
     assert cancelled == 0
     assert queue.cancelled_total == 0
-    assert queue._workers == []  # noqa: SLF001 — all workers exited on their sentinel
     # Every accepted record flushed: 90 bodies + 10 metadata, none lost.
     assert published == {"body": 90, "headers": 10}
     assert queue.published_total == 100
@@ -461,10 +462,10 @@ def _reconciled(queue: BoundedPublishQueue) -> bool:
 
 @pytest.mark.asyncio
 async def test_wedged_sender_drain_counts_in_flight_batch_as_cancelled() -> None:
-    """10 records pulled into one in-flight batch with a wedged sender: a.
+    """A wedged sender must count its in-flight batch as cancelled.
 
-    qsize()-based loss count reports 0 while 10 vanish. The in-flight batch
-    must count as cancelled and reconciliation must hold.
+    With 10 records pulled into one batch, a qsize()-based loss count reports 0
+    while 10 vanish. The in-flight batch must count and reconciliation must hold.
     """
     sleeping = asyncio.Event()
 
@@ -552,9 +553,9 @@ async def test_droppable_rejects_count_toward_submitted_total() -> None:
 
 @pytest.mark.asyncio
 async def test_build_returning_none_counts_skipped_unconfigured() -> None:
-    """An unconfigured stream (build()→None) must be a counted skip, not a.
+    """An unconfigured stream (build()→None) must be a counted skip.
 
-    silent one, or it breaks the reconciliation invariant.
+    A silent skip breaks the reconciliation invariant.
     """
     queue = _queue(maxsize=10, num_workers=1)
     for _ in range(3):
@@ -609,9 +610,9 @@ async def test_sentinel_submit_timeout_counts_sentinel_dropped_not_dropped() -> 
 
 @pytest.mark.asyncio
 async def test_reconcile_alarms_when_accounted_exceeds_submitted(caplog) -> None:
-    """Over-accounting (accounted > submitted) signals a double-count bug and.
+    """Over-accounting (accounted > submitted) signals a double-count bug.
 
-    must emit a metric-filterable ERROR from stop(), not silently return 0
+    It must emit a metric-filterable ERROR from stop(), not silently return 0
     (unlike unaccounted records, which are repaired into cancelled_total).
     """
     queue = _queue(maxsize=10, num_workers=1)

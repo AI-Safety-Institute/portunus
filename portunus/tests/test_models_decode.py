@@ -333,9 +333,9 @@ _MESSAGE_DELTA = {
 
 
 def test_eventstream_complete_stream_keeps_token_bearing_tail():
-    """Baseline for the guard: a complete stream succeeds and retains the.
+    """A complete stream succeeds and retains the final message_delta.
 
-    final message_delta carrying usage.output_tokens.
+    The final message_delta carries usage.output_tokens.
     """
     es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
     decoded, failed = _decompress_b64_body(
@@ -373,9 +373,9 @@ def test_eventstream_truncated_trailing_frame_marks_failure(cut, caplog):
 
 
 def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
-    """Cutting at an exact frame boundary leaves a complete (shorter) stream:.
+    """Cutting at an exact frame boundary leaves a complete (shorter) stream.
 
-    no incomplete tail, so the guard must NOT fire (no over-flagging).
+    There is no incomplete tail, so the guard must NOT fire (no over-flagging).
     """
     frame_a = _bedrock_event(_TEXT_DELTA)
     full = frame_a + _bedrock_event(_MESSAGE_DELTA)

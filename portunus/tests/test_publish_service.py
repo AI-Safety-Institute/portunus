@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from portunus.config import config
 from portunus.services.publish_service import (
     _MAX_BATCH_RECORDS,
     PublishService,
@@ -188,8 +189,6 @@ async def test_repeated_inconsistent_firehose_responses_count_all_records_as_fai
 
 
 def test_build_metadata_returns_stream_and_newline_json(monkeypatch) -> None:
-    from portunus.config import config
-
     monkeypatch.setattr(config.firehose, "metadata_stream_name", "meta-stream")
     result = _service(_FakeFirehoseClient()).build_metadata(
         request_id="r1", timestamp="2026-01-01T00:00:00Z", principal_info={}
@@ -202,8 +201,6 @@ def test_build_metadata_returns_stream_and_newline_json(monkeypatch) -> None:
 
 
 def test_build_metadata_returns_none_when_stream_unconfigured(monkeypatch) -> None:
-    from portunus.config import config
-
     monkeypatch.setattr(config.firehose, "metadata_stream_name", "")
     result = _service(_FakeFirehoseClient()).build_metadata(
         request_id="r1", timestamp="t", principal_info={}
