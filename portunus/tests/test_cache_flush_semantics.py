@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import pytest
 
 from portunus.models import AuthResult, PrincipalInfo
 from portunus.services.cache_service import CacheService
+from portunus.services.state_service import StateService
 
 
 class _FakeRedis:
@@ -17,7 +18,7 @@ class _FakeRedis:
     async def get(self, key: str) -> Optional[str]:
         return self._store.get(key)
 
-    async def setex(self, key: str, ttl: int, value: str) -> bool:
+    async def psetex(self, key: str, ttl: int, value: str) -> bool:
         self._store[key] = value
         return True
 
@@ -26,17 +27,11 @@ class _FakeRedis:
         return True
 
 
-class _FakeStateService:
-    def __init__(self) -> None:
-        self._redis = _FakeRedis()
-
-    async def acquire_redis_connection(self, *_a: Any, **_k: Any) -> _FakeRedis:
-        return self._redis
-
-
 @pytest.mark.asyncio
 async def test_flush_all_invalidates_every_read_path():
-    cache = CacheService(state_service=_FakeStateService())  # type: ignore[arg-type]
+    state = StateService()
+    state.redis_client = _FakeRedis()  # type: ignore[assignment]
+    cache = CacheService(state_service=state)
     payload = "payload-abc"
     host = "api.anthropic.com"
     result = AuthResult(
