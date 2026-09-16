@@ -279,3 +279,48 @@ async def test_unconfirmed_upgrade_accounts_for_buffered_capture_at_disconnect(
     assert summary[f"{peer}_text_frames"] == 0
     assert summary[f"{peer}_close_frames"] == 0
     assert summary["close_code"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cap_direction", ["request", "response"])
+@pytest.mark.parametrize("other_capture", ["none", "buffered", "after_cap"])
+async def test_rejected_upgrade_keeps_cap_loss_visible_in_http_body_records(
+    cap_direction, other_capture, monkeypatch
+):
+    monkeypatch.setattr("portunus.grpc.proc_servicer._PRE_101_MAX_BYTES", 4)
+    other_direction = "response" if cap_direction == "request" else "request"
+    messages = [_headers({"upgrade": "websocket"}, request=True)]
+    other_body = proc_pb2.ProcessingRequest(
+        **{f"{other_direction}_body": proc_pb2.HttpBody(body=b"x")}
+    )
+    if other_capture == "buffered":
+        messages.append(other_body)
+    messages.append(
+        proc_pb2.ProcessingRequest(
+            **{f"{cap_direction}_body": proc_pb2.HttpBody(body=b"hello")}
+        )
+    )
+    if other_capture == "after_cap":
+        messages.append(other_body)
+    messages.append(_headers({":status": "403"}, request=False))
+    for direction in ("request", "response"):
+        messages.append(
+            proc_pb2.ProcessingRequest(
+                **{
+                    f"{direction}_body": proc_pb2.HttpBody(
+                        body=b"tail", end_of_stream=True
+                    )
+                }
+            )
+        )
+
+    records = await _capture(messages, monkeypatch)
+
+    for direction in ("request", "response"):
+        bodies = [r for r in records if r["record_type"] == f"{direction}_body"]
+        assert b"".join(base64.b64decode(r["body"]) for r in bodies) == b"tail"
+        lost_capture = direction == cap_direction or other_capture != "none"
+        assert sum(r["truncated"] for r in bodies) == int(lost_capture)
+        assert bodies[-1]["final_chunk"] is True
+        assert all(r["frame_index"] is None for r in bodies)
+    assert not any(r["record_type"] == "ws_summary" for r in records)
