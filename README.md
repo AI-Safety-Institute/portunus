@@ -216,19 +216,22 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
   "organization_id": "org_example",
   "service_account_id": "sa_example",
   "workspace_id": "ws_example",
-  "audience": "https://api.anthropic.com",
-  "token_duration_seconds": 3600
+  "audience": "https://api.anthropic.com"
 }
 ```
 
-`audience` (default shown), `token_duration_seconds` (60–3600, default 3600) and `signing_key` are optional. On a cache miss Portunus:
+`audience` (default shown) is optional. Unknown fields, including `signing_key`, are rejected: request signing is not available for minted tokens. On a cache miss Portunus:
 
 1. Verifies the caller with STS and fetches the secret, as for stored keys.
 2. Checks `federation_role_arn` is `arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><namespace>/<name>` with `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS` and `<namespace>` exactly two path segments (`projects/example` above). Nothing else is called if this fails.
 3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`, tagged with the caller's role name (`FEDERATION_USER_TAG_KEY`) and project (`FEDERATION_PROJECT_TAG_KEY`).
 4. Exchanges the token at `https://<host>/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
-The result is cached until the earliest of `CACHE_DURATION`, the caller's credential expiry, and five minutes before the token expires. Concurrent cache misses for one payload share a single mint per Portunus process. Every exchange uses a freshly issued STS token.
+If STS or the token endpoint cannot be reached or answers 5xx/429, or steps 3–4 take longer than 6 s, `/authorise` returns 503 rather than 403.
+
+Unlike stored keys, which are cached for `CACHE_DURATION`, a minted token is cached until the earliest of `CACHE_DURATION`, the caller's credential expiry, and five minutes before the token expires. Concurrent cache misses for one payload share a single mint per Portunus process. Every exchange uses a freshly issued STS token.
+
+Rollout: payloads encoded before this change carry no `sts:AssumeRole` statement in their session policy, so callers must re-encode (run the CLI again) before a mint secret will work for them. Until then `/authorise` fails with `Could not assume federation role (AccessDenied)`.
 
 The federation role itself (trust policy, identity policy, who may assume it) is a deployment concern. Roles are grouped by namespace: the two path segments under the prefix identify it, and the role name repeats them (as in the example above) only because IAM role names must be unique per account. The CLI's default session policy allows `sts:AssumeRole` only on the roles in the namespace given by the first two path segments of the secret's name: a secret named `projects/example/example-grant` yields `arn:aws:iam::<caller account>:role/portunus-fed/projects/example/*`. A secret whose name has fewer than two leading path segments gets no `sts:AssumeRole` statement, so its payload can only use stored keys. Pass `--federation-role-path` if the deployment uses a different path.
 

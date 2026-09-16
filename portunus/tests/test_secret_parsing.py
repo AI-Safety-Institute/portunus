@@ -84,27 +84,26 @@ class TestParseSecret:
         assert secret.service_account_id == "sa_example"
         assert secret.workspace_id == "ws_example"
         assert secret.audience == "https://api.anthropic.com"
-        assert secret.token_duration_seconds == 3600
-        assert secret.signing_key is None
 
-    def test_anthropic_wif_overrides(self):
-        raw = json.dumps(
-            {
-                **WIF_SECRET,
-                "audience": "https://api.example.com",
-                "token_duration_seconds": 600,
-                "signing_key": {"provider_id": "key1", "kms_key_arn": "arn:kms"},
-            }
-        )
+    def test_anthropic_wif_audience_override(self):
+        raw = json.dumps({**WIF_SECRET, "audience": "https://api.example.com"})
 
         secret = parse_secret(raw)
 
         assert isinstance(secret, AnthropicWifSecret)
         assert secret.audience == "https://api.example.com"
-        assert secret.token_duration_seconds == 600
-        assert secret.signing_key == SigningKey(
-            provider_id="key1", kms_key_arn="arn:kms"
-        )
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"signing_key": {"provider_id": "key1", "kms_key_arn": "arn:kms"}},
+            {"token_duration_seconds": 600},
+            {"unknown": 1},
+        ],
+    )
+    def test_anthropic_wif_rejects_unknown_fields(self, extra: dict):
+        with pytest.raises(AuthenticationError, match="invalid fields"):
+            parse_secret(json.dumps({**WIF_SECRET, **extra}))
 
     @pytest.mark.parametrize(
         "changes",
@@ -116,8 +115,6 @@ class TestParseSecret:
             {"federation_role_arn": None},
             {"organization_id": ""},
             {"audience": ""},
-            {"token_duration_seconds": 30},
-            {"token_duration_seconds": 7200},
         ],
     )
     def test_anthropic_wif_missing_or_invalid_fields_raise(self, changes: dict):
@@ -160,16 +157,3 @@ class TestValidateSecretForMintTypes:
     def test_unknown_target_is_rejected(self):
         with pytest.raises(AuthenticationError, match="target host unknown"):
             self.service.validate_secret(json.dumps(WIF_SECRET), None)
-
-    def test_static_extraction_refuses_mint_secrets(self):
-        with pytest.raises(AuthenticationError, match="token minting"):
-            self.service.validate_and_extract_api_key(
-                json.dumps(WIF_SECRET), "api.example.com"
-            )
-
-    def test_static_extraction_still_returns_stored_keys(self):
-        api_key, signing_key = self.service.validate_and_extract_api_key(
-            '{"secret": "sk", "host": "api.example.com"}', "api.example.com"
-        )
-
-        assert (api_key, signing_key) == ("sk", None)

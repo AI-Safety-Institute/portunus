@@ -82,6 +82,17 @@ class ConfigurationError(ServiceError):
         super().__init__(message)
 
 
+class UpstreamServiceError(ServiceError):
+    """A dependency needed to mint or fetch a credential was unavailable.
+
+    The message is returned to clients, so it must not name endpoints or
+    other deployment details.
+    """
+
+    def __init__(self, message: str = "Upstream service unavailable"):
+        super().__init__(message)
+
+
 # State Management Errors
 
 

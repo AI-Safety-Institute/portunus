@@ -13,10 +13,8 @@ from pydantic import TypeAdapter, ValidationError
 
 from portunus.exceptions import AuthenticationError
 from portunus.models import (
-    MintSecretBase,
     SecretsManagerAuthPayload,
     SecretsManagerSecret,
-    SigningKey,
     TypedSecret,
 )
 
@@ -81,7 +79,7 @@ def parse_secret(secret_string: str) -> SecretsManagerSecret:
 
 class SecretValidationService:
     """
-    Service for validating secrets and extracting API keys.
+    Service for parsing secrets and enforcing their host restrictions.
 
     This service handles parsing secret formats and enforcing target host
     validation when required.
@@ -125,21 +123,3 @@ class SecretValidationService:
             logger.info("Secret has no host restriction, skipping validation")
 
         return secret
-
-    def validate_and_extract_api_key(
-        self, secret_string: str, target_host: str | None
-    ) -> tuple[str, Optional[SigningKey]]:
-        """
-        Stored-key form of ``validate_secret``.
-
-        Returns:
-            The API key & signing key (optional) to use.
-
-        Raises:
-            AuthenticationError: As ``validate_secret``, or when the secret
-                describes a token to mint rather than a stored key.
-        """
-        secret = self.validate_secret(secret_string, target_host)
-        if isinstance(secret, MintSecretBase):
-            raise AuthenticationError("Secret requires token minting")
-        return secret.api_key, secret.signing_key

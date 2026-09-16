@@ -574,6 +574,8 @@ class MintSecretBase(BaseModel):
 
     Portunus assumes ``federation_role_arn`` with the caller's own credentials
     and federates that session to the provider named by the concrete type.
+    Unknown fields are rejected. There is no ``signing_key``: request signing
+    is not available for minted tokens.
 
     Attributes:
         host: Target host the token is valid for; also validated against the
@@ -582,14 +584,12 @@ class MintSecretBase(BaseModel):
             ``arn:aws:iam::<account>:role<prefix><namespace>/<name>``, with
             ``<prefix>`` the deployment's federation role path and
             ``<namespace>`` exactly two path segments.
-        token_duration_seconds: Cap on the STS identity token lifetime.
-        signing_key: Request signing key, if the provider requires one.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     host: str = Field(min_length=1)
     federation_role_arn: str = Field(min_length=1)
-    token_duration_seconds: int = Field(default=3600, ge=60, le=3600)
-    signing_key: Optional[SigningKey] = None
 
 
 class AnthropicWifSecret(MintSecretBase):
@@ -608,7 +608,7 @@ class AnthropicWifSecret(MintSecretBase):
     audience: str = Field(default="https://api.anthropic.com", min_length=1)
 
 
-# Every secret shape. A new mint provider (e.g. gcp_workload_identity)
+# Every secret shape. A new mint provider (e.g. gcp_wif)
 # subclasses MintSecretBase, joins this union, and gets an exchange branch in
 # services.federation_service.TokenMintService.
 SecretsManagerSecret = Union[SecretsManagerAuthPayload, AnthropicWifSecret]
