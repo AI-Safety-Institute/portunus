@@ -321,6 +321,21 @@ class SigningConfig(BaseModel):
         ),
         gt=0.0,
     )
+    kms_connect_timeout_s: float = Field(
+        default=2.0,
+        description="Connection timeout for each KMS signing attempt",
+        gt=0.0,
+    )
+    kms_read_timeout_s: float = Field(
+        default=5.0,
+        description="Socket read timeout for each KMS signing attempt",
+        gt=0.0,
+    )
+    kms_max_attempts: int = Field(
+        default=2,
+        description="Total KMS signing attempts, including the initial request",
+        ge=1,
+    )
 
 
 class KinesisConfig(BaseModel):
@@ -522,6 +537,11 @@ def get_config() -> PortunusConfig:
         kms_executor_workers=int(os.environ.get("SIGNING_KMS_EXECUTOR_WORKERS", "16")),
         max_concurrent=int(os.environ.get("SIGNING_MAX_CONCURRENT", "32")),
         acquire_timeout_s=float(os.environ.get("SIGNING_ACQUIRE_TIMEOUT_S", "2.0")),
+        kms_connect_timeout_s=float(
+            os.environ.get("SIGNING_KMS_CONNECT_TIMEOUT_S", "2.0")
+        ),
+        kms_read_timeout_s=float(os.environ.get("SIGNING_KMS_READ_TIMEOUT_S", "5.0")),
+        kms_max_attempts=int(os.environ.get("SIGNING_KMS_MAX_ATTEMPTS", "2")),
     )
 
     kinesis = KinesisConfig(

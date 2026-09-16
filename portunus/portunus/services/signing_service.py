@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Literal, Optional, TypedDict
 
 import boto3
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, HttpUrl
 
@@ -202,6 +203,14 @@ def sign_request(
         aws_session_token=user_credentials.session_token,
         # Add endpoint_url if configured (for LocalStack)
         endpoint_url=config.aws.endpoint_url,
+        config=BotoConfig(
+            connect_timeout=config.signing.kms_connect_timeout_s,
+            read_timeout=config.signing.kms_read_timeout_s,
+            retries={
+                "mode": "standard",
+                "total_max_attempts": config.signing.kms_max_attempts,
+            },
+        ),
     )
 
     # Error codes that indicate credential issues
@@ -234,6 +243,8 @@ def sign_request(
         if error_code in credential_error_codes:
             raise CredentialsError("AWS credentials are invalid or expired") from e
         raise
+    finally:
+        kms.close()
 
     signature_b64: str = base64.b64encode(response["Signature"]).decode()
     signature_name = "sig1"
