@@ -39,6 +39,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - WebSocket connections have a maximum duration of 3,300 seconds. Clients must
   reconnect after expiry or shutdown; a graceful WebSocket close frame is not
   guaranteed. Tenants requiring request signing receive HTTP 400 on upgrade.
+- Audit serialization avoids an extra copy when adding JSON record delimiters.
+- Complete WebSocket messages avoid a reassembly copy while retaining capture limits
+  and fragmented-message handling.
+- Cached authentication avoids a Redis probe before each operation. Cache commands
+  retry bounded pool contention without extending the entry's remaining lifetime.
 
 ### Fixed
 

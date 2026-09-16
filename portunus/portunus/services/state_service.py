@@ -6,6 +6,7 @@ import hashlib
 import logging
 import random
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
 import aiobotocore.session
@@ -252,29 +253,27 @@ class StateService:
                 self.redis_client = None
 
     @capture_async()
-    async def acquire_redis_connection(self, max_retries=8):
-        """Acquire a Redis connection with exponential-backoff retry.
-
-        Provides backpressure by making callers wait when Redis is overloaded.
-        (Caveat: the ping() here also adds load.)
-
-        Args:
-            max_retries: Maximum retry attempts (default: 8).
-
-        Returns:
-            Redis client if successful, None otherwise.
-        """
+    async def execute_redis[T](
+        self,
+        operation: Callable[[aioredis.Redis], Awaitable[T]],
+        max_retries: int = 8,
+    ) -> Optional[T]:
+        """Run a Redis operation with bounded retries for pool contention."""
         client = await self.get_redis_client()
         if not client:
+            logger.warning("Redis client unavailable for cache operation")
             return None
 
         retry_count = 0
         while retry_count <= max_retries:
             try:
-                await client.ping()
-                return client
+                return await operation(client)
             except (MaxConnectionsError, ConnectionError) as e:
-                if "Too many connections" in str(e) and retry_count < max_retries:
+                pool_full = (
+                    isinstance(e, MaxConnectionsError)
+                    or str(e) == "Too many connections"
+                )
+                if pool_full and retry_count < max_retries:
                     retry_count += 1
                     backoff = min(0.1 * (1.5**retry_count), 1.0) * (
                         0.8 + 0.4 * random.random()
@@ -285,7 +284,7 @@ class StateService:
                     )
                     await asyncio.sleep(backoff)
                 else:
-                    raise e
+                    raise
         return None
 
     async def health_check(self) -> bool:
