@@ -142,12 +142,23 @@ async def sign_request_async(
         ) from None
     try:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        future = loop.run_in_executor(
             _get_kms_executor(),
             functools.partial(signer, req, signing_key, api_key, user_credentials),
         )
-    finally:
+    except BaseException:
         semaphore.release()
+        raise
+
+    def signing_finished(completed: asyncio.Future[SignatureHeaders]) -> None:
+        semaphore.release()
+        # A disconnected caller cannot retrieve a later worker exception.
+        if not completed.cancelled():
+            completed.exception()
+
+    future.add_done_callback(signing_finished)
+    # Cancelling the RPC cannot stop its running thread or free its capacity.
+    return await asyncio.shield(future)
 
 
 def _get_region_from_arn(arn: str) -> str:
