@@ -278,13 +278,7 @@ async def test_flush_reserve_larger_than_grace_is_clamped():
 
 @pytest.mark.asyncio
 async def test_drain_tears_down_kms_executor_within_deadline(monkeypatch):
-    """The drain shuts the dedicated KMS executor down (wait=True) off-loop.
-
-    ``server.stop`` has already ended all RPCs, so in the happy path the
-    executor is idle and the join returns immediately — but it must happen
-    inside the drain deadline so a leftover KMS thread can't outlive the
-    grace window.
-    """
+    """The async drain joins an idle signing executor within its budget."""
     calls: list[dict] = []
 
     def _spy_reset(*, wait: bool = False) -> None:
@@ -306,15 +300,8 @@ async def test_drain_tears_down_kms_executor_within_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hung_kms_teardown_cannot_push_exit_past_the_drain_deadline(
-    monkeypatch,
-):
-    """A wedged KMS.Sign thread makes ``shutdown(wait=True)`` join forever.
-
-    The teardown runs under the REMAINING drain budget; on timeout the
-    drain falls back to a non-blocking shutdown (no join) and proceeds —
-    a hung KMS can never push process exit past the ECS stopTimeout.
-    """
+async def test_drain_returns_when_signing_executor_join_exceeds_budget(monkeypatch):
+    """The coroutine stops waiting; running workers can still delay process exit."""
     calls: list[dict] = []
 
     def _hung_reset(*, wait: bool = False) -> None:
@@ -350,5 +337,5 @@ async def test_hung_kms_teardown_cannot_push_exit_past_the_drain_deadline(
     # The blocking attempt timed out and the non-blocking fallback ran.
     assert calls[0] == {"wait": True}
     assert calls[-1] == {"wait": False}
-    # Exit was not held hostage by the hung join (1.2s sleep).
+    # This measures coroutine return, not process exit or worker termination.
     assert elapsed <= grace + 0.5, f"drain overran the deadline: {elapsed:.2f}s"

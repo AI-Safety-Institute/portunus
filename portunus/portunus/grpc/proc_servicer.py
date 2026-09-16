@@ -101,9 +101,9 @@ class _StreamState:
     truncated_server_frames: int = 0
     close_code: Optional[int] = None
     close_initiator: Optional[str] = None
-    # WS body bytes that arrived before response_headers (which carries
-    # Sec-WebSocket-Extensions). Replayed once the observer is built.
-    pre_101_buffer: list[tuple[Direction, bytes]] = field(default_factory=list)
+    # Retain bytes and HTTP completion until the upgrade response selects
+    # either the WebSocket observer or ordinary HTTP capture.
+    pre_101_buffer: list[tuple[Direction, bytes, bool]] = field(default_factory=list)
     pre_101_bytes: int = 0
     # Set when the pre-101 buffer cap is hit. Truncating raw WS bytes mid-frame
     # would desync the parser + per-direction zlib inflate state, corrupting
@@ -163,6 +163,26 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             if state is not None:
                 self._active.pop(state.stream_id, None)
                 if state.mode == StreamMode.WS_UPGRADE:
+                    if not state.response_headers_seen:
+                        for direction in {
+                            direction
+                            for direction, chunk, _ in state.pre_101_buffer
+                            if chunk
+                        }:
+                            self._record_incomplete_capture(state, direction)
+                        state.pre_101_buffer.clear()
+                        state.pre_101_bytes = 0
+                    if state.observer is not None:
+                        timestamp = generate_iso_timestamp()
+                        for direction in Direction:
+                            already_desynced = state.observer.desynced(direction)
+                            for frame in state.observer.finish(direction):
+                                await self._submit_frame(state, frame, timestamp)
+                            if not already_desynced and state.observer.desynced(
+                                direction
+                            ):
+                                state.parser_desynced = True
+                                self._record_incomplete_capture(state, direction)
                     await self._emit_ws_summary(state, droppable=False)
 
     def _initialise_stream(self, first: proc_pb2.ProcessingRequest) -> _StreamState:
@@ -213,6 +233,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
 
         if request.HasField("request_headers"):
             await self._on_request_headers(state, request, timestamp)
+            if request.request_headers.end_of_stream:
+                await self._finish_http_body(state, Direction.REQUEST, timestamp)
             yield _empty_headers_response(request_side=True)
         elif request.HasField("request_body"):
             await self._on_body_chunk(
@@ -223,9 +245,12 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             )
         elif request.HasField("request_trailers"):
             await self._on_request_trailers(state, request.request_trailers, timestamp)
+            await self._finish_http_body(state, Direction.REQUEST, timestamp)
             yield _empty_trailers_response(request_side=True)
         elif request.HasField("response_headers"):
             await self._on_response_headers(state, request.response_headers, timestamp)
+            if request.response_headers.end_of_stream:
+                await self._finish_http_body(state, Direction.RESPONSE, timestamp)
             yield _empty_headers_response(request_side=False)
         elif request.HasField("response_body"):
             await self._on_body_chunk(
@@ -238,6 +263,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             await self._on_response_trailers(
                 state, request.response_trailers, timestamp
             )
+            await self._finish_http_body(state, Direction.RESPONSE, timestamp)
             yield _empty_trailers_response(request_side=False)
         # Unknown variants are silently ignored for forward-compat.
 
@@ -309,21 +335,29 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         timestamp: str,
     ) -> None:
         headers = _headers_to_dict(msg.headers)
-        # For WS upgrades, rebuild the observer with the PerMessageDeflate
-        # state negotiated in the 101 response, then replay buffered pre-101
-        # bytes through it in arrival order.
         if state.mode == StreamMode.WS_UPGRADE:
-            ext_b64 = headers.get("sec-websocket-extensions")
-            ext: Optional[str] = None
-            if ext_b64:
-                try:
-                    ext = base64.b64decode(ext_b64).decode("utf-8", errors="replace")
-                except Exception:
-                    ext = None
-            state.upstream_extensions = ext
-            state.observer = build_observer(response_extensions_header=ext)
-            state.response_headers_seen = True
-            await self._replay_pre_101(state, timestamp)
+            status = next(
+                (_header_value(h) for h in msg.headers.headers if h.key == ":status"),
+                "",
+            )
+            if status == "101":
+                ext_b64 = headers.get("sec-websocket-extensions")
+                ext: Optional[str] = None
+                if ext_b64:
+                    try:
+                        ext = base64.b64decode(ext_b64).decode(
+                            "utf-8", errors="replace"
+                        )
+                    except Exception:
+                        ext = None
+                state.upstream_extensions = ext
+                state.observer = build_observer(response_extensions_header=ext)
+                state.response_headers_seen = True
+                await self._replay_pre_101(state, timestamp)
+            elif not status.startswith("1"):
+                state.mode = StreamMode.HTTP
+                state.observer = None
+                await self._replay_pre_101(state, timestamp)
 
         await self._queue.submit_blocking(
             PublishTask(
@@ -358,6 +392,17 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             timeout=config.grpc.publish_blocking_timeout_seconds,
         )
 
+    async def _finish_http_body(
+        self, state: _StreamState, direction: Direction, timestamp: str
+    ) -> None:
+        if state.mode == StreamMode.HTTP or not state.response_headers_seen:
+            await self._on_body_chunk(
+                state,
+                proc_pb2.HttpBody(end_of_stream=True),
+                direction,
+                timestamp,
+            )
+
     async def _on_body_chunk(
         self,
         state: _StreamState,
@@ -372,7 +417,9 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             if state.pre_101_poisoned:
                 return
             if not state.response_headers_seen:
-                self._buffer_pre_101(state, direction, msg.body)
+                self._buffer_pre_101(
+                    state, direction, msg.body, end_of_stream=msg.end_of_stream
+                )
                 return
             await self._observe_ws_chunk(state, direction, msg.body, timestamp)
             return
@@ -419,24 +466,30 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         for frame in observer.observe(direction=direction, chunk=chunk):
             await self._submit_frame(state, frame, timestamp)
         if not already_desynced and observer.desynced(direction):
-            if direction == Direction.REQUEST:
-                state.truncated_client_frames += 1
-            else:
-                state.truncated_server_frames += 1
             state.parser_desynced = True
-            logger.warning(
-                "WS frame parser desynced on stream %s (%s direction); "
-                "remaining frames in this direction are unobservable — "
-                "counted as truncated in the WS summary",
-                state.stream_id,
-                direction.value,
-            )
+            self._record_incomplete_capture(state, direction)
+
+    def _record_incomplete_capture(
+        self, state: _StreamState, direction: Direction
+    ) -> None:
+        if direction == Direction.REQUEST:
+            state.truncated_client_frames += 1
+        else:
+            state.truncated_server_frames += 1
+        logger.warning(
+            "Incomplete WS capture on stream %s (%s direction); "
+            "counted as truncated in the summary",
+            state.stream_id,
+            direction.value,
+        )
 
     def _buffer_pre_101(
         self,
         state: _StreamState,
         direction: Direction,
         chunk: bytes,
+        *,
+        end_of_stream: bool = False,
     ) -> None:
         """Stash a WS body chunk that arrived before the 101 response.
 
@@ -468,20 +521,25 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             state.pre_101_buffer.clear()
             state.pre_101_bytes = 0
             return
-        state.pre_101_buffer.append((direction, chunk))
+        state.pre_101_buffer.append((direction, chunk, end_of_stream))
         state.pre_101_bytes += len(chunk)
 
     async def _replay_pre_101(self, state: _StreamState, timestamp: str) -> None:
-        """Feed buffered pre-101 bytes through the just-built observer."""
+        """Replay body events after the upgrade outcome selects their decoder."""
         if state.pre_101_poisoned:
             # Buffer was cleared at poison time; nothing safe to replay.
             return
-        if not state.pre_101_buffer or state.observer is None:
+        if not state.pre_101_buffer:
             state.pre_101_buffer.clear()
             state.pre_101_bytes = 0
             return
-        for direction, chunk in state.pre_101_buffer:
-            await self._observe_ws_chunk(state, direction, chunk, timestamp)
+        for direction, chunk, end_of_stream in state.pre_101_buffer:
+            await self._on_body_chunk(
+                state,
+                proc_pb2.HttpBody(body=chunk, end_of_stream=end_of_stream),
+                direction,
+                timestamp,
+            )
         state.pre_101_buffer.clear()
         state.pre_101_bytes = 0
 

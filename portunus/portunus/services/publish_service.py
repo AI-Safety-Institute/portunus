@@ -118,23 +118,38 @@ class PublishService:
                 )
                 return len(records)
 
-            failed_count = int(resp.get("FailedPutCount", 0) or 0)
-            if failed_count == 0:
-                return 0
-
-            # Identify the failed records by position so we retry only those.
-            responses = resp.get("RequestResponses", [])
+            failed_count = resp.get("FailedPutCount")
+            responses = resp.get("RequestResponses")
+            consistent = (
+                type(failed_count) is int
+                and isinstance(responses, list)
+                and len(responses) == len(records)
+                and all(
+                    isinstance(r, dict)
+                    and bool(r.get("RecordId")) != bool(r.get("ErrorCode"))
+                    for r in responses
+                )
+                and sum(bool(r.get("ErrorCode")) for r in responses) == failed_count
+            )
             retry: List[bytes] = []
             last_error_codes = {}
-            for data, r in zip(records, responses):
-                code = r.get("ErrorCode")
-                if code:
-                    retry.append(data)
-                    last_error_codes[code] = last_error_codes.get(code, 0) + 1
-            # Fallback for missing/misaligned responses: treat the tail as
-            # failed so we never silently under-count.
+            if consistent:
+                for data, r in zip(records, responses):
+                    code = r.get("ErrorCode")
+                    if code:
+                        retry.append(data)
+                        last_error_codes[code] = last_error_codes.get(code, 0) + 1
+            else:
+                # A misaligned response cannot confirm which inputs succeeded.
+                # Retrying the whole group may duplicate records, but never hides loss.
+                retry = records
+                logger.warning(
+                    "Inconsistent Firehose response on %s; %d records unconfirmed",
+                    stream_name,
+                    len(records),
+                )
             if not retry:
-                retry = records[len(records) - failed_count :]
+                return 0
 
             if attempt == 1:
                 logger.warning(

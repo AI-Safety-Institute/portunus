@@ -99,6 +99,10 @@ class _CappedPerMessageDeflate(PerMessageDeflate):
         return inflated
 
     def frame_inbound_complete(self, proto, fin):  # type: ignore[no-untyped-def]
+        # Control frames can interrupt a data message without ending its
+        # compression context or its cumulative byte budget.
+        if not self._inbound_is_compressible and self._inbound_compressed:
+            return None
         result = super().frame_inbound_complete(proto, fin)
         if fin:
             self._inflated_in_message = 0
@@ -178,10 +182,30 @@ class FrameObserver:
         """True once ``direction``'s parser hit an error and stopped observing."""
         return self._desynced[direction]
 
+    def finish(self, direction: Direction) -> Iterator[ObservedFrame]:
+        """Yield partial messages and flag incomplete framing at capture end."""
+        pending = self._pending[direction]
+        self._pending[direction] = None
+        if pending is not None:
+            yield ObservedFrame(
+                direction=direction,
+                opcode=pending.opcode,
+                payload=bytes(pending.buf[:MAX_DECOMPRESSED_PAYLOAD_BYTES]),
+                truncated=True,
+            )
+        elif not self._desynced[direction]:
+            conn = self._request if direction == Direction.REQUEST else self._response
+            # wsproto exposes no EOF event for an unfinished frame header.
+            # Its decoder retains either unparsed bytes or the unfinished header.
+            decoder = conn._proto._frame_decoder
+            if decoder.header is not None or len(decoder.buffer):
+                self._mark_desynced(direction, "IncompleteFrameAtEOF")
+
     def _mark_desynced(self, direction: Direction, detail: str) -> None:
         # wsproto error messages can echo frame bytes — log class names / short
         # reasons only.
         self._desynced[direction] = True
+        self._pending[direction] = None
         logger.warning(
             "WS frame parser failed on %s direction (%s); remaining "
             "bytes in this direction are unobservable",
@@ -277,6 +301,7 @@ class FrameObserver:
                 direction=direction, opcode="pong", payload=event.payload
             )
         elif isinstance(event, CloseConnection):
+            yield from self.finish(direction)
             yield ObservedFrame(
                 direction=direction,
                 opcode="close",

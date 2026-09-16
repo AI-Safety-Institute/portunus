@@ -398,6 +398,11 @@ class BoundedPublishQueue:
                 for task in tasks:
                     self._queued_bytes -= task.size_bytes
                     self._queue.task_done()
+                # The next queue wait may be indefinite; released byte budget
+                # must not leave completed payloads pinned in worker locals.
+                tasks.clear()
+                first = nxt = None
+                del task
 
             if stop:
                 return

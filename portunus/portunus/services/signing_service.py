@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Literal, Optional, TypedDict
 
 import boto3
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, HttpUrl
 
@@ -142,12 +143,23 @@ async def sign_request_async(
         ) from None
     try:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        future = loop.run_in_executor(
             _get_kms_executor(),
             functools.partial(signer, req, signing_key, api_key, user_credentials),
         )
-    finally:
+    except BaseException:
         semaphore.release()
+        raise
+
+    def signing_finished(completed: asyncio.Future[SignatureHeaders]) -> None:
+        semaphore.release()
+        # A disconnected caller cannot retrieve a later worker exception.
+        if not completed.cancelled():
+            completed.exception()
+
+    future.add_done_callback(signing_finished)
+    # Cancelling the RPC cannot stop its running thread or free its capacity.
+    return await asyncio.shield(future)
 
 
 def _get_region_from_arn(arn: str) -> str:
@@ -191,6 +203,14 @@ def sign_request(
         aws_session_token=user_credentials.session_token,
         # Add endpoint_url if configured (for LocalStack)
         endpoint_url=config.aws.endpoint_url,
+        config=BotoConfig(
+            connect_timeout=config.signing.kms_connect_timeout_s,
+            read_timeout=config.signing.kms_read_timeout_s,
+            retries={
+                "mode": "standard",
+                "total_max_attempts": config.signing.kms_max_attempts,
+            },
+        ),
     )
 
     # Error codes that indicate credential issues
@@ -223,6 +243,8 @@ def sign_request(
         if error_code in credential_error_codes:
             raise CredentialsError("AWS credentials are invalid or expired") from e
         raise
+    finally:
+        kms.close()
 
     signature_b64: str = base64.b64encode(response["Signature"]).decode()
     signature_name = "sig1"

@@ -1,5 +1,4 @@
-# Base images digest-pinned for supply-chain posture.
-FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df as builder
+FROM python:3.12-alpine@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a as builder
 
 # uv pinned by version + digest — :latest is a moving tag and the build
 # toolchain is inside the trust boundary.
@@ -17,7 +16,7 @@ RUN touch README.md
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
-FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df as runtime
+FROM python:3.12-alpine@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a as runtime
 
 # grpc_health_probe: static binary docker/ECS use to probe the
 # grpc.health.v1.Health service (Portunus serves only gRPC). musl-compatible;
