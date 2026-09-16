@@ -101,6 +101,9 @@ _STS_CLIENT_CONFIG = AioConfig(
     retries={"max_attempts": 1, "mode": "standard"},
 )
 _EXCHANGE_TIMEOUT = httpx.Timeout(4.0)
+# Two hops per mint (Google STS, then IAM Credentials) that, after AssumeRole,
+# must fit inside MINT_DEADLINE_SECONDS.
+_GCP_HOP_TIMEOUT = httpx.Timeout(3.0, connect=1.0)
 
 
 @dataclass(frozen=True)
@@ -481,8 +484,10 @@ class _HttpTokenExchange:
                 url, data=data, json=json_body, headers=headers
             )
         except httpx.HTTPError as e:
+            # Not chained: the exception carries the request, whose body holds
+            # the proof or federated token.
             logger.error(f"{step} failed: {type(e).__name__}: {e}")
-            raise UpstreamServiceError(f"{step} is unavailable") from e
+            raise UpstreamServiceError(f"{step} is unavailable") from None
         if response.status_code != 200:
             logger.error(
                 f"{step} returned HTTP {response.status_code}: {response.text[:500]}"
@@ -585,6 +590,8 @@ class GcpTokenExchange(_HttpTokenExchange):
     access token for the secret's service account.
     """
 
+    timeout = _GCP_HOP_TIMEOUT
+
     @capture_async(name="gcp_exchange")
     async def exchange(self, proof: str, secret: GcpWifSecret) -> MintedToken:
         """Obtain an access token for ``secret.service_account``.
@@ -618,7 +625,9 @@ class GcpTokenExchange(_HttpTokenExchange):
         impersonation = f"Impersonation of {secret.service_account}"
         access = await self._post_json(
             impersonation,
-            GOOGLE_IAM_CREDENTIALS_URL.format(service_account=secret.service_account),
+            GOOGLE_IAM_CREDENTIALS_URL.format(
+                service_account=urllib.parse.quote(secret.service_account, safe="@")
+            ),
             headers={"Authorization": f"Bearer {federated_token}"},
             json_body={
                 "scope": secret.scopes,

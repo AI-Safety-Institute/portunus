@@ -613,8 +613,8 @@ GCP_POOL_PROVIDER_PATTERN = (
     r"^//iam\.googleapis\.com/projects/\d+/locations/global/"
     r"workloadIdentityPools/[^/\s]+/providers/[^/\s]+$"
 )
-# Email shape only; the value is interpolated into the impersonation URL path.
-GCP_SERVICE_ACCOUNT_PATTERN = r"^[^\s/@:]+@[^\s/@:]+$"
+# Email charset only; the value is URL-quoted into the impersonation URL path.
+GCP_SERVICE_ACCOUNT_PATTERN = r"^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$"
 
 
 class GcpWifSecret(MintSecretBase):
@@ -631,7 +631,7 @@ class GcpWifSecret(MintSecretBase):
             ``workloadIdentityPools/<pool>/providers/<provider>``.
         service_account: Email of the service account to impersonate.
         scopes: OAuth scopes requested for the access token.
-        token_lifetime_seconds: Requested access token lifetime.
+        token_lifetime_seconds: Requested access token lifetime, 600-3600 s.
     """
 
     type: Literal["gcp_wif"]
@@ -640,7 +640,9 @@ class GcpWifSecret(MintSecretBase):
     scopes: list[Annotated[str, Field(min_length=1)]] = Field(
         default=[GCP_CLOUD_PLATFORM_SCOPE], min_length=1
     )
-    token_lifetime_seconds: int = Field(default=3600, ge=60, le=3600)
+    # Minted tokens are cached until TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS (300 s)
+    # before expiry; a shorter lifetime would never be cached.
+    token_lifetime_seconds: int = Field(default=3600, ge=600, le=3600)
 
 
 # Every secret shape. A new mint provider subclasses MintSecretBase, joins this

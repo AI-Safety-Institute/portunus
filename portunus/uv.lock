@@ -1209,7 +1209,7 @@ requires-dist = [
     { name = "contextvars", specifier = "~=2.4" },
     { name = "cryptography", specifier = ">=43.0.0,<50" },
     { name = "fastapi", specifier = ">=0.111.0,<1" },
-    { name = "google-auth", specifier = ">=2.58.0,<3" },
+    { name = "google-auth", specifier = ">=2.29.0,<3" },
     { name = "gunicorn", specifier = ">=22.0.0,<23" },
     { name = "httpx", specifier = ">=0.27.0,<1" },
     { name = "pyyaml", specifier = ">=6.0.1,<7" },

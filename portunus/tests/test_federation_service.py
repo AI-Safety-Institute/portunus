@@ -12,13 +12,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
+import botocore.auth
 import httpx
 import pytest
+from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
 from botocore.exceptions import (
     ClientError,
     EndpointConnectionError,
     ReadTimeoutError,
 )
+from google.auth import _helpers as google_helpers
 
 from portunus.config import FederationConfig
 from portunus.exceptions import (
@@ -37,6 +41,7 @@ from portunus.models import (
 )
 from portunus.services import federation_service
 from portunus.services.federation_service import (
+    AWS_GET_CALLER_IDENTITY_URL,
     AWS_SUBJECT_TOKEN_TYPE,
     FEDERATION_SESSION_SECONDS,
     GOOGLE_ACCESS_TOKEN_TYPE,
@@ -587,6 +592,28 @@ class TestSignedCallerIdentity:
         assert "x-amz-security-token" in signed
 
     @pytest.mark.asyncio
+    async def test_signature_matches_botocore_sigv4(self, monkeypatch):
+        monkeypatch.setattr(google_helpers, "utcnow", lambda: NOW)
+        monkeypatch.setattr(botocore.auth, "get_current_datetime", lambda: NOW)
+        reference = AWSRequest(
+            method="POST",
+            url=AWS_GET_CALLER_IDENTITY_URL.format(region=REGION),
+            headers={"x-goog-cloud-target-resource": GCP_AUDIENCE},
+        )
+        botocore.auth.SigV4Auth(
+            Credentials("ASIAFED", "fed-secret", "fed-token"), "sts", REGION
+        ).add_auth(reference)
+
+        token = await _regional_sts().signed_caller_identity(_identity(), GCP_AUDIENCE)
+
+        _, headers = _decode_subject_token(token)
+        assert headers["x-amz-date"] == "20260101T120000Z"
+        assert headers["authorization"] == reference.headers["Authorization"]
+        assert headers["authorization"].endswith(
+            "Signature=947d6faf284fc5ed8c9c2e2fef86189fb35bdbef9ade0dd5f5a02eff41db7d2b"
+        )
+
+    @pytest.mark.asyncio
     async def test_never_contains_the_secret_key(self):
         token = await _regional_sts().signed_caller_identity(_identity(), GCP_AUDIENCE)
 
@@ -878,11 +905,44 @@ class TestGcpTokenExchange:
         assert "federated-token" not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_transport_failure_raises_upstream_service_error(self):
+    async def test_client_timeouts_fit_the_mint_deadline(self):
+        adapter = GcpTokenExchange()
+        try:
+            assert adapter.http_client.timeout == httpx.Timeout(3.0, connect=1.0)
+        finally:
+            await adapter.aclose()
+
+    @pytest.mark.asyncio
+    async def test_service_account_is_url_quoted_in_the_impersonation_url(self):
+        urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == GOOGLE_STS_TOKEN_URL:
+                return httpx.Response(200, json=GOOGLE_STS_RESPONSE)
+            urls.append(str(request.url))
+            return httpx.Response(200, json=GOOGLE_IAM_RESPONSE)
+
+        adapter, _ = _gcp_exchange(handler)
+
+        await adapter.exchange(PROOF, _gcp_secret(service_account="sa+x@example.com"))
+
+        assert urls == [
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+            "sa%2Bx@example.com:generateAccessToken"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_raises_upstream_service_error(self, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
         adapter, _ = _gcp_exchange(_google(sts=httpx.ConnectError("refused")))
 
-        with pytest.raises(UpstreamServiceError, match="unavailable"):
+        with pytest.raises(UpstreamServiceError, match="unavailable") as exc_info:
             await adapter.exchange(PROOF, _gcp_secret())
+
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__
+        assert "ConnectError: refused" in caplog.text
+        assert PROOF not in caplog.text
 
     @pytest.mark.parametrize("status", [500, 503, 429])
     @pytest.mark.asyncio
@@ -970,6 +1030,17 @@ class TestTokenMintService:
             anthropic,
             gcp,
         )
+
+    @pytest.mark.asyncio
+    async def test_aclose_closes_every_adapter_client(self):
+        service = TokenMintService(
+            boto_session=MagicMock(), federation_config=FEDERATION_CONFIG
+        )
+        clients = [service.anthropic.http_client, service.gcp.http_client]
+
+        await service.aclose()
+
+        assert all(client.is_closed for client in clients)
 
     def test_boto_session_is_shared_with_the_sts_service(self):
         session = MagicMock()
