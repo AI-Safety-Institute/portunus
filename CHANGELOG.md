@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 - Audit serialization avoids an extra copy when adding JSON record delimiters.
+- Complete WebSocket messages avoid a reassembly copy while retaining capture limits
+  and fragmented-message handling.
 
 ## [0.9.0] - 2026-09-11
 
