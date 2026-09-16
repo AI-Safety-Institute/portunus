@@ -11,7 +11,7 @@ This repo implements a secure API key proxy with two cooperating components:
 
 - Securely retrieve API keys from AWS Secrets Manager via short-lived AWS credentials supplied in the client's request.
 - Transparently proxy requests to third-party APIs (e.g. OpenAI, Anthropic) with header substitution.
-- Stream request / response / WebSocket audit to Firehose (direct-PUT) for downstream archival (S3) and joining (Glue ETL → aisitok).
+- Stream request / response / WebSocket audit to Firehose (direct-PUT) for downstream archival and analysis.
 - Redis cache for authorisation responses to keep the hot path off Secrets Manager.
 - Optional RFC 9421 request signing for Anthropic-style upstreams (Content-Digest + Signature / Signature-Input).
 - TLS termination, per-route rate limiting, and request-id propagation throughout.
@@ -37,7 +37,7 @@ For tenants whose secret carries a `signing_key` block:
 
 1. A **composite filter** in envoy.yaml matches the request header `x-portunus-signing-required: true` set by the first `Check` (via `HttpRequestHeaderMatchInput`, not dynamic_metadata — no `HttpRequestMetadataMatchInput` exists in the pinned Envoy 1.38.x).
 2. It dispatches a **second `ext_authz` filter** that has `with_request_body` set. The body is buffered (up to 32 MiB, matching Anthropic's documented request-body ceiling). `allow_partial_message: false` — Envoy returns 413 rather than silently truncate.
-3. The same servicer re-authenticates (cache hit in prod), computes `Content-Digest` over the buffered body, and signs via KMS using the user's STS credentials. `KMS.Sign` is sync `boto3` offloaded via `asyncio.to_thread` so the gRPC.aio event loop stays free.
+3. The same servicer re-authenticates (cache hit in prod), computes `Content-Digest` over the buffered body, and signs via KMS using the user's STS credentials. `KMS.Sign` is sync `boto3` offloaded via a dedicated bounded executor so the gRPC.aio event loop stays free.
 4. Returns `Content-Digest`, `Signature`, and `Signature-Input` as header mutations.
 
 Unsigned tenants never enter the buffering path; the body streams end-to-end.
@@ -45,8 +45,8 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 ### Observability (ext_proc)
 
 1. Envoy streams request and response bodies — and post-101 WebSocket frames — to `PortunusProcessServicer.Process` in `portunus/portunus/grpc/proc_servicer.py`.
-2. Body mode is `STREAMED` with `observability_mode: true` — Envoy ignores every `ProcessingResponse`, so the servicer is fire-and-forget from the customer's data path. Note: `observability_mode` only supports body modes `NONE` and `STREAMED` — `FULL_DUPLEX_STREAMED` is silently rejected at runtime, and a body-mode CI guard is filed as a follow-up.
-3. Each body chunk is published to Firehose as its own record with a monotonic per-direction `chunk_id` and `num_chunks=0` sentinel; the akp Glue ETL reassembles by `request_id`.
+2. Body mode is `STREAMED` with `observability_mode: true` — Envoy ignores every `ProcessingResponse`, so the servicer is fire-and-forget from the customer's data path. Note: `observability_mode` only supports body modes `NONE` and `STREAMED` — `FULL_DUPLEX_STREAMED` is silently rejected at runtime,.
+3. Each body chunk is published to Firehose as its own record with a monotonic per-direction `chunk_id` and `num_chunks=0` sentinel; consumers reassemble by `request_id` and check completion/loss markers.
 4. WebSocket frames are parsed with `wsproto` (PerMessageDeflate finalize()'d against the upstream's `Sec-WebSocket-Extensions`). Each frame is a body record; one `WSSummaryRecord` per connection carries frame counts and close code.
 
 ## Configuration
@@ -58,8 +58,8 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 | `AWS_REGION` | All AWS clients | required |
 | `API_KEY_HEADER` | Header name carrying the payload | default `authorization` |
 | `API_KEY_PREFIX` | Prefix on the value | default `Bearer ` |
-| `PORTUNUS_HEADER_PREFIX` | Prefix for response headers (`x-{prefix}-error`, `x-{prefix}-debug-id`, `x-{prefix}-ping`) | default `portunus` |
-| `GRPC_ENABLED` / `GRPC_PORT` | Enable / port for the ext_authz + ext_proc server | gated, default off |
+| `PORTUNUS_HEADER_PREFIX` | Prefix for response headers (`x-{prefix}-error`, `x-{prefix}-ping`; `x-portunus-debug-id` is fixed) | default `portunus` |
+| `GRPC_ENABLED` / `GRPC_PORT` | Enable / port for the ext_authz + ext_proc server | must be enabled for this image; default off |
 | `GRPC_HOST` | Interface the gRPC server binds to | loopback by default; set `0.0.0.0` if Envoy and Portunus are in separate netns |
 | `GRPC_PROXY_API_KEY` | Pre-shared key for the Envoy → Portunus gRPC channel (Envoy presents it as `x-portunus-proxy-key` initial_metadata; proxy side sets the same value via `PORTUNUS_API_KEY`) | identity check on both servicers |
 | `CACHE_DURATION` | Auth-cache TTL | seconds |

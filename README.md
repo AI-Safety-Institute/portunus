@@ -2,7 +2,7 @@
 
 ![Portunus](portunus.png)
 
-**Portunus** is a secure API key proxy. Clients authenticate with temporary AWS credentials and Portunus transparently swaps them for the real API key stored in AWS Secrets Manager before forwarding requests to upstream targets. All traffic is logged to Firehose for auditing.
+**Portunus** is a secure API key proxy. Clients authenticate with temporary AWS credentials and Portunus transparently swaps them for the real API key stored in AWS Secrets Manager before forwarding requests to upstream targets. Traffic is submitted to Firehose for best-effort auditing; monitor publication and capture-loss metrics.
 
 It runs as two cooperating components:
 
@@ -10,7 +10,7 @@ It runs as two cooperating components:
   - **`ext_authz`** calls Portunus's `Check` gRPC servicer to authenticate the request and (for signing tenants) compute the RFC 9421 signature headers.
   - **`ext_proc`** streams request and response bodies — and post-101 WebSocket frames — to Portunus's `Process` gRPC servicer for audit publication.
 - **Portunus backend**. A pure gRPC process (`python -m portunus.grpc.server` — the FastAPI/REST surface is retired by the unreleased gRPC cutover; 0.6.0 and 0.7.0 still shipped it) hosting the two servicers above plus the standard `grpc.health.v1.Health` and reflection services. Envoy answers `/ping` (Envoy process liveness) and `/healthz` (gated on Portunus's `"readiness"` gRPC health service — the ALB health-check target); flushing the shared auth cache is an operator runbook — see [`docs/runbooks/flush-auth-cache.md`](docs/runbooks/flush-auth-cache.md) — not an HTTP endpoint:
-  - Decodes the base64-encoded payload in the client's `Authorization` header — `{credentials, secret_arn}` — and uses those AWS credentials to fetch the real API key from Secrets Manager. Clients can't reach Secrets Manager directly; network policy enforces this.
+  - Decodes the base64-encoded payload in the client's `Authorization` header — `{credentials, secret_arn}` — and uses those AWS credentials to fetch the real API key from Secrets Manager. Deployments must configure network access and IAM permissions for their intended trust boundary.
   - Secrets can be stored as plaintext (`"sk-…"`) or as JSON with a target-host check (`{"secret":"sk-…","host":"api.openai.com"}`); the latter only authorises for matching upstreams.
   - Returns the real key as a header mutation; Envoy applies it before forwarding upstream.
   - Streams metadata, headers, and bodies to per-stream Firehose delivery streams for archival in S3.
@@ -64,17 +64,17 @@ sequenceDiagram
 | `API_KEY_HEADER` | Header name carrying the encoded payload | `authorization` |
 | `API_KEY_PREFIX` | Prefix on the header value | `Bearer ` |
 | `PORTUNUS_HEADER_PREFIX` | Prefix for proxy response headers (`x-{prefix}-*`) | `portunus` |
-| `GRPC_ENABLED` | Start the ext_authz / ext_proc gRPC server | `false` |
+| `GRPC_ENABLED` | Required to be `true` for this gRPC-only image | `false` |
 | `GRPC_HOST` | Interface the gRPC server binds to. Loopback by default for the sidecar topology where Envoy reaches Portunus on localhost. Set to `0.0.0.0` if Envoy and Portunus run in separate network namespaces. | `127.0.0.1` |
 | `GRPC_PORT` | gRPC server listen port | `9000` |
-| `GRPC_PROXY_API_KEY` | Pre-shared key Envoy presents in `x-portunus-proxy-key` initial metadata | - |
+| `GRPC_PROXY_API_KEY` | Key of at least 16 bytes matching proxy `PORTUNUS_API_KEY` | - |
 | `GRPC_PROXY_API_KEY_OPTIONAL` | When `true`, allow an empty `GRPC_PROXY_API_KEY` (dev only) | `false` |
 | `CACHE_DURATION` | Authorisation cache TTL (seconds) | - |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis connection settings | `localhost` / `6379` / - |
 | `REDIS_MAX_CONNECTIONS` | Max Redis connections | `200` |
-| `FIREHOSE_METADATA_STREAM` | Firehose delivery stream for principal metadata records | - |
-| `FIREHOSE_REQUEST_HEADERS_STREAM` / `FIREHOSE_REQUEST_BODY_STREAM` / `FIREHOSE_REQUEST_TRAILERS_STREAM` | Request-side delivery streams | - |
-| `FIREHOSE_RESPONSE_HEADERS_STREAM` / `FIREHOSE_RESPONSE_BODY_STREAM` / `FIREHOSE_RESPONSE_TRAILERS_STREAM` | Response-side delivery streams | - |
+| `FIREHOSE_METADATA_STREAM` | Firehose delivery stream for principal metadata records | *(required)* |
+| `FIREHOSE_REQUEST_HEADERS_STREAM` / `FIREHOSE_REQUEST_BODY_STREAM` / `FIREHOSE_REQUEST_TRAILERS_STREAM` | Request-side delivery streams | *(all required)* |
+| `FIREHOSE_RESPONSE_HEADERS_STREAM` / `FIREHOSE_RESPONSE_BODY_STREAM` / `FIREHOSE_RESPONSE_TRAILERS_STREAM` | Response-side delivery streams | *(all required)* |
 | `FIREHOSE_WS_SUMMARY_STREAM` | Per-connection WebSocket summary records (`WSSummaryRecord`) | - |
 | `RATE_LIMIT_PERCENT_ENABLED` / `RATE_LIMIT_INTERVAL_SECONDS` / `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Optional rate limiting | `0` / - / - |
 | `REDIS_USE_TLS` | TLS to Redis | `true` |
@@ -96,8 +96,22 @@ docker compose up --build
 By default the proxy points at an included [httpbun](https://httpbun.com/) instance. Send a request through the stack:
 
 ```bash
-curl -X GET http://localhost:8888/headers \
-  -H "Authorization: Bearer eyJjcmVkZW50aWFscyI6eyJhY2Nlc3Nfa2V5X2lkIjoiQUtJQVRFU1QiLCJzZWNyZXRfYWNjZXNzX2tleSI6IlNFQ1JFVFRFU1QiLCJzZXNzaW9uX3Rva2VuIjoiVEVTVFRPS0VOIn0sInNlY3JldF9hcm4iOiJhcm46YXdzOnNlY3JldHNtYW5hZ2VyOnVzLWVhc3QtMToxMjM0NTY3ODkwMTI6c2VjcmV0OnRlc3Qtc2VjcmV0In0="
+TOKEN=$(python - <<'PY'
+import base64
+import json
+
+payload = {
+    "credentials": {
+        "access_key_id": "000000000000",
+        "secret_access_key": "test",
+        "session_token": "test",
+    },
+    "secret_arn": "arn:aws:secretsmanager:eu-west-2:000000000000:secret:test-api-key",
+}
+print(base64.b64encode(json.dumps(payload).encode()).decode())
+PY
+)
+curl http://localhost:8888/headers -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Constructing a payload
@@ -152,13 +166,13 @@ For [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/
 ## Known issues
 
 - **Firehose record size**: Firehose has a 1 MiB max record size. Large payloads are chunked automatically (one record per chunk), but Envoy and Portunus both hold payloads in memory which can cause memory pressure under heavy load with large bodies.
-- **Scaling lag**: The backend autoscales; some 504 / 503 responses are expected during rapid load increases and resolve as the service scales up.
-- **WebSocket signing not supported**: If a tenant configured with a `signing_key` initiates a WebSocket upgrade, the proxy rejects the upgrade with `HTTP 400` and a body explaining the limitation. Either remove the `signing_key` from the tenant secret to use WebSocket, or use HTTPS for signed requests. No provider exposes signed WebSocket endpoints today, so this is unlikely to constrain real workloads; the explicit rejection ensures a clear customer-visible failure mode rather than silently signing an empty payload.
+- **Scaling lag**: Deployments must configure capacity and scaling. Rapid load increases can exhaust request or signing capacity before additional instances become ready.
+- **WebSocket signing not supported**: If a tenant configured with a `signing_key` initiates a WebSocket upgrade, the proxy rejects the upgrade with `HTTP 400` and a body explaining the limitation. Either remove the `signing_key` from the tenant secret to use WebSocket, or use HTTPS for signed requests. The explicit rejection prevents an unsupported upgrade from being signed as an empty HTTP body.
 
 ## Streaming
 
 The proxy handles streaming responses (e.g. SSE from LLM APIs) efficiently:
 
 - Request bodies are buffered (up to 32 MiB) only when the tenant requires request signing; unsigned tenants stream end-to-end with no buffering. Larger signed bodies receive HTTP 413 from Envoy rather than being silently truncated.
-- Responses stream directly to the client as they arrive. Each response chunk is logged to Firehose individually with a monotonic `chunk_id`; the akp Glue ETL reassembles by `request_id` at aggregation time.
+- Responses stream directly to the client as they arrive. Each response chunk is logged to Firehose individually with a monotonic `chunk_id`; downstream consumers must reassemble by `request_id` and validate completion/loss markers.
 - Envoy's `stream_idle_timeout` is set to 3600s for long-running streams.

@@ -30,7 +30,8 @@ There is no Lua filter and no proxy-utils library: all auth and audit logic live
 
 The listener exposes:
 
-- `/ping` — direct 200 OK; both ext_authz and ext_proc are disabled per-route.
+- `/ping` — direct 200 OK; reports Envoy liveness.
+- `/healthz` — readiness backed by the backend gRPC readiness service. Configure load balancers to probe this endpoint.
 - **WebSocket** — a route matched by `Upgrade: websocket` header. Goes to the `${WS_TARGET_HOST}` cluster with an `ExtProcPerRoute` override that flags the stream as WS (so the Process service parses frames via wsproto).
 - **Default** — everything else goes to the `${TARGET_HOST}` upstream.
 
