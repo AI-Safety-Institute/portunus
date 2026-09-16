@@ -99,6 +99,10 @@ class _CappedPerMessageDeflate(PerMessageDeflate):
         return inflated
 
     def frame_inbound_complete(self, proto, fin):  # type: ignore[no-untyped-def]
+        # Control frames can interrupt a data message without ending its
+        # compression context or its cumulative byte budget.
+        if not self._inbound_is_compressible and self._inbound_compressed:
+            return None
         result = super().frame_inbound_complete(proto, fin)
         if fin:
             self._inflated_in_message = 0

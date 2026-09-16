@@ -7,7 +7,8 @@ tiny permessage-deflate frame can decompress to many MB and OOM the process.
 from __future__ import annotations
 
 from wsproto.connection import Connection, ConnectionType
-from wsproto.events import TextMessage
+from wsproto.events import Ping, TextMessage
+from wsproto.extensions import PerMessageDeflate
 
 from portunus.grpc.frame_observer import (
     MAX_DECOMPRESSED_PAYLOAD_BYTES,
@@ -69,6 +70,36 @@ def test_finalized_deflate_observer_accepts_compressed_frames():
     assert len(frames) == 1
     assert frames[0].opcode == "text"
     assert frames[0].payload == plaintext.encode("utf-8")
+
+
+def test_compressed_fragmented_message_survives_an_interleaved_ping():
+    extension = PerMessageDeflate()
+    extension.finalize("permessage-deflate")
+    sender = Connection(ConnectionType.SERVER, extensions=[extension])
+    observer = build_observer(response_extensions_header="permessage-deflate")
+    events = [
+        Ping(payload=b"idle"),
+        TextMessage(data="hello ", message_finished=False),
+        Ping(payload=b"keepalive"),
+        TextMessage(data="world", message_finished=True),
+        TextMessage(data="next message"),
+    ]
+
+    frames = [
+        frame
+        for event in events
+        for frame in observer.observe(
+            direction=Direction.RESPONSE, chunk=sender.send(event)
+        )
+    ]
+
+    assert [(f.opcode, f.payload) for f in frames] == [
+        ("ping", b"idle"),
+        ("ping", b"keepalive"),
+        ("text", b"hello world"),
+        ("text", b"next message"),
+    ]
+    assert observer.desynced(Direction.RESPONSE) is False
 
 
 def _ws_text_frame(payload: bytes) -> bytes:
