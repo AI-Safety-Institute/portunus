@@ -106,7 +106,9 @@ curl -X GET http://localhost:8888/headers \
 from portunus.services.payload_service import encode_payload
 
 # credentials dict from STS assume-role or get-session-token
-payload = encode_payload(credentials, "arn:aws:secretsmanager:eu-west-2:123456789012:secret:my-api-key")
+payload = encode_payload(
+    credentials, "arn:aws:secretsmanager:eu-west-2:123456789012:secret:my-api-key"
+)
 ```
 
 ## Running tests
