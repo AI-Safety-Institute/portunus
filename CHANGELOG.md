@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- The backend keeps one Kinesis client per process instead of constructing a
+  new aiobotocore client for every published record. Client construction
+  (a fresh SSL context plus CA-bundle parse, ~30-40 ms of CPU) was about 80%
+  of the backend's CPU per request under load, which capped the OpenAI proxy
+  at roughly 500 requests/s with the backend fleet at its maximum task count.
+  A single worker now handles about 7x the request rate.
+
 ## [0.9.0] - 2026-09-11
 
 ### Added

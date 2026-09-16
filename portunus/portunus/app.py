@@ -591,6 +591,8 @@ async def lifespan(app: FastAPI):
     # Then drain the log queue (no new items will arrive)
     await stop_log_queue()
 
+    await state_service.close_kinesis_client()
+
     logger.info("Shutting down Redis connections")
     await state_service.close_redis_client()
     logger.info("Redis connections closed")
