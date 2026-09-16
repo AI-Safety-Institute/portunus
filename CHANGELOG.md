@@ -5,12 +5,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- Envoy gRPC authentication and asynchronous audit processing, with HTTP body
+  chunks, WebSocket frame records, and optional per-connection summaries.
+- Separate gRPC liveness and Redis-dependent readiness checks. Configure load
+  balancers to probe Envoy's `/healthz`; `/ping` reports Envoy liveness only.
+- Periodic CloudWatch EMF metrics for authentication outcomes, audit queue
+  capacity, and publication failures.
+- [An operator procedure for flushing the auth cache](docs/runbooks/flush-auth-cache.md).
+
 ### Changed
+
+- The backend now runs the gRPC server. Set `GRPC_ENABLED=true`, and configure
+  the same shared key of at least 16 bytes in backend `GRPC_PROXY_API_KEY` and
+  proxy `PORTUNUS_API_KEY`. An empty key requires both components' explicit
+  development-only opt-out settings.
+- Audit publication uses Firehose DirectPut delivery streams and bounded
+  `PutRecordBatch` calls, with one retry of failed records. Configure all seven
+  `FIREHOSE_*_STREAM` metadata, request, and response streams before startup;
+  `FIREHOSE_WS_SUMMARY_STREAM` is optional. Replace the previous `KINESIS_*`
+  settings and grant `firehose:PutRecordBatch` on the configured streams.
+- Streamed HTTP body records use `num_chunks=0`, ordered `chunk_id` values,
+  and `final_chunk` completion markers. Consumers must support these fields
+  and the `dropped` and `truncated` indicators before upgrading. WebSocket
+  consumers must also support frame indexes and connection loss counters.
+- Request signing buffers signed request bodies up to 32 MiB; larger signed
+  requests receive HTTP 413. Unsigned requests stream without this buffering.
+  Signing uses bounded worker capacity and explicit KMS SDK timeouts; see
+  [request-signing settings](docs/request-signing.md).
+- Authentication error bodies expose `request_id` in place of
+  `x_amzn_trace_id`, and their correlation header is now `x-portunus-debug-id`.
+- WebSocket connections have a maximum duration of 3,300 seconds. Clients must
+  reconnect after expiry or shutdown; a graceful WebSocket close frame is not
+  guaranteed. Tenants requiring request signing receive HTTP 400 on upgrade.
 - Audit serialization avoids an extra copy when adding JSON record delimiters.
 - Complete WebSocket messages avoid a reassembly copy while retaining capture limits
   and fragmented-message handling.
 - Cached authentication avoids a Redis probe before each operation. Cache commands
   retry bounded pool contention without extending the entry's remaining lifetime.
+
+### Fixed
+
+- Authorisation cache entries remain bound to the upstream host and respect
+  credential expiry.
+- Audit records preserve completion and capture-loss information across
+  stream termination, oversized payloads, and WebSocket upgrade fallback.
+  Audit publication remains best effort; loss indicators can also be dropped
+  when the sink is unavailable.
+- Captured audit headers exclude credentials and unrecognised header names.
+- Shutdown reserves time to publish queued records and reports remaining loss.
+
+### Removed
+
+- The FastAPI REST authentication, logging, and `/cache/flush` endpoints,
+  Lua filters, Python WebSocket relay, and Kinesis Data Streams publisher.
+- `UVICORN_WORKERS`, relay `WS_*` settings, and configurable CORS handling.
+  Update deployments to the gRPC configuration and Envoy WebSocket limits.
 
 ## [0.9.0] - 2026-09-11
 

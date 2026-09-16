@@ -22,7 +22,6 @@ updates:
     directories:
       - "/portunus"
       - "/proxy"
-      - "/proxy/lib"
       - "/ws-echo"
     schedule:
       interval: "weekly"
@@ -59,9 +58,3 @@ updates:
       python:
         patterns:
           - "*"
-    ignore:
-      # uvicorn is version-sensitive for request tracing/logging: a minor bump
-      # has broken it before (see the <0.47 pin + comment in
-      # portunus/pyproject.toml). Upgrade manually, guarded by
-      # test_trace_propagation.py, rather than letting it ride in a grouped PR.
-      - dependency-name: "uvicorn"

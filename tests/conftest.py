@@ -23,6 +23,16 @@ os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 # Set default region for tests (config validation requires it)
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
+# AISI dev VMs set these to wire ``inspect_ai`` into ``aisitools.*`` hooks
+# that aren't packaged here, so ``ia.eval`` aborts with ``PrerequisiteError``.
+# Strip them at collection time to keep the suite hermetic.
+for _hook_env in (
+    "INSPECT_TELEMETRY",
+    "INSPECT_API_KEY_OVERRIDE",
+    "INSPECT_REQUIRED_HOOKS",
+):
+    os.environ.pop(_hook_env, None)
+
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):
@@ -32,6 +42,26 @@ def pytest_runtest_makereport(item, call):
 
     # set a report attribute for each phase of a call
     setattr(item, f"rep_{rep.when}", rep)
+
+
+@pytest.fixture(autouse=True)
+def _dump_container_logs_on_failure(request):
+    """Dump container tails to stderr on failure; logs vanish on compose teardown."""
+    yield
+    if not os.environ.get("DUMP_DOCKER_LOGS_ON_FAILURE"):
+        return
+    rep = getattr(request.node, "rep_call", None)
+    if rep is None or not rep.failed:
+        return
+    for name in ("portunus", "portunus-proxy-1", "localstack-main"):
+        result = subprocess.run(
+            ["docker", "logs", "--tail=120", name],
+            capture_output=True,
+            text=True,
+        )
+        sys.stderr.write(
+            f"\n=== {name} logs (tail 120) ===\n{result.stdout}\n{result.stderr}\n"
+        )
 
 
 # Load the compose file once for all tests
@@ -60,6 +90,154 @@ COMPOSE_FILE["services"]["portunus"]["environment"]["REDIS_PASSWORD"] = (
 def compose_file():
     """Return the compose file configuration."""
     return COMPOSE_FILE
+
+
+_REQUIRED_FIREHOSE_STREAMS = (
+    "portunus-firehose-metadata",
+    "portunus-firehose-request-headers",
+    "portunus-firehose-request-body",
+    "portunus-firehose-request-trailers",
+    "portunus-firehose-response-headers",
+    "portunus-firehose-response-body",
+    "portunus-firehose-response-trailers",
+    "portunus-firehose-ws-summary",
+)
+_AUDIT_S3_BUCKET = "portunus-logs-local"
+
+
+def _list_firehose_streams() -> set[str]:
+    """Return the names of every Firehose delivery stream LocalStack has."""
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "firehose",
+            "list-delivery-streams",
+            "--region",
+            "eu-west-2",
+            "--query",
+            "DeliveryStreamNames",
+            "--output",
+            "text",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return set()
+    return set(result.stdout.split())
+
+
+def _wait_for_localstack_init_complete(timeout: int = 60) -> None:
+    """Poll until all audit Firehose streams exist.
+
+    LocalStack's healthcheck answers before its ready.d/ init scripts run,
+    so polling Firehose is the cheapest "init done" probe.
+    """
+    deadline = time.monotonic() + timeout
+    needed = set(_REQUIRED_FIREHOSE_STREAMS)
+    present: set[str] = set()
+    while time.monotonic() < deadline:
+        present = _list_firehose_streams()
+        if needed.issubset(present):
+            return
+        time.sleep(0.5)
+    raise RuntimeError(
+        f"LocalStack init did not produce all required Firehose streams "
+        f"within {timeout}s; missing: {needed - present}"
+    )
+
+
+def _clear_audit_s3_prefix(prefix: str = "logs/") -> None:
+    """Remove every object under the audit S3 prefix, isolating each test.
+
+    Firehose direct-PUT lands records in ``s3://portunus-logs-local/logs/<stream>/...``.
+    """
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            "localstack-main",
+            "awslocal",
+            "s3",
+            "rm",
+            f"s3://{_AUDIT_S3_BUCKET}/{prefix}",
+            "--recursive",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _read_audit_s3_records(stream: str, *, timeout: float = 5.0) -> list[dict]:
+    """Poll the audit S3 prefix for ``stream`` and parse its records.
+
+    LocalStack Firehose direct-PUT uses 1s/1MiB buffer hints
+    (``scripts/localstack-init-firehose.sh``), so records land within ~1-2s.
+    Each S3 object is newline-delimited JSON.
+    """
+    prefix = f"logs/{stream}/"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        list_result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "localstack-main",
+                "awslocal",
+                "s3api",
+                "list-objects-v2",
+                "--bucket",
+                _AUDIT_S3_BUCKET,
+                "--prefix",
+                prefix,
+                "--query",
+                "Contents[].Key",
+                "--output",
+                "text",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        keys = [k for k in list_result.stdout.split() if k and k != "None"]
+        records: list[dict] = []
+        for key in keys:
+            obj = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    "localstack-main",
+                    "awslocal",
+                    "s3",
+                    "cp",
+                    f"s3://{_AUDIT_S3_BUCKET}/{key}",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            for line in obj.stdout.splitlines():
+                if line.strip():
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        if records:
+            return records
+        time.sleep(0.2)
+    return []
+
+
+@pytest.fixture
+def clean_audit_pipeline(docker_setup):
+    """Clear the S3 audit prefix between tests so each sees only its own records.
+
+    ``docker_setup`` stays session-scoped to keep boot cost off the per-test path.
+    """
+    _clear_audit_s3_prefix()
+    yield
 
 
 @pytest.fixture(scope="session")
@@ -98,21 +276,21 @@ def docker_setup(request, compose_file):
         capture_output=True,
     )
 
-    # Wait a bit longer for the containers to be fully ready
-    time.sleep(5)  # Add extra time for services to initialize
+    # ``--wait`` returns on healthcheck pass, but LocalStack's healthcheck
+    # answers before its ready.d/ init scripts (KMS, Firehose, S3) finish —
+    # tests touching those resources race the init otherwise.
+    _wait_for_localstack_init_complete(timeout=60)
 
     if result.returncode != 0:
         # Dump localstack logs for debugging before failing
         if os.environ.get("DUMP_DOCKER_LOGS_ON_FAILURE"):
-            import sys as _sys
-
             for name in ["localstack-main", "portunus", "portunus-proxy-1"]:
                 logs = subprocess.run(
                     ["docker", "logs", "--tail=80", name],
                     capture_output=True,
                     text=True,
                 )
-                _sys.stderr.write(
+                sys.stderr.write(
                     f"\n=== {name} logs ===\n{logs.stdout}\n{logs.stderr}\n"
                 )
         pytest.fail(f"Failed to start Docker containers: {result.stderr}")  # type: ignore[invalid-argument-type]

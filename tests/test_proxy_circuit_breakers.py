@@ -12,9 +12,13 @@ from pathlib import Path
 from socket import socket
 from textwrap import indent
 
+import grpc
 import pytest
 import requests
 import yaml
+from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
+from envoy.service.ext_proc.v3 import external_processor_pb2_grpc
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 
 @pytest.fixture(scope="module")
@@ -58,21 +62,43 @@ def wait_until(predicate):
     pytest.fail("Timed out waiting for the proxy")
 
 
-class Backend(BaseHTTPRequestHandler):
-    """Authorize dummy credentials and acknowledge audit writes."""
+class AuthBackend(external_auth_pb2_grpc.AuthorizationServicer):
+    """Allow test traffic through the proxy's gRPC authorization filter."""
 
-    def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        body = json.dumps(
-            {"api_key": "dummy-upstream-key", "request_id": uuid.uuid4().hex}
-        ).encode()
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    def Check(self, request, context):
+        return external_auth_pb2.CheckResponse(
+            ok_response=external_auth_pb2.OkHttpResponse()
+        )
 
-    def log_message(self, *_args):
-        pass
+
+class AuditBackend(external_processor_pb2_grpc.ExternalProcessorServicer):
+    """Drain audit streams without blocking the admission test's requests."""
+
+    def Process(self, request_iterator, context):
+        for _ in request_iterator:
+            pass
+        return iter(())
+
+
+@contextmanager
+def grpc_backend():
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        server = grpc.server(pool)
+        external_auth_pb2_grpc.add_AuthorizationServicer_to_server(
+            AuthBackend(), server
+        )
+        external_processor_pb2_grpc.add_ExternalProcessorServicer_to_server(
+            AuditBackend(), server
+        )
+        readiness = health.HealthServicer()
+        readiness.set("readiness", health_pb2.HealthCheckResponse.SERVING)
+        health_pb2_grpc.add_HealthServicer_to_server(readiness, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        try:
+            yield port
+        finally:
+            server.stop(grace=0).wait()
 
 
 def http2_origin(h2_port, origin_port):
@@ -130,11 +156,15 @@ def test_http2_request_limit(proxy_image, tmp_path, request_limit):
         def log_message(self, *_args):
             pass
 
-    with mock_server(Backend) as backend_port, mock_server(Origin) as origin_port:
+    with grpc_backend() as backend_port, mock_server(Origin) as origin_port:
         listen_port, admin_port, h2_port = free_port(), free_port(), free_port()
         # Preserve template quoting: YAML round-tripping before envsubst can
         # turn quoted header placeholders into numbers/booleans on rendering.
-        config = Path("proxy/envoy.yaml").read_text()
+        config = (
+            Path("proxy/envoy.yaml")
+            .read_text()
+            .replace("address: 0.0.0.0", "address: 127.0.0.1")
+        )
         origin = http2_origin(h2_port, origin_port)
         config = config.replace(
             "  clusters:\n",
@@ -151,9 +181,8 @@ def test_http2_request_limit(proxy_image, tmp_path, request_limit):
             "TARGET_HOST_USE_TLS": "false",
             "TARGET_HOST_TRANSPORT_SOCKET": "null",
             "DOWNSTREAM_TLS_TRANSPORT_SOCKET": "null",
-            "PORTUNUS_HOST": "localhost",
-            "PORTUNUS_PORT": str(backend_port),
-            "PORTUNUS_TRANSPORT_SOCKET": "null",
+            "PORTUNUS_HOST": "127.0.0.1",
+            "PORTUNUS_GRPC_PORT": str(backend_port),
             "PORTUNUS_API_KEY": "dummy-backend-key",
             "API_KEY_HEADER": "authorization",
             "API_KEY_PREFIX": "Bearer ",
@@ -200,8 +229,12 @@ def test_http2_request_limit(proxy_image, tmp_path, request_limit):
                 timeout=30,
             )
 
+        def healthy():
+            return requests.get(f"http://127.0.0.1:{listen_port}/healthz", timeout=2).ok
+
         try:
             wait_until(lambda: requests.get(f"{admin}/ready", timeout=2).ok)
+            wait_until(healthy)
             prefix = "cluster.127.0.0.1.circuit_breakers.default."
             assert stats()[prefix + "remaining_rq"] == (request_limit or 1024)
             assert stats()[prefix + "remaining_pending"] == (
