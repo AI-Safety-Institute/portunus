@@ -45,7 +45,7 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 ### Observability (ext_proc)
 
 1. Envoy streams request and response bodies — and post-101 WebSocket frames — to `PortunusProcessServicer.Process` in `portunus/portunus/grpc/proc_servicer.py`.
-2. Body mode is `STREAMED` with `observability_mode: true` — Envoy ignores every `ProcessingResponse`, so the servicer is fire-and-forget from the customer's data path. Note: `observability_mode` only supports body modes `NONE` and `STREAMED` — `FULL_DUPLEX_STREAMED` is silently rejected at runtime,.
+2. Body mode is `STREAMED` with `observability_mode: true` — Envoy ignores every `ProcessingResponse`, so the servicer is fire-and-forget from the customer's data path. Note: `observability_mode` only supports body modes `NONE` and `STREAMED` — `FULL_DUPLEX_STREAMED` is silently rejected at runtime.
 3. Each body chunk is published to Firehose as its own record with a monotonic per-direction `chunk_id` and `num_chunks=0` sentinel; consumers reassemble by `request_id` and check completion/loss markers.
 4. WebSocket frames are parsed with `wsproto` (PerMessageDeflate finalize()'d against the upstream's `Sec-WebSocket-Extensions`). Each frame is a body record; one `WSSummaryRecord` per connection carries frame counts and close code.
 

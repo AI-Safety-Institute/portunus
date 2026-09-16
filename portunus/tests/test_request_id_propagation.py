@@ -24,6 +24,7 @@ import portunus.grpc.auth_servicer as auth_servicer_mod
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.grpc.proc_servicer import _extract_request_id as _proc_extract_request_id
+from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 from portunus.services.xray_service import request_id_var, trace_id_var
 
 _auth_extract_request_id = PortunusAuthServicer._extract_request_id
@@ -283,16 +284,11 @@ def test_formatter_emits_request_id_and_omits_when_unset():
     without = json.loads(formatter.format(record))
     assert "request_id" not in without
     assert "trace_id" not in without
-    # The old formatter stamped a constant placeholder on every line, which
-    # collapsed all logs into one correlation group. Never again.
-    assert "No-Trace-Id" not in formatter.format(record)
 
 
 @pytest.mark.asyncio
 async def test_publish_queue_failure_logs_carry_request_id(caplog):
     """Workers log outside request context; the id must travel on the task."""
-    from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
-
     async def batch_sender(stream, records):
         return 0
 

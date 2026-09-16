@@ -120,7 +120,7 @@ def test_request_without_signing(
 def test_401_passthrough_for_missing_credentials(
     api_key_prefix: str, api_key_header: str, docker_setup
 ):
-    """401 from Portunus is passed through the Lua proxy to the client.
+    """401 from Portunus is passed through the proxy to the client.
 
     LocalStack doesn't validate AWS credentials like real AWS, so we use
     missing credentials to trigger the validation error.

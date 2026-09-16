@@ -24,8 +24,6 @@ import sys
 import pytest
 import websockets.exceptions as wse
 
-# ``websockets.asyncio.client`` is the modern API (``additional_headers``);
-# the top-level ``websockets.connect`` is the legacy client (``extra_headers``).
 from websockets.asyncio.client import connect as _ws_connect  # noqa: E402
 from websockets.exceptions import ConnectionClosed
 
