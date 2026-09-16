@@ -1,13 +1,4 @@
-"""gRPC server lifecycle and process entrypoint for Portunus.
-
-The gRPC server is the whole Portunus process (no HTTP / FastAPI surface): it
-serves the Envoy ext_authz / ext_proc filters plus the standard
-``grpc.health.v1.Health`` and server-reflection services. :func:`run` owns the
-asyncio loop and SIGTERM-driven drain (Dockerfile ``CMD`` is
-``python -m portunus.grpc.server``).
-
-Gated on :attr:`GrpcConfig.enabled` (default off).
-"""
+"""gRPC service assembly, health reporting, and process lifecycle."""
 
 from __future__ import annotations
 
@@ -424,14 +415,14 @@ async def stop_grpc_server(
     application-layer signal we can send — so this is grace-then-cancel, not a
     coordinated drain.
 
-    ``flush_reserve_seconds`` reserves a slice of the grace for the
-    publish-queue flush *before* the stream drain. With any active stream at
-    SIGTERM Envoy holds it open for its own longer drain, so ``server.stop``
-    consumes its whole budget; without the reserve the queue would get a
-    0-second flush window and cancel every buffered record even with a healthy
-    sink. These phases share ``grace_seconds``. Running signing threads can
-    still delay process exit beyond the coroutine's drain budget; their SDK
-    I/O limits constrain ordinary network stalls, not arbitrary thread hangs.
+    Reserve part of the shared deadline for publishing after the stream drain.
+    With any active stream at SIGTERM Envoy holds it open for its own longer
+    drain, so ``server.stop`` consumes its whole budget; without the reserve
+    the queue would get a 0-second flush window and cancel every buffered record
+    even with a healthy sink. These phases share ``grace_seconds``. Running
+    signing threads can still delay process exit beyond the coroutine's drain
+    budget; their SDK I/O limits constrain ordinary network stalls, not arbitrary
+    thread hangs.
     """
     if runtime is None:
         return
@@ -543,9 +534,8 @@ async def stop_grpc_server(
 async def run() -> None:
     """Process entrypoint: build services, serve gRPC, drain on SIGTERM.
 
-    Blocks until SIGTERM/SIGINT, then drains gracefully. ECS sends SIGTERM on
-    task stop; the task ``stopTimeout`` (120s in the akp CDK) must exceed
-    ``graceful_shutdown_seconds``.
+    Blocks until SIGTERM/SIGINT, then drains gracefully.
+    The container stop timeout must exceed graceful_shutdown_seconds.
     """
     # Imported here, not at module top, so importing this module for its
     # start/stop helpers (e.g. in tests) doesn't construct AWS/Redis clients.

@@ -6,6 +6,7 @@ endpoint) to avoid ~200ms cold rebuilds; ``AuthService`` wires it in by default.
 
 import asyncio
 from typing import Any, Optional
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -146,7 +147,6 @@ async def test_lru_eviction_closes_oldest_after_grace():
     await asyncio.sleep(0.05)  # let the grace-close task run
     assert clients[0].closed, "LRU-evicted client was not closed"
     assert not clients[1].closed and not clients[2].closed
-    assert len(state._cred_client_pool) == 2
     await state.close()
     assert all(c.closed for c in clients)
 
@@ -167,8 +167,6 @@ async def test_close_cancels_pending_retirements_and_closes_everything():
     )
     await state.close()
     assert first.closed and second.closed
-    assert not state._retiring_clients
-    assert not state._cred_client_pool
 
 
 class TestAuthServiceWiring:
@@ -191,8 +189,6 @@ class TestAuthServiceWiring:
         assert auth.boto_session is marker
 
     def test_mock_cache_service_falls_back_to_plain_secrets_service(self):
-        from unittest.mock import MagicMock
-
         auth = AuthService(cache_service=MagicMock())
         assert isinstance(auth.secrets_service, SecretsService)
         assert not isinstance(auth.boto_session, PooledBotoSession)

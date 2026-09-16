@@ -6,7 +6,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from envoy.service.auth.v3 import attribute_context_pb2, external_auth_pb2
 
+import portunus.config as portunus_config
+from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.server import _collect_metrics, _counter_snapshot
 from portunus.metrics import emit_metrics
 from portunus.services.publish_queue import BoundedPublishQueue
@@ -73,11 +76,6 @@ async def test_collect_metrics_reports_deltas_not_cumulative_totals():
 @pytest.mark.asyncio
 async def test_check_outcome_counters_track_allow_and_deny(monkeypatch):
     """Check() classifies its own responses so the reporter can emit them."""
-    from envoy.service.auth.v3 import attribute_context_pb2, external_auth_pb2
-
-    import portunus.config as portunus_config
-    from portunus.grpc.auth_servicer import PortunusAuthServicer
-
     monkeypatch.setattr(portunus_config.config.grpc, "proxy_api_key", "")
     servicer = PortunusAuthServicer(
         auth_service=None,  # type: ignore[arg-type]

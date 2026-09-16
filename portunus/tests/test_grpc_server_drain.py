@@ -22,6 +22,7 @@ from typing import Optional
 
 import pytest
 
+import portunus.grpc.server as grpc_server_module
 from portunus.grpc.server import GrpcRuntime, stop_grpc_server
 from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 
@@ -258,9 +259,9 @@ async def test_flush_reserve_leaves_nonzero_queue_budget_when_streams_held_open(
 
 @pytest.mark.asyncio
 async def test_flush_reserve_larger_than_grace_is_clamped():
-    """A reserve bigger than the whole grace must not go negative — the.
+    """A reserve bigger than the whole grace must not go negative.
 
-    server drain gets 0 and the queue gets (at most) the full grace.
+    The server drain gets 0 and the queue gets (at most) the full grace.
     """
     server = _EnvoyHeldStreamServer()
     queue = _RecordingQueue(cancelled=0)
@@ -284,8 +285,6 @@ async def test_drain_tears_down_kms_executor_within_deadline(monkeypatch):
     def _spy_reset(*, wait: bool = False) -> None:
         calls.append({"wait": wait})
 
-    import portunus.grpc.server as grpc_server_module
-
     monkeypatch.setattr(grpc_server_module, "reset_signing_runtime", _spy_reset)
 
     server = _FakeServer(stop_duration=0.0)
@@ -308,8 +307,6 @@ async def test_drain_returns_when_signing_executor_join_exceeds_budget(monkeypat
         calls.append({"wait": wait})
         if wait:
             time.sleep(1.2)  # far past the remaining budget
-
-    import portunus.grpc.server as grpc_server_module
 
     monkeypatch.setattr(grpc_server_module, "reset_signing_runtime", _hung_reset)
 

@@ -12,10 +12,7 @@ from portunus.grpc.server import start_grpc_server, stop_grpc_server
 
 
 def _configured_firehose() -> FirehoseConfig:
-    """A FirehoseConfig with every required stream set, so the audit guard.
-
-    passes and these tests can exercise the proxy-key / message-limit checks.
-    """
+    """Configure every required audit stream for startup tests."""
     return FirehoseConfig(
         metadata_stream_name="metadata",
         request_headers_stream_name="req-headers",
@@ -32,10 +29,7 @@ class _FakeAuthService:
 
 
 class _FakePublishService:
-    """Minimal stand-in: ``put_record_batch`` is wired as the queue's.
-
-    batch_sender, so it must exist.
-    """
+    """Provide the batch-sender interface required at startup."""
 
     async def put_record_batch(self, stream_name: str, records: list[bytes]) -> int:
         return 0
