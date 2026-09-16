@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from portunus.exceptions import CredentialsError, FetchSecretError, PayloadError
+from portunus.exceptions import (
+    CredentialsError,
+    FetchSecretError,
+    PayloadError,
+    UpstreamServiceError,
+)
 from portunus.models import AuthResult, PrincipalInfo
 from portunus.relay.auth import authenticate_ws
 
@@ -136,6 +141,30 @@ class TestAuthenticateWs:
         assert result is None
         mock_websocket.close.assert_called_once_with(
             code=1013, reason="Authentication timed out"
+        )
+
+    @pytest.mark.asyncio
+    async def test_upstream_service_error_closes_1013(
+        self, mock_websocket, mock_auth_service
+    ):
+        """A dependency outage closes with 1013 rather than an auth failure."""
+        mock_websocket.headers = {"authorization": "Bearer some_payload"}
+
+        with patch(
+            "portunus.relay.auth.AuthPayload.from_contents"
+        ) as mock_from_contents:
+            mock_from_contents.return_value = MagicMock()
+            mock_auth_service.authenticate.side_effect = UpstreamServiceError(
+                "STS is unavailable"
+            )
+
+            result = await authenticate_ws(
+                mock_websocket, mock_auth_service, "test-req-id"
+            )
+
+        assert result is None
+        mock_websocket.close.assert_called_once_with(
+            code=1013, reason="Service unavailable"
         )
 
     @pytest.mark.asyncio
