@@ -40,7 +40,11 @@ def test_complete_and_fragmented_messages_keep_their_contents(
             message_type(data=data),
         ]
     )
-    chunks = [wire[:3], wire[3:7], wire[7:]] if split_transport else [wire]
+    chunks = (
+        [wire[index : index + 3] for index in range(0, len(wire), 3)]
+        if split_transport
+        else [wire]
+    )
     frames = [
         frame
         for chunk in chunks
