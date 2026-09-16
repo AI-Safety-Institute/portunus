@@ -5,6 +5,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- Audit serialization avoids an extra copy when adding JSON record delimiters.
+
 ## [0.9.0] - 2026-09-11
 
 ### Added
