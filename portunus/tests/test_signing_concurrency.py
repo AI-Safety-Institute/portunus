@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from portunus.config import config
 from portunus.models import AwsCredentials, SigningKey
 from portunus.services import signing_service
 from portunus.services.signing_service import (
@@ -60,11 +61,9 @@ def _fresh_signing_runtime():
 
 
 def _patch_settings(monkeypatch, workers: int, max_concurrent: int, timeout: float):
-    monkeypatch.setattr(
-        signing_service,
-        "_signing_settings",
-        lambda: (workers, max_concurrent, timeout),
-    )
+    monkeypatch.setattr(config.signing, "kms_executor_workers", workers)
+    monkeypatch.setattr(config.signing, "max_concurrent", max_concurrent)
+    monkeypatch.setattr(config.signing, "acquire_timeout_s", timeout)
 
 
 class _BlockingSigner:
@@ -155,6 +154,58 @@ async def test_excess_signing_sheds_cleanly_after_timeout(
 
     signer.release.set()
     assert await holder == _HEADERS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signer_fails", [False, True])
+async def test_cancelled_caller_holds_capacity_until_signer_finishes(
+    monkeypatch, signable_request, signing_key, credentials, signer_fails
+):
+    _patch_settings(monkeypatch, workers=2, max_concurrent=1, timeout=0.05)
+    signer = _BlockingSigner()
+
+    def pending_signer(*args):
+        result = signer(*args)
+        if signer_fails:
+            raise ValueError("Signing failed")
+        return result
+
+    holder = asyncio.create_task(
+        sign_request_async(
+            signable_request, signing_key, "key", credentials, sign_fn=pending_signer
+        )
+    )
+    try:
+        await _wait_for(lambda: signer.active == 1)
+        holder.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await holder
+
+        with pytest.raises(SigningOverloadedError):
+            await sign_request_async(
+                signable_request,
+                signing_key,
+                "key",
+                credentials,
+                sign_fn=lambda *_args: dict(_HEADERS),
+            )
+
+        signer.release.set()
+        await _wait_for(lambda: signer.active == 0)
+        assert (
+            await sign_request_async(
+                signable_request,
+                signing_key,
+                "key",
+                credentials,
+                sign_fn=lambda *_args: dict(_HEADERS),
+            )
+            == _HEADERS
+        )
+    finally:
+        signer.release.set()
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
 
 
 @pytest.mark.asyncio
