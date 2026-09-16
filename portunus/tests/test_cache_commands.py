@@ -18,12 +18,15 @@ class RedisEndpoint(FakeAsyncRedis):
     def __init__(self) -> None:
         super().__init__(decode_responses=True)
         self.commands: list[str] = []
+        self.expiry_requests_ms: list[int] = []
         self.failures: dict[str, deque[Exception]] = {}
         self.rejected = asyncio.Event()
         self.rejection_delay = 0.0
 
     async def execute_command(self, name: str, *args: Any, **kwargs: Any) -> Any:
         self.commands.append(name)
+        if name == "PSETEX":
+            self.expiry_requests_ms.append(args[1])
         failures = self.failures.get(name)
         if failures:
             if self.rejection_delay:
@@ -134,6 +137,20 @@ async def test_cache_write_does_not_restart_its_lifetime_after_waiting(cache_end
     endpoint.rejection_delay = 1.1
     assert not await cache.cache_auth_result("payload", auth_result(), 1, "example.com")
     assert await cache.get_cached_auth_result("payload", "example.com") is None
+
+
+@pytest.mark.asyncio
+async def test_successful_cache_retry_keeps_only_the_remaining_lifetime(cache_endpoint):
+    cache, endpoint = cache_endpoint
+    lifetime = 3
+    endpoint.failures["PSETEX"] = deque([MaxConnectionsError("Pool occupied")])
+    endpoint.rejection_delay = 0.5
+
+    assert await cache.cache_auth_result(
+        "payload", auth_result(), lifetime, "example.com"
+    )
+    remaining_ms = endpoint.expiry_requests_ms[-1]
+    assert 0 < remaining_ms < (lifetime - endpoint.rejection_delay) * 1000
 
 
 @pytest.mark.asyncio
