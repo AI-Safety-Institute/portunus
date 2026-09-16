@@ -183,7 +183,7 @@ class FrameObserver:
         return self._desynced[direction]
 
     def finish(self, direction: Direction) -> Iterator[ObservedFrame]:
-        """Release an unfinished message as a truncated capture, once."""
+        """Yield partial messages and flag incomplete framing at capture end."""
         pending = self._pending[direction]
         self._pending[direction] = None
         if pending is not None:
@@ -193,6 +193,13 @@ class FrameObserver:
                 payload=bytes(pending.buf[:MAX_DECOMPRESSED_PAYLOAD_BYTES]),
                 truncated=True,
             )
+        elif not self._desynced[direction]:
+            conn = self._request if direction == Direction.REQUEST else self._response
+            # wsproto exposes no EOF event for an unfinished frame header.
+            # Its decoder retains either unparsed bytes or the unfinished header.
+            decoder = conn._proto._frame_decoder
+            if decoder.header is not None or len(decoder.buffer):
+                self._mark_desynced(direction, "IncompleteFrameAtEOF")
 
     def _mark_desynced(self, direction: Direction, detail: str) -> None:
         # wsproto error messages can echo frame bytes — log class names / short

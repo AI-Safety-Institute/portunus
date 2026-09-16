@@ -118,6 +118,38 @@ async def test_rejected_websocket_upgrade_preserves_http_error_body(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_end", ["headers", "body", "trailers"])
+async def test_rejected_upgrade_preserves_request_completion(request_end, monkeypatch):
+    messages = [
+        _headers({"upgrade": "websocket"}, request=True, end=request_end == "headers")
+    ]
+    body = b"" if request_end == "headers" else b"hello"
+    if request_end != "headers":
+        messages.append(
+            proc_pb2.ProcessingRequest(
+                request_body=proc_pb2.HttpBody(
+                    body=body, end_of_stream=request_end == "body"
+                )
+            )
+        )
+    if request_end == "trailers":
+        messages.append(
+            proc_pb2.ProcessingRequest(request_trailers=proc_pb2.HttpTrailers())
+        )
+    messages.append(_headers({":status": "403"}, request=False, end=True))
+
+    records = await _capture(messages, monkeypatch)
+
+    bodies = [r for r in records if r["record_type"] == "request_body"]
+    assert bodies
+    assert b"".join(base64.b64decode(r["body"]) for r in bodies) == body
+    assert sum(r["final_chunk"] for r in bodies) == 1
+    assert bodies[-1]["final_chunk"] is True
+    assert all(r["frame_index"] is None for r in bodies)
+    assert not any(r["record_type"] == "ws_summary" for r in records)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("direction", ["request", "response"])
 async def test_http_trailers_complete_the_body(direction, monkeypatch):
     records = await _capture(
@@ -181,3 +213,69 @@ async def test_interrupted_websocket_message_records_captured_bytes_as_truncated
     assert summary["server_text_frames"] == 1
     assert summary["server_close_frames"] == int(termination == "close")
     assert summary["close_code"] == (1000 if termination == "close" else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["request", "response"])
+@pytest.mark.parametrize("cut", [1, 2])
+@pytest.mark.parametrize("complete_first", [False, True])
+async def test_partial_websocket_header_marks_capture_incomplete_without_a_message(
+    direction, cut, complete_first, monkeypatch
+):
+    sender = Connection(
+        ConnectionType.CLIENT if direction == "request" else ConnectionType.SERVER
+    )
+    wire = sender.send(TextMessage(data="complete")) if complete_first else b""
+    wire += sender.send(TextMessage(data="hello"))[:cut]
+    records = await _capture(
+        [
+            _headers({"upgrade": "websocket"}, request=True),
+            _headers({":status": "101"}, request=False),
+            proc_pb2.ProcessingRequest(
+                **{f"{direction}_body": proc_pb2.HttpBody(body=wire)}
+            ),
+        ],
+        monkeypatch,
+    )
+
+    bodies = [r for r in records if r["record_type"] == f"{direction}_body"]
+    assert [base64.b64decode(r["body"]) for r in bodies] == (
+        [b"complete"] if complete_first else []
+    )
+    summary = next(r for r in records if r["record_type"] == "ws_summary")
+    peer = "client" if direction == "request" else "server"
+    assert summary[f"truncated_{peer}_frames"] == 1
+    assert summary[f"{peer}_text_frames"] == int(complete_first)
+    assert summary[f"{peer}_close_frames"] == 0
+    assert summary["close_code"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["request", "response"])
+async def test_unconfirmed_upgrade_accounts_for_buffered_capture_at_disconnect(
+    direction, monkeypatch
+):
+    sender = Connection(
+        ConnectionType.CLIENT if direction == "request" else ConnectionType.SERVER
+    )
+    records = await _capture(
+        [
+            _headers({"upgrade": "websocket"}, request=True),
+            proc_pb2.ProcessingRequest(
+                **{
+                    f"{direction}_body": proc_pb2.HttpBody(
+                        body=sender.send(TextMessage(data="hello"))
+                    )
+                }
+            ),
+        ],
+        monkeypatch,
+    )
+
+    assert not any(r["record_type"] == f"{direction}_body" for r in records)
+    summary = next(r for r in records if r["record_type"] == "ws_summary")
+    peer = "client" if direction == "request" else "server"
+    assert summary[f"truncated_{peer}_frames"] == 1
+    assert summary[f"{peer}_text_frames"] == 0
+    assert summary[f"{peer}_close_frames"] == 0
+    assert summary["close_code"] is None
