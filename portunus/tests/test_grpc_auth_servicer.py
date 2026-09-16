@@ -33,6 +33,7 @@ from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.secrets_service import SecretsService
 from portunus.services.signing_service import SigningOverloadedError
+from portunus.services.state_service import StateService
 
 
 @dataclass
@@ -944,7 +945,7 @@ class _CountingBotoSession:
 
 
 class _FakeRedis:
-    """Minimal in-memory Redis: enough for CacheService get/setex/ping."""
+    """In-memory Redis command boundary for two-pass authentication."""
 
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
@@ -952,20 +953,12 @@ class _FakeRedis:
     async def get(self, key: str) -> Optional[str]:
         return self._store.get(key)
 
-    async def setex(self, key: str, ttl: int, value: str) -> bool:
+    async def psetex(self, key: str, ttl: int, value: str) -> bool:
         self._store[key] = value
         return True
 
     async def ping(self) -> bool:
         return True
-
-
-class _FakeStateService:
-    def __init__(self) -> None:
-        self._redis = _FakeRedis()
-
-    async def acquire_redis_connection(self, *_a: Any, **_k: Any) -> _FakeRedis:
-        return self._redis
 
 
 _SIGNING_SECRET = json.dumps(
@@ -1005,9 +998,11 @@ def _real_servicer_with_counting_aws() -> tuple[PortunusAuthServicer, dict]:
     """Wire a real AuthService (real cache) over counting AWS fakes."""
     counters = {"sts": 0, "secrets": 0}
     session = _CountingBotoSession(counters, _SIGNING_SECRET)
+    state = StateService()
+    state.redis_client = _FakeRedis()  # type: ignore[assignment]
     auth_service = AuthService(
         secrets_service=SecretsService(boto_session=session),
-        cache_service=CacheService(state_service=_FakeStateService()),  # type: ignore[arg-type]
+        cache_service=CacheService(state_service=state),
     )
     servicer = PortunusAuthServicer(
         auth_service=auth_service,
