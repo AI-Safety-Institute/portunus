@@ -16,6 +16,7 @@ from portunus.exceptions import (
     CredentialsError,
     FetchSecretError,
     PayloadError,
+    UpstreamServiceError,
 )
 from portunus.models import AuthPayload, AuthResult
 from portunus.relay import WsCloseCode
@@ -109,6 +110,14 @@ async def authenticate_ws(
     except (AuthenticationError, FetchSecretError) as e:
         logger.warning(f"WS {request_id}: Auth forbidden: {e.message}")
         await _close_ws(websocket, code=WsCloseCode.FORBIDDEN, reason="Forbidden")
+        return None
+    except UpstreamServiceError as e:
+        logger.error(f"WS {request_id}: Auth dependency unavailable: {e.message}")
+        await _close_ws(
+            websocket,
+            code=WsCloseCode.TRY_AGAIN_LATER,
+            reason="Service unavailable",
+        )
         return None
     except TimeoutError as e:
         logger.warning(f"WS {request_id}: Auth timed out: {e}")
