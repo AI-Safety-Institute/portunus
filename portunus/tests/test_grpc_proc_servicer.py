@@ -964,7 +964,7 @@ async def test_ws_tagged_stream_emits_frame_and_summary_records():
                     websocket_metadata=True,
                     request_id="ws-stream-1",
                 ),
-                _http_headers_message(headers={}, is_request=False),
+                _http_headers_message(headers={":status": "101"}, is_request=False),
                 # Server-side WS text frame.
                 _http_body_message(body=_ws_frame(b"hello"), is_request=False),
             ]
@@ -1005,7 +1005,7 @@ async def test_ws_frames_carry_monotonic_per_direction_frame_index():
                     websocket_metadata=True,
                     request_id="ws-fi-1",
                 ),
-                _http_headers_message(headers={}, is_request=False),
+                _http_headers_message(headers={":status": "101"}, is_request=False),
                 # Two identical-payload frames — the case that collides
                 # without frame_index.
                 _http_body_message(body=_ws_frame(b"dup"), is_request=False),
@@ -1078,7 +1078,7 @@ async def test_ws_summary_uses_blocking_submit_on_normal_close():
                     websocket_metadata=True,
                     request_id="ws-summary-blocking",
                 ),
-                _http_headers_message(headers={}, is_request=False),
+                _http_headers_message(headers={":status": "101"}, is_request=False),
                 _http_body_message(body=_ws_frame(b"hello"), is_request=False),
             ]
         )
@@ -1433,7 +1433,7 @@ async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
                     websocket_metadata=True,
                     request_id="ws-desync",
                 ),
-                _http_headers_message(headers={}, is_request=False),
+                _http_headers_message(headers={":status": "101"}, is_request=False),
                 _http_body_message(body=_ws_frame(b"before"), is_request=False),
                 _http_body_message(body=malformed, is_request=False),
                 # Post-desync frame: must neither crash nor emit records.

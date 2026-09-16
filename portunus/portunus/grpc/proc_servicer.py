@@ -163,6 +163,11 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             if state is not None:
                 self._active.pop(state.stream_id, None)
                 if state.mode == StreamMode.WS_UPGRADE:
+                    if state.observer is not None:
+                        timestamp = generate_iso_timestamp()
+                        for direction in Direction:
+                            for frame in state.observer.finish(direction):
+                                await self._submit_frame(state, frame, timestamp)
                     await self._emit_ws_summary(state, droppable=False)
 
     def _initialise_stream(self, first: proc_pb2.ProcessingRequest) -> _StreamState:
@@ -213,6 +218,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
 
         if request.HasField("request_headers"):
             await self._on_request_headers(state, request, timestamp)
+            if request.request_headers.end_of_stream:
+                await self._finish_http_body(state, Direction.REQUEST, timestamp)
             yield _empty_headers_response(request_side=True)
         elif request.HasField("request_body"):
             await self._on_body_chunk(
@@ -223,9 +230,12 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             )
         elif request.HasField("request_trailers"):
             await self._on_request_trailers(state, request.request_trailers, timestamp)
+            await self._finish_http_body(state, Direction.REQUEST, timestamp)
             yield _empty_trailers_response(request_side=True)
         elif request.HasField("response_headers"):
             await self._on_response_headers(state, request.response_headers, timestamp)
+            if request.response_headers.end_of_stream:
+                await self._finish_http_body(state, Direction.RESPONSE, timestamp)
             yield _empty_headers_response(request_side=False)
         elif request.HasField("response_body"):
             await self._on_body_chunk(
@@ -238,6 +248,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             await self._on_response_trailers(
                 state, request.response_trailers, timestamp
             )
+            await self._finish_http_body(state, Direction.RESPONSE, timestamp)
             yield _empty_trailers_response(request_side=False)
         # Unknown variants are silently ignored for forward-compat.
 
@@ -309,21 +320,29 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         timestamp: str,
     ) -> None:
         headers = _headers_to_dict(msg.headers)
-        # For WS upgrades, rebuild the observer with the PerMessageDeflate
-        # state negotiated in the 101 response, then replay buffered pre-101
-        # bytes through it in arrival order.
         if state.mode == StreamMode.WS_UPGRADE:
-            ext_b64 = headers.get("sec-websocket-extensions")
-            ext: Optional[str] = None
-            if ext_b64:
-                try:
-                    ext = base64.b64decode(ext_b64).decode("utf-8", errors="replace")
-                except Exception:
-                    ext = None
-            state.upstream_extensions = ext
-            state.observer = build_observer(response_extensions_header=ext)
-            state.response_headers_seen = True
-            await self._replay_pre_101(state, timestamp)
+            status = next(
+                (_header_value(h) for h in msg.headers.headers if h.key == ":status"),
+                "",
+            )
+            if status == "101":
+                ext_b64 = headers.get("sec-websocket-extensions")
+                ext: Optional[str] = None
+                if ext_b64:
+                    try:
+                        ext = base64.b64decode(ext_b64).decode(
+                            "utf-8", errors="replace"
+                        )
+                    except Exception:
+                        ext = None
+                state.upstream_extensions = ext
+                state.observer = build_observer(response_extensions_header=ext)
+                state.response_headers_seen = True
+                await self._replay_pre_101(state, timestamp)
+            elif not status.startswith("1"):
+                state.mode = StreamMode.HTTP
+                state.observer = None
+                await self._replay_pre_101(state, timestamp)
 
         await self._queue.submit_blocking(
             PublishTask(
@@ -357,6 +376,17 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             ),
             timeout=config.grpc.publish_blocking_timeout_seconds,
         )
+
+    async def _finish_http_body(
+        self, state: _StreamState, direction: Direction, timestamp: str
+    ) -> None:
+        if state.mode == StreamMode.HTTP:
+            await self._on_body_chunk(
+                state,
+                proc_pb2.HttpBody(end_of_stream=True),
+                direction,
+                timestamp,
+            )
 
     async def _on_body_chunk(
         self,
@@ -476,12 +506,14 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         if state.pre_101_poisoned:
             # Buffer was cleared at poison time; nothing safe to replay.
             return
-        if not state.pre_101_buffer or state.observer is None:
+        if not state.pre_101_buffer:
             state.pre_101_buffer.clear()
             state.pre_101_bytes = 0
             return
         for direction, chunk in state.pre_101_buffer:
-            await self._observe_ws_chunk(state, direction, chunk, timestamp)
+            await self._on_body_chunk(
+                state, proc_pb2.HttpBody(body=chunk), direction, timestamp
+            )
         state.pre_101_buffer.clear()
         state.pre_101_bytes = 0
 

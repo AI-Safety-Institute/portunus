@@ -178,10 +178,23 @@ class FrameObserver:
         """True once ``direction``'s parser hit an error and stopped observing."""
         return self._desynced[direction]
 
+    def finish(self, direction: Direction) -> Iterator[ObservedFrame]:
+        """Release an unfinished message as a truncated capture, once."""
+        pending = self._pending[direction]
+        self._pending[direction] = None
+        if pending is not None:
+            yield ObservedFrame(
+                direction=direction,
+                opcode=pending.opcode,
+                payload=bytes(pending.buf[:MAX_DECOMPRESSED_PAYLOAD_BYTES]),
+                truncated=True,
+            )
+
     def _mark_desynced(self, direction: Direction, detail: str) -> None:
         # wsproto error messages can echo frame bytes — log class names / short
         # reasons only.
         self._desynced[direction] = True
+        self._pending[direction] = None
         logger.warning(
             "WS frame parser failed on %s direction (%s); remaining "
             "bytes in this direction are unobservable",
@@ -277,6 +290,7 @@ class FrameObserver:
                 direction=direction, opcode="pong", payload=event.payload
             )
         elif isinstance(event, CloseConnection):
+            yield from self.finish(direction)
             yield ObservedFrame(
                 direction=direction,
                 opcode="close",
