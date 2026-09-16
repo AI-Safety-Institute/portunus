@@ -35,15 +35,15 @@ def effective_cache_ttl(
 ) -> int:
     """Seconds a cached auth result may live.
 
-    The smallest of the configured cache duration, the caller's remaining
-    credential lifetime, and (for minted tokens) the token lifetime less
-    ``TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS``. Never negative; 0 means do not
-    cache.
+    The smallest of the configured cache duration and whichever bounds are
+    given: the caller's remaining credential lifetime, and a minted token's
+    lifetime less ``TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS``. Never negative; 0
+    means do not cache.
 
     Args:
         cache_duration: Configured maximum TTL
         credential_expiry_seconds: Seconds until the caller's credentials
-            expire, or None when the payload carries no expiration
+            expire, or None to leave the TTL unbounded by them
         token_expires_at: When a minted token expires, or None for stored keys
         now: Reference time (defaults to the current UTC time)
     """
