@@ -29,6 +29,10 @@ from portunus.exceptions import (
 )
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
+from portunus.services.auth_service import AuthService
+from portunus.services.cache_service import CacheService
+from portunus.services.secrets_service import SecretsService
+from portunus.services.signing_service import SigningOverloadedError
 
 
 @dataclass
@@ -866,8 +870,6 @@ async def test_signing_pass_sheds_with_503_when_signing_capacity_exhausted():
 
     not queued and not a generic 500 (each waiter pins its buffered body).
     """
-    from portunus.services.signing_service import SigningOverloadedError
-
     signing_key = SigningKey(
         kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
         provider_id="signingkey_1234abcd",
@@ -1001,10 +1003,6 @@ def _signing_payload() -> str:
 
 def _real_servicer_with_counting_aws() -> tuple[PortunusAuthServicer, dict]:
     """Wire a real AuthService (real cache) over counting AWS fakes."""
-    from portunus.services.auth_service import AuthService
-    from portunus.services.cache_service import CacheService
-    from portunus.services.secrets_service import SecretsService
-
     counters = {"sts": 0, "secrets": 0}
     session = _CountingBotoSession(counters, _SIGNING_SECRET)
     auth_service = AuthService(
