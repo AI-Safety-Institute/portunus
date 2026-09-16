@@ -51,6 +51,7 @@ static_resources:
                 http_path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
                 http_protocol: "%PROTOCOL%"
                 response_code: "%RESPONSE_CODE%"
+                response_code_details: "%RESPONSE_CODE_DETAILS%"
                 response_flags: "%RESPONSE_FLAGS%"
                 upstream_failure_reason: "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
                 bytes_received: "%BYTES_RECEIVED%"
@@ -195,6 +196,9 @@ static_resources:
       thresholds:
         - priority: DEFAULT
           max_connections: ${TARGET_MAX_CONNECTIONS}
+          max_requests: ${TARGET_MAX_REQUESTS}
+          max_pending_requests: ${TARGET_MAX_PENDING_REQUESTS}
+          track_remaining: true
     load_assignment:
       cluster_name: ${TARGET_HOST}
       endpoints:

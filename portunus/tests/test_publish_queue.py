@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 
 import pytest
 
@@ -405,6 +407,39 @@ async def test_byte_budget_is_released_after_flush_not_at_dequeue() -> None:
     assert queue.submit_droppable(_sized_task(800)) is True
 
     await queue.stop(drain_timeout=2.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_batch", [1, 3])
+async def test_idle_worker_releases_completed_task_payloads(max_batch: int) -> None:
+    sent = asyncio.Event()
+    delivered: list[bytes] = []
+
+    async def sender(stream_name: str, records: list[bytes]) -> int:
+        delivered.extend(records)
+        if len(delivered) == 3:
+            sent.set()
+        return 0
+
+    queue = BoundedPublishQueue(
+        maxsize=4, num_workers=1, max_batch=max_batch, batch_sender=sender
+    )
+    references = []
+    for _ in range(3):
+        task = PublishTask(build=lambda: ("audit", b"body"), label="body", size_bytes=4)
+        references.append(weakref.ref(task))
+        assert queue.submit_droppable(task)
+    del task
+
+    await queue.start()
+    try:
+        await asyncio.wait_for(sent.wait(), timeout=1)
+        await asyncio.sleep(0)
+        gc.collect()
+        assert delivered == [b"body"] * 3
+        assert all(reference() is None for reference in references)
+    finally:
+        await queue.stop()
 
 
 # ---------------------------------------------------------------------------

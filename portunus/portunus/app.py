@@ -569,7 +569,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle.
 
     Starts the WS log queue on startup, drains active WS connections
-    and cleans up Redis on shutdown.
+    and closes AWS and Redis clients on shutdown.
     """
     await start_log_queue(num_workers=config.relay.max_connections)
     yield
@@ -591,6 +591,7 @@ async def lifespan(app: FastAPI):
     # Then drain the log queue (no new items will arrive)
     await stop_log_queue()
 
+    await state_service.close()
     logger.info("Shutting down Redis connections")
     await state_service.close_redis_client()
     logger.info("Redis connections closed")
