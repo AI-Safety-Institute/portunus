@@ -12,7 +12,11 @@ import pytest_asyncio
 import redis.exceptions
 from botocore.exceptions import ClientError
 
-from portunus.exceptions import AuthenticationError, CredentialsError
+from portunus.exceptions import (
+    AuthenticationError,
+    CredentialsError,
+    UpstreamServiceError,
+)
 from portunus.models import (
     AnthropicWifSecret,
     AuthPayload,
@@ -77,6 +81,13 @@ def install_sts_client(auth_service, arn=PRINCIPAL_ARN):
     mock_sts_client.__aenter__ = AsyncMock(return_value=mock_sts_client)
     mock_sts_client.__aexit__ = AsyncMock(return_value=None)
     auth_service.boto_session.create_client = MagicMock(return_value=mock_sts_client)
+
+
+def test_default_mint_service_shares_the_secrets_boto_session(auth_service):
+    assert (
+        auth_service.mint_service.sts.boto_session
+        is auth_service.secrets_service.boto_session
+    )
 
 
 class TestGetAwsIdentity:
@@ -367,7 +378,7 @@ class TestAuthenticateWithMintSecrets:
         assert 590 < ttl <= 600
 
     @pytest.mark.asyncio
-    async def test_stored_key_ttl_is_capped_by_credential_expiry(self, fake_redis):
+    async def test_stored_key_ttl_ignores_credential_expiry(self, fake_redis):
         cache = _cache_backed_by(fake_redis)
         mint = AsyncMock()
         service = _service_for("sk-static", cache, mint)
@@ -379,7 +390,8 @@ class TestAuthenticateWithMintSecrets:
         assert result.output_header is None
         mint.assert_not_awaited()
         ttl = await fake_redis.ttl(cache.generate_cache_key(payload.raw))
-        assert 590 < ttl <= 600
+        assert cache.cache_duration > 600
+        assert cache.cache_duration - 5 < ttl <= cache.cache_duration
 
     @pytest.mark.asyncio
     async def test_concurrent_requests_share_one_mint(self, fake_redis):
@@ -447,3 +459,16 @@ class TestAuthenticateWithMintSecrets:
 
         with pytest.raises(CredentialsError):
             await service.authenticate(_payload(), "req", "api.example.com")
+
+    @pytest.mark.asyncio
+    async def test_upstream_failure_during_mint_passes_through_unchanged(
+        self, fake_redis
+    ):
+        error = UpstreamServiceError("STS is unavailable")
+        mint = AsyncMock(side_effect=error)
+        service = _service_for(WIF_SECRET, _cache_backed_by(fake_redis), mint)
+
+        with pytest.raises(UpstreamServiceError) as exc_info:
+            await service.authenticate(_payload(), "req", "api.example.com")
+
+        assert exc_info.value is error

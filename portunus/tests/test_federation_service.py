@@ -1,5 +1,6 @@
 """Tests for minting short-lived upstream tokens via federation roles."""
 
+import asyncio
 import json
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -8,13 +9,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    ClientError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 
 from portunus.config import FederationConfig
 from portunus.exceptions import (
     AuthenticationError,
     ConfigurationError,
     CredentialsError,
+    UpstreamServiceError,
 )
 from portunus.models import (
     AnthropicWifSecret,
@@ -22,6 +28,7 @@ from portunus.models import (
     MintSecretBase,
     PrincipalInfo,
 )
+from portunus.services import federation_service
 from portunus.services.federation_service import (
     FEDERATION_SESSION_SECONDS,
     IDENTITY_TOKEN_SECONDS,
@@ -83,7 +90,7 @@ def _identity() -> FederationIdentity:
             access_key_id="ASIAFED",
             secret_access_key="fed-secret",
             session_token="fed-token",
-            expiration=NOW + timedelta(hours=1),
+            expiration=NOW + timedelta(minutes=15),
         ),
         session_name=CALLER_ROLE,
         project="example",
@@ -198,6 +205,14 @@ class TestCallerIdentityFields:
         assert caller_project(PrincipalInfo(project="unknown")) == ""
         assert caller_project(PrincipalInfo(project=None)) == ""
 
+    def test_role_name_with_a_comma_cannot_be_a_session_tag(self):
+        with pytest.raises(CredentialsError, match="session tag"):
+            caller_role_name(PrincipalInfo(principal="assumed-role/role,name"))
+
+    def test_project_with_a_comma_cannot_be_a_session_tag(self):
+        with pytest.raises(CredentialsError, match="session tag"):
+            caller_project(PrincipalInfo(project="team,project"))
+
 
 def _sts_session(
     assume_role: object = None, get_web_identity_token: object = None
@@ -234,7 +249,7 @@ ASSUME_ROLE_RESPONSE = {
         "AccessKeyId": "ASIAFED",
         "SecretAccessKey": "fed-secret",
         "SessionToken": "fed-token",
-        "Expiration": NOW + timedelta(hours=1),
+        "Expiration": NOW + timedelta(minutes=15),
     }
 }
 WEB_IDENTITY_RESPONSE = {
@@ -282,6 +297,31 @@ class TestStsFederationService:
         assert clients == []
 
     @pytest.mark.asyncio
+    async def test_role_name_unusable_as_a_tag_is_rejected_before_sts(self):
+        session, clients = _sts_session(assume_role=ASSUME_ROLE_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+        principal = PrincipalInfo(principal="assumed-role/role,name")
+
+        with pytest.raises(CredentialsError, match="session tag"):
+            await service.assume_federation_role(
+                CALLER_CREDENTIALS, principal, ROLE_ARN
+            )
+
+        assert clients == []
+
+    @pytest.mark.asyncio
+    async def test_unreachable_sts_raises_upstream_service_error(self):
+        session, _ = _sts_session(
+            assume_role=EndpointConnectionError(endpoint_url=STS_ENDPOINT)
+        )
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        with pytest.raises(UpstreamServiceError, match="STS is unavailable") as e:
+            await service.assume_federation_role(CALLER_CREDENTIALS, CALLER, ROLE_ARN)
+
+        assert STS_ENDPOINT not in e.value.message
+
+    @pytest.mark.asyncio
     async def test_expired_caller_credentials_raise_credentials_error(self):
         session, _ = _sts_session(
             assume_role=_client_error("ExpiredToken", "AssumeRole")
@@ -312,9 +352,7 @@ class TestStsFederationService:
         )
         service = StsFederationService(session, federation_config)
 
-        proof = await service.web_identity_token(
-            _identity(), "https://api.example.com", 3600
-        )
+        proof = await service.web_identity_token(_identity(), "https://api.example.com")
 
         (client,) = clients
         assert client.create_kwargs["aws_access_key_id"] == "ASIAFED"
@@ -334,17 +372,6 @@ class TestStsFederationService:
         )
 
     @pytest.mark.asyncio
-    async def test_secret_duration_caps_identity_token(self):
-        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
-        service = StsFederationService(session, FEDERATION_CONFIG)
-
-        await service.web_identity_token(_identity(), "https://api.example.com", 300)
-
-        (client,) = clients
-        call = client.get_web_identity_token.await_args_list[0]
-        assert call.kwargs["DurationSeconds"] == 300
-
-    @pytest.mark.asyncio
     async def test_web_identity_token_failure_raises_authentication_error(self):
         session, _ = _sts_session(
             get_web_identity_token=_client_error("AccessDenied", "GetWebIdentityToken")
@@ -352,9 +379,19 @@ class TestStsFederationService:
         service = StsFederationService(session, FEDERATION_CONFIG)
 
         with pytest.raises(AuthenticationError, match="identity token"):
-            await service.web_identity_token(
-                _identity(), "https://api.example.com", 3600
-            )
+            await service.web_identity_token(_identity(), "https://api.example.com")
+
+    @pytest.mark.asyncio
+    async def test_web_identity_token_timeout_raises_upstream_service_error(self):
+        session, _ = _sts_session(
+            get_web_identity_token=ReadTimeoutError(endpoint_url=STS_ENDPOINT)
+        )
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        with pytest.raises(UpstreamServiceError, match="STS is unavailable") as e:
+            await service.web_identity_token(_identity(), "https://api.example.com")
+
+        assert STS_ENDPOINT not in e.value.message
 
     def test_endpoint_defaults_to_regional_sts(self):
         session = MagicMock()
@@ -440,10 +477,20 @@ class TestAnthropicTokenExchange:
             await adapter.exchange("header.payload.signature", _secret())
 
     @pytest.mark.asyncio
-    async def test_transport_failure_raises(self):
+    async def test_transport_failure_raises_upstream_service_error(self):
         adapter, _ = _exchange(httpx.ConnectError("connection refused"))
 
-        with pytest.raises(AuthenticationError, match="failed"):
+        with pytest.raises(UpstreamServiceError, match="unavailable"):
+            await adapter.exchange("header.payload.signature", _secret())
+
+    @pytest.mark.parametrize("status", [500, 503, 429])
+    @pytest.mark.asyncio
+    async def test_server_errors_and_rate_limits_raise_upstream_service_error(
+        self, status: int
+    ):
+        adapter, _ = _exchange(lambda request: httpx.Response(status, text="busy"))
+
+        with pytest.raises(UpstreamServiceError, match=f"HTTP {status}"):
             await adapter.exchange("header.payload.signature", _secret())
 
 
@@ -471,10 +518,19 @@ class TestTokenMintService:
             anthropic,
         )
 
+    def test_boto_session_is_shared_with_the_sts_service(self):
+        session = MagicMock()
+
+        service = TokenMintService(
+            boto_session=session, federation_config=FEDERATION_CONFIG
+        )
+
+        assert service.sts.boto_session is session
+
     @pytest.mark.asyncio
     async def test_mint_sequences_proof_and_exchange(self):
         service, sts, anthropic = self._service()
-        secret = _secret(token_duration_seconds=1200)
+        secret = _secret()
 
         minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
 
@@ -482,10 +538,27 @@ class TestTokenMintService:
             CALLER_CREDENTIALS, CALLER, ROLE_ARN
         )
         sts.web_identity_token.assert_awaited_once_with(
-            _identity(), "https://api.anthropic.com", 1200
+            _identity(), "https://api.anthropic.com"
         )
         anthropic.exchange.assert_awaited_once_with("jwt-1", secret)
         assert minted.token == "token-for-jwt-1"
+
+    @pytest.mark.asyncio
+    async def test_mint_stops_at_the_deadline(self, monkeypatch):
+        service, sts, anthropic = self._service()
+
+        async def slow_assume(*args, **kwargs):
+            await asyncio.sleep(1)
+            return _identity()
+
+        sts.assume_federation_role = AsyncMock(side_effect=slow_assume)
+        monkeypatch.setattr(federation_service, "MINT_DEADLINE_SECONDS", 0.01)
+
+        with pytest.raises(UpstreamServiceError, match="timed out"):
+            await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+
+        sts.web_identity_token.assert_not_awaited()
+        anthropic.exchange.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_each_mint_uses_a_fresh_identity_token(self):
