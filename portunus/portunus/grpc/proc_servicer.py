@@ -79,16 +79,11 @@ class _StreamState:
     upstream_extensions: Optional[str] = None
     started_at_iso: str = ""
     started_at_monotonic: float = 0.0
-    # Per-direction sequential chunk ids. Glue
-    # (``infra/pipelines/process_raw_data.py:reassemble_body_chunks``) groups by
-    # request_id and concatenates body bytes ordered by chunk_id.
+    # Audit consumers reassemble each direction by request_id and chunk_id.
     request_chunk_id: int = 0
     response_chunk_id: int = 0
-    # Per-direction WS frame ordinal. chunk_id is monotonic across the direction
-    # (one frame may span several chunks) so it can't identify a frame;
-    # frame_index does. Glue keys WS frames by (request_id, frame_index) to
-    # reassemble per-frame and disambiguate otherwise-identical frames (same
-    # body + timestamp). HTTP body records leave frame_index None.
+    # A WebSocket message can span chunks, so frame_index identifies the message.
+    # HTTP body records leave frame_index unset.
     request_frame_index: int = 0
     response_frame_index: int = 0
     client_frame_counts: dict[str, int] = field(default_factory=dict)
