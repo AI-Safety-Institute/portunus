@@ -8,7 +8,8 @@ managing Redis connections and providing access to Redis clients.
 import asyncio
 import logging
 import random
-from typing import Optional
+from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING, Optional
 
 import aiobotocore.session
 import redis.asyncio as aioredis
@@ -16,6 +17,9 @@ from redis.exceptions import ConnectionError, MaxConnectionsError
 
 from portunus.config import config
 from portunus.services.xray_service import capture_async
+
+if TYPE_CHECKING:
+    from types_aiobotocore_kinesis import KinesisClient
 
 logger = logging.getLogger("api.access")
 
@@ -30,12 +34,16 @@ class StateService:
 
     Attributes:
         redis_client: The Redis client instance
+        kinesis_client: The shared Kinesis client, created on first use
     """
 
     def __init__(self) -> None:
         """Initialize the StateService."""
         self.redis_client: Optional[aioredis.Redis] = None
         self.boto_session = aiobotocore.session.get_session()
+        self.kinesis_client: Optional["KinesisClient"] = None
+        self._kinesis_exit_stack = AsyncExitStack()
+        self._kinesis_lock = asyncio.Lock()
 
     async def get_redis_client(self) -> Optional[aioredis.Redis]:
         """
@@ -181,11 +189,43 @@ class StateService:
         """
         return self.boto_session.create_client("firehose")
 
-    async def get_kinesis_client(self):
+    async def get_kinesis_client(self) -> "KinesisClient":
         """
-        Get a Kinesis Data Streams client using aioboto3.
+        Get the shared Kinesis Data Streams client, creating it on first use.
+
+        One client is kept for the lifetime of the process: constructing an
+        aiobotocore client builds a fresh SSL context and parses the CA bundle
+        (~30-40 ms of CPU), so never create one per call.
 
         Returns:
             A Kinesis Data Streams client instance
         """
-        return self.boto_session.create_client("kinesis")
+        client = self.kinesis_client
+        if client is None:
+            async with self._kinesis_lock:
+                client = self.kinesis_client
+                if client is None:
+                    client = await self._kinesis_exit_stack.enter_async_context(
+                        self.boto_session.create_client("kinesis")
+                    )
+                    self.kinesis_client = client
+        return client
+
+    async def close_kinesis_client(self) -> None:
+        """
+        Close the shared Kinesis client.
+
+        This method should be called during application shutdown to release
+        the client's HTTP connection pool.
+        """
+        async with self._kinesis_lock:
+            if self.kinesis_client is None:
+                return
+            try:
+                await self._kinesis_exit_stack.aclose()
+                logger.info("Kinesis client closed")
+            except Exception as e:
+                logger.error(f"Error closing Kinesis client: {e}")
+            finally:
+                self.kinesis_client = None
+                self._kinesis_exit_stack = AsyncExitStack()
