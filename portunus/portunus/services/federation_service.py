@@ -14,6 +14,7 @@ Minting has two independent parts:
 :class:`TokenMintService` sequences the two for a given secret type.
 """
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -23,13 +24,14 @@ from typing import Optional, Sequence
 import httpx
 from aiobotocore.config import AioConfig
 from aiobotocore.session import AioSession, get_session
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from portunus.config import FederationConfig, config
 from portunus.exceptions import (
     AuthenticationError,
     ConfigurationError,
     CredentialsError,
+    UpstreamServiceError,
 )
 from portunus.models import (
     AnthropicWifSecret,
@@ -42,9 +44,8 @@ from portunus.services.xray_service import capture_async
 logger = logging.getLogger("api.access")
 
 JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-FEDERATION_SESSION_SECONDS = 3600
-# The identity token only has to outlive the exchange call. STS accepts
-# 60-3600 s; a secret's token_duration_seconds may cap it further.
+# Both only have to outlive the exchange call. 900 s is the AssumeRole minimum.
+FEDERATION_SESSION_SECONDS = 900
 IDENTITY_TOKEN_SECONDS = 900
 IDENTITY_TOKEN_SIGNING_ALGORITHM = "RS256"
 
@@ -63,8 +64,13 @@ _FEDERATION_NAMESPACE_PATH = re.compile(
     rf"{_IAM_PATH_SEGMENT}/{_IAM_PATH_SEGMENT}/", re.ASCII
 )
 _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
-# /authorise has a 9 s budget (app.py). One attempt per STS call and a short
-# exchange timeout keep a slow dependency from turning into proxy 503s.
+# STS tag values are [\p{L}\p{Z}\p{N}_.:/=+\-@]*. Role names may also contain
+# ",", so a valid session name is not always a valid tag value.
+_SESSION_TAG_VALUE = re.compile(r"^[\w .:/=+\-@]*$")
+# /authorise has a 9 s budget (app.py), and the caller's identity check and
+# secret fetch run before minting starts. The per-call limits below add up to
+# more than that, so mint() also has an overall deadline.
+MINT_DEADLINE_SECONDS = 6
 _STS_CLIENT_CONFIG = AioConfig(
     connect_timeout=2,
     read_timeout=3,
@@ -147,11 +153,11 @@ def validate_federation_role_arn(
 
 
 def caller_role_name(principal: PrincipalInfo) -> str:
-    """The caller's IAM role name, used as the federation RoleSessionName.
+    """The caller's IAM role name: the federation RoleSessionName and user tag.
 
     Raises:
         CredentialsError: The caller is not an assumed role, or its role name
-            is not a valid session name.
+            is not usable as a session name and tag value.
     """
     prefix = "assumed-role/"
     if not principal.principal or not principal.principal.startswith(prefix):
@@ -159,15 +165,23 @@ def caller_role_name(principal: PrincipalInfo) -> str:
     name = principal.principal[len(prefix) :]
     if not _ROLE_SESSION_NAME.fullmatch(name):
         raise CredentialsError("Caller role name is not a valid session name")
+    if not _SESSION_TAG_VALUE.fullmatch(name):
+        raise CredentialsError("Caller role name cannot be used as a session tag")
     return name
 
 
 def caller_project(principal: PrincipalInfo) -> str:
-    """The caller's project for the session tag, or "" when unknown."""
+    """The caller's project for the session tag, or "" when unknown.
+
+    Raises:
+        CredentialsError: The project is not usable as a tag value.
+    """
     project = principal.project
     # parse_identity_from_arn() reports a missing project as "unknown".
     if project is None or project == "unknown":
         return ""
+    if not _SESSION_TAG_VALUE.fullmatch(project):
+        raise CredentialsError("Caller project cannot be used as a session tag")
     return project
 
 
@@ -214,11 +228,13 @@ class StsFederationService:
         """Assume ``role_arn`` with the caller's credentials.
 
         Raises:
-            CredentialsError: Caller credentials expired, or the caller is not
-                an assumed role.
+            CredentialsError: Caller credentials expired, or the caller's
+                role name or project cannot be used as a session tag.
             AuthenticationError: STS refused the assumption.
+            UpstreamServiceError: STS could not be reached.
         """
         session_name = caller_role_name(principal)
+        project = caller_project(principal)
         try:
             async with self.boto_session.create_client(
                 "sts",
@@ -241,6 +257,11 @@ class StsFederationService:
             raise AuthenticationError(
                 f"Could not assume federation role ({code or 'unknown error'})"
             ) from e
+        except BotoCoreError as e:
+            logger.error(
+                f"AssumeRole on federation role failed: {type(e).__name__}: {e}"
+            )
+            raise UpstreamServiceError("STS is unavailable") from e
         session = response["Credentials"]
         return FederationIdentity(
             credentials=AwsCredentials(
@@ -250,12 +271,12 @@ class StsFederationService:
                 expiration=session["Expiration"],
             ),
             session_name=session_name,
-            project=caller_project(principal),
+            project=project,
         )
 
     @capture_async()
     async def web_identity_token(
-        self, identity: FederationIdentity, audience: str, max_duration_seconds: int
+        self, identity: FederationIdentity, audience: str
     ) -> WebIdentityToken:
         """Issue a fresh STS-signed JWT for ``audience`` from the federation session.
 
@@ -264,6 +285,7 @@ class StsFederationService:
 
         Raises:
             AuthenticationError: STS refused to issue the token.
+            UpstreamServiceError: STS could not be reached.
         """
         tags = [
             {
@@ -284,7 +306,7 @@ class StsFederationService:
                 response = await sts.get_web_identity_token(
                     Audience=[audience],
                     SigningAlgorithm=IDENTITY_TOKEN_SIGNING_ALGORITHM,
-                    DurationSeconds=min(IDENTITY_TOKEN_SECONDS, max_duration_seconds),
+                    DurationSeconds=IDENTITY_TOKEN_SECONDS,
                     Tags=tags,
                 )
         except ClientError as e:
@@ -293,6 +315,9 @@ class StsFederationService:
             raise AuthenticationError(
                 f"Could not issue identity token ({code or 'unknown error'})"
             ) from e
+        except BotoCoreError as e:
+            logger.error(f"GetWebIdentityToken failed: {type(e).__name__}: {e}")
+            raise UpstreamServiceError("STS is unavailable") from e
         return WebIdentityToken(
             token=response["WebIdentityToken"], expires_at=response["Expiration"]
         )
@@ -322,8 +347,10 @@ class AnthropicTokenExchange:
         """POST the JWT to ``https://<host>/v1/oauth/token``.
 
         Raises:
-            AuthenticationError: Transport failure, non-200 response, or a
-                response without ``access_token`` and ``expires_in``.
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response.
+            AuthenticationError: Any other non-200 response, or a response
+                without ``access_token`` and ``expires_in``.
         """
         url = f"https://{secret.host}/v1/oauth/token"
         requested_at = datetime.now(timezone.utc)
@@ -343,8 +370,8 @@ class AnthropicTokenExchange:
             logger.error(
                 f"Token exchange with {secret.host} failed: {type(e).__name__}: {e}"
             )
-            raise AuthenticationError(
-                f"Token exchange with {secret.host} failed"
+            raise UpstreamServiceError(
+                f"Token exchange with {secret.host} is unavailable"
             ) from e
 
         if response.status_code != 200:
@@ -352,10 +379,13 @@ class AnthropicTokenExchange:
                 f"Token exchange with {secret.host} returned HTTP "
                 f"{response.status_code}: {response.text[:500]}"
             )
-            raise AuthenticationError(
+            message = (
                 f"Token exchange with {secret.host} returned "
                 f"HTTP {response.status_code}"
             )
+            if response.status_code >= 500 or response.status_code == 429:
+                raise UpstreamServiceError(message)
+            raise AuthenticationError(message)
 
         try:
             body = response.json()
@@ -383,9 +413,12 @@ class TokenMintService:
         sts: Optional[StsFederationService] = None,
         anthropic: Optional[AnthropicTokenExchange] = None,
         federation_config: Optional[FederationConfig] = None,
+        boto_session: Optional[AioSession] = None,
     ) -> None:
         self.federation_config = federation_config or config.federation
-        self.sts = sts or StsFederationService(federation_config=self.federation_config)
+        self.sts = sts or StsFederationService(
+            boto_session=boto_session, federation_config=self.federation_config
+        )
         self.anthropic = anthropic or AnthropicTokenExchange()
 
     async def aclose(self) -> None:
@@ -405,6 +438,8 @@ class TokenMintService:
             AuthenticationError: Role not allowed, STS refused, or the
                 exchange failed.
             CredentialsError: Caller credentials expired or not an assumed role.
+            UpstreamServiceError: STS or the provider was unavailable, or
+                minting exceeded ``MINT_DEADLINE_SECONDS``.
         """
         validate_federation_role_arn(
             secret.federation_role_arn,
@@ -415,10 +450,13 @@ class TokenMintService:
             raise AuthenticationError(
                 f"No token exchange for secret type {type(secret).__name__}"
             )
-        identity = await self.sts.assume_federation_role(
-            credentials, principal, secret.federation_role_arn
-        )
-        proof = await self.sts.web_identity_token(
-            identity, secret.audience, secret.token_duration_seconds
-        )
-        return await self.anthropic.exchange(proof.token, secret)
+        try:
+            async with asyncio.timeout(MINT_DEADLINE_SECONDS):
+                identity = await self.sts.assume_federation_role(
+                    credentials, principal, secret.federation_role_arn
+                )
+                proof = await self.sts.web_identity_token(identity, secret.audience)
+                return await self.anthropic.exchange(proof.token, secret)
+        except TimeoutError as e:
+            logger.error(f"Token minting exceeded {MINT_DEADLINE_SECONDS} s")
+            raise UpstreamServiceError("Token minting timed out") from e

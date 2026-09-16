@@ -26,10 +26,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   and `<namespace>` exactly two path segments, e.g.
   `arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example`.
   `FEDERATION_STS_ENDPOINT_URL`, `FEDERATION_USER_TAG_KEY` and
-  `FEDERATION_PROJECT_TAG_KEY` are also new. Minted results are cached until
-  the earliest of `CACHE_DURATION`, the caller's credential expiry and five
-  minutes before the token expires; concurrent misses for one payload share
-  a mint per process.
+  `FEDERATION_PROJECT_TAG_KEY` are also new. Mint secrets reject unknown
+  fields. Minted results are cached until the earliest of `CACHE_DURATION`,
+  the caller's credential expiry and five minutes before the token expires;
+  concurrent misses for one payload share a mint per process.
+- `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
+  provider's token endpoint cannot be reached or answers 5xx/429, or when
+  minting exceeds its 6 s deadline.
 - The CLI's default session policy allows `sts:AssumeRole` on the federation
   roles in the secret's namespace, taken from the first two path segments of
   the secret's name: a secret named `projects/example/<name>` gets
@@ -47,10 +50,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - JSON secrets that carry a `type` are validated strictly against that type
   and rejected on failure. JSON without a `type` keeps the previous
   behaviour (stored key, or used verbatim when it matches no schema).
-- Cached authorization results now expire no later than the caller's
-  credentials, and never later than `CACHE_DURATION`. Previously the
-  payload's credential expiration was never read (see Fixed), so entries
-  lived for the full `CACHE_DURATION`.
 - The proxy removes the header the auth payload arrived in (`API_KEY_HEADER`)
   from the upstream request and sets the header the credential is written to
   (`output_header`, else `API_KEY_HEADER`); when both name the same header this

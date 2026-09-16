@@ -19,6 +19,7 @@ from portunus.exceptions import (
     AuthenticationError,
     CredentialsError,
     PayloadError,
+    ServiceError,
 )
 from portunus.models import (
     AuthPayload,
@@ -67,8 +68,10 @@ class AuthService:
         self.secrets_service = secrets_service or SecretsService()
         self.cache_service = cache_service or CacheService()
         self.validation_service = validation_service or SecretValidationService()
-        self.mint_service = mint_service or TokenMintService()
         self.boto_session = self.secrets_service.boto_session
+        self.mint_service = mint_service or TokenMintService(
+            boto_session=self.boto_session
+        )
         # Per-process single flight for minting: concurrent cache misses on
         # one payload wait for a single mint instead of each calling STS and
         # the provider. A lock is dropped once no coroutine holds it.
@@ -142,8 +145,9 @@ class AuthService:
         Checks the Redis cache first (keyed by the raw payload). On a miss it
         verifies the caller with STS, fetches and parses the secret, and either
         returns the stored key or mints a short-lived token as the secret
-        describes. Results are cached for no longer than the caller's
-        credentials, or a minted token, remain valid.
+        describes. Stored keys are cached for the configured cache duration;
+        minted tokens for no longer than the caller's credentials and the
+        token remain valid.
 
         Args:
             payload: The parsed base64-encoded payload from authorization header
@@ -159,6 +163,8 @@ class AuthService:
         Raises:
             PayloadError: If the payload cannot be decoded
             CredentialsError: If the AWS credentials are invalid or expired
+            ServiceError: If a dependency failed (``FetchSecretError``,
+                ``UpstreamServiceError``) or the service is misconfigured
             AuthenticationError: If there's an error during authentication
             TimeoutError: If the cache read times out; the request is rejected
                 rather than falling back to STS and Secrets Manager
@@ -187,7 +193,7 @@ class AuthService:
             )
             await self._write_cache(payload, auth_result)
             return auth_result
-        except (PayloadError, CredentialsError, TimeoutError):
+        except (PayloadError, CredentialsError, ServiceError, TimeoutError):
             raise
         except Exception as e:
             logger.error(f"Authentication error: {e}")
@@ -250,15 +256,24 @@ class AuthService:
             return None
 
     async def _write_cache(self, payload: AuthPayload, auth_result: AuthResult) -> None:
-        """Best-effort cache write, bounded by credential and token lifetimes."""
+        """Best-effort cache write.
+
+        Stored keys are cached for the full cache duration, which is how a
+        cached result outlives the caller's temporary credentials. Minted
+        tokens are also bounded by the caller's credential expiry and the
+        token's own lifetime.
+        """
         if not (payload.raw and auth_result.successful):
             return
         try:
             async with asyncio.timeout(3):
+                minted = auth_result.expires_at is not None
                 ttl = effective_cache_ttl(
                     cache_duration=self.cache_service.cache_duration,
                     credential_expiry_seconds=(
                         payload.credentials.seconds_until_expiration()
+                        if minted
+                        else None
                     ),
                     token_expires_at=auth_result.expires_at,
                 )
