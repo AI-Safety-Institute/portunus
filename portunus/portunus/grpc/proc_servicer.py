@@ -110,6 +110,7 @@ class _StreamState:
     # every later frame; instead poison the stream (skip observation, record the
     # loss via truncated counters) rather than replay a corrupt prefix.
     pre_101_poisoned: bool = False
+    pre_101_lost_directions: set[Direction] = field(default_factory=set)
     # Set when a direction's parser desynced mid-session (malformed frame or
     # deflate-cap abort). The truncated counter is bumped once at desync so the
     # WSSummaryRecord reflects the unobserved remainder of that direction.
@@ -412,9 +413,11 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
     ) -> None:
         """Dispatch a body chunk to either the HTTP or WS publish path."""
         if state.mode == StreamMode.WS_UPGRADE:
-            # Poisoned stream has desynced frame state; further bytes would emit
-            # corrupt frames. Loss is already recorded in the truncated counters.
+            # A poisoned stream cannot be parsed. Track affected directions
+            # without retaining more bytes.
             if state.pre_101_poisoned:
+                if msg.body:
+                    self._record_pre_101_loss(state, direction)
                 return
             if not state.response_headers_seen:
                 self._buffer_pre_101(
@@ -499,6 +502,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         observation and records the loss cleanly.
         """
         if state.pre_101_poisoned:
+            if chunk:
+                self._record_pre_101_loss(state, direction)
             return
         if state.pre_101_bytes + len(chunk) > _PRE_101_MAX_BYTES:
             logger.warning(
@@ -512,22 +517,42 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 _PRE_101_MAX_BYTES,
             )
             state.pre_101_poisoned = True
-            # Count the unobservable bytes as truncated frames per direction
-            # so the WSSummaryRecord reflects the audit gap.
-            if direction == Direction.REQUEST:
-                state.truncated_client_frames += 1
-            else:
-                state.truncated_server_frames += 1
+            self._record_pre_101_loss(state, direction)
+            for buffered_direction, buffered_chunk, _ in state.pre_101_buffer:
+                if buffered_chunk:
+                    self._record_pre_101_loss(state, buffered_direction)
             state.pre_101_buffer.clear()
             state.pre_101_bytes = 0
             return
         state.pre_101_buffer.append((direction, chunk, end_of_stream))
         state.pre_101_bytes += len(chunk)
 
+    def _record_pre_101_loss(self, state: _StreamState, direction: Direction) -> None:
+        if direction in state.pre_101_lost_directions:
+            return
+        state.pre_101_lost_directions.add(direction)
+        if direction == Direction.REQUEST:
+            state.truncated_client_frames += 1
+        else:
+            state.truncated_server_frames += 1
+
     async def _replay_pre_101(self, state: _StreamState, timestamp: str) -> None:
         """Replay body events after the upgrade outcome selects their decoder."""
         if state.pre_101_poisoned:
-            # Buffer was cleared at poison time; nothing safe to replay.
+            # Rejected upgrades have no WS summary; preserve cap loss in the
+            # HTTP body records even when a later chunk marks the body ended.
+            if state.mode == StreamMode.HTTP:
+                for direction in Direction:
+                    if direction in state.pre_101_lost_directions:
+                        await self._submit_body_record(
+                            state=state,
+                            direction=direction,
+                            body_bytes=b"",
+                            timestamp=timestamp,
+                            chunk_id=self._next_chunk_id(state, direction),
+                            label=f"{direction.value}_body",
+                            truncated=True,
+                        )
             return
         if not state.pre_101_buffer:
             state.pre_101_buffer.clear()
