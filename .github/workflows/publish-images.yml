@@ -21,7 +21,6 @@ on:
   pull_request:
     branches:
       - main
-      - "dl/portunus-*"
   workflow_dispatch:
 
 jobs:
