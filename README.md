@@ -252,6 +252,8 @@ Every exchange uses a freshly issued STS token.
 3. Assumes the federation role with the caller's own credentials, as above. No STS web identity token is issued: Portunus signs an AWS `GetCallerIdentity` request for `sts.<region>.amazonaws.com` with the session's credentials (SigV4, using [google-auth](https://github.com/googleapis/google-auth-library-python)'s request signer and the SDK's configured region, `AWS_DEFAULT_REGION`, which must be set for this type). The request is bound to `audience` through a signed `x-goog-cloud-target-resource` header.
 4. Exchanges the signed request at `https://sts.googleapis.com/v1/token` for a federated token for `audience`, then calls `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/<service_account>:generateAccessToken` with `scopes` and `token_lifetime_seconds`. The access token is returned with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
+As for `anthropic_wif`, an unreachable Google endpoint, a 5xx/429 answer or a missed 6 s deadline returns 503.
+
 Google verifies the signed request against AWS itself, so the federation role needs no IAM permissions for this type. The workload identity pool provider's attribute condition sees the assumed-role ARN (`arn:aws:sts::<account>:assumed-role/<role name>/<caller role name>`, which drops the IAM path), and the service account must grant `roles/iam.workloadIdentityUser` to the matching pool principal. Both are deployment concerns.
 
 #### Caching and the federation role

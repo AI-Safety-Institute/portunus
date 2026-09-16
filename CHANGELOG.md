@@ -28,9 +28,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   cached until the earlier of `CACHE_DURATION` and one minute before the
   token expires; concurrent misses for one payload share a mint per
   process.
-- `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
-  provider's token endpoint cannot be reached or answers 5xx/429, or when
-  minting exceeds its 6 s deadline.
+- `/authorise` returns 503 (`UpstreamServiceError`) when STS or a
+  provider's token endpoint (Anthropic's, or Google STS and IAM
+  Credentials) cannot be reached or answers 5xx/429, or when minting
+  exceeds its 6 s deadline.
 - The `gcp_wif` secret type mints Google service-account access
   tokens. Portunus signs an AWS `GetCallerIdentity` request with the
   federation session's credentials, exchanges it at Google STS for a

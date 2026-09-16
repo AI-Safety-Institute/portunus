@@ -114,7 +114,7 @@ Logging captures full request/response bodies, headers, and trailers verbatim â€
 - `/portunus/portunus/app.py` - Main FastAPI application with endpoints
 - `/portunus/portunus/services/auth_service.py` - Authentication and authorization logic
 - `/portunus/portunus/services/aws_service.py` - AWS services integration (Secrets Manager, etc.)
-- `/portunus/portunus/services/federation_service.py` - Short-lived upstream tokens: federation role assumption, STS web identity tokens, provider exchange adapters
+- `/portunus/portunus/services/federation_service.py` - Short-lived upstream tokens: federation role assumption, identity proofs (STS web identity token or signed `GetCallerIdentity` request), one `exchange(proof, secret)` adapter per provider, and `TokenMintService._routes` pairing each secret type with its proof and adapter (a new provider adds a secret type, an adapter and one route)
 - `/portunus/portunus/services/secret_validation_service.py` - Secret parsing (`parse_secret`) and target host validation
 - `/portunus/portunus/services/publish_service.py` - Publishing log events and metadata to Kinesis Data Streams
 - `/portunus/portunus/util.py` - Utility functions and helpers

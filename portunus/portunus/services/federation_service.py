@@ -4,18 +4,19 @@ Short-lived upstream tokens minted from federation roles.
 Minting has two independent parts:
 
 1. Identity proof (:class:`StsFederationService`): with the caller's own
-   credentials, assume the secret's federation role. For JWT providers that
-   session then requests an STS web identity token, a signed JWT whose
-   subject is the federation role and whose tags carry the user, the caller's
-   role name, its session name and the project.
-2. Exchange: trade the proof for a provider bearer token. Each provider gets
-   its own adapter. :class:`AnthropicTokenExchange` posts the JWT to the
-   provider's OAuth endpoint; :class:`GcpTokenExchange` signs an AWS
-   ``GetCallerIdentity`` request with the session's credentials, which Google
-   STS verifies against AWS, and impersonates a service account with the
-   result.
+   credentials, assume the secret's federation role, then prove that session's
+   identity in the form the provider verifies. Either an STS web identity
+   token (a signed JWT whose subject is the federation role and whose tags
+   carry the user, the caller's role name, its session name and the project),
+   or a SigV4-signed ``GetCallerIdentity`` request that the provider replays
+   against AWS.
+2. Exchange: trade the proof for a provider bearer token. Each provider has an
+   adapter with the same ``exchange(proof, secret)`` shape.
+   :class:`AnthropicTokenExchange` posts the JWT to the provider's OAuth
+   endpoint; :class:`GcpTokenExchange` trades the signed request at Google STS
+   and impersonates a service account with the result.
 
-:class:`TokenMintService` sequences the two for a given secret type.
+:class:`TokenMintService` pairs each secret type with its proof and adapter.
 """
 
 import asyncio
@@ -23,9 +24,10 @@ import json
 import logging
 import re
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence
+from typing import Any, Optional, Protocol, Sequence
 
 import httpx
 from aiobotocore.config import AioConfig
@@ -381,220 +383,78 @@ class StsFederationService:
             token=response["WebIdentityToken"], expires_at=response["Expiration"]
         )
 
-
-class AnthropicTokenExchange:
-    """Exchange adapter for Anthropic's RFC 7523 JWT-bearer token endpoint."""
-
-    def __init__(self, http_client: Optional[httpx.AsyncClient] = None) -> None:
-        self._http_client = http_client
-
-    @property
-    def http_client(self) -> httpx.AsyncClient:
-        """Shared client, created on first use so the pool outlives one call."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=_EXCHANGE_TIMEOUT)
-        return self._http_client
-
-    async def aclose(self) -> None:
-        """Close the HTTP client, if one was created."""
-        if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
-
     @capture_async()
-    async def exchange(self, assertion: str, secret: AnthropicWifSecret) -> MintedToken:
-        """POST the JWT to ``https://<host>/v1/oauth/token``.
+    async def signed_caller_identity(
+        self, identity: FederationIdentity, audience: str
+    ) -> str:
+        """Sign a ``GetCallerIdentity`` request as proof of the federation identity.
 
-        Raises:
-            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
-                response.
-            AuthenticationError: Any other non-200 response, or a response
-                without ``access_token`` and ``expires_in``.
-        """
-        url = f"https://{secret.host}/v1/oauth/token"
-        requested_at = datetime.now(timezone.utc)
-        try:
-            response = await self.http_client.post(
-                url,
-                json={
-                    "grant_type": JWT_BEARER_GRANT_TYPE,
-                    "assertion": assertion,
-                    "federation_rule_id": secret.federation_rule_id,
-                    "organization_id": secret.organization_id,
-                    "service_account_id": secret.service_account_id,
-                    "workspace_id": secret.workspace_id,
-                },
-            )
-        except httpx.HTTPError as e:
-            logger.error(
-                f"Token exchange with {secret.host} failed: {type(e).__name__}: {e}"
-            )
-            raise UpstreamServiceError(
-                f"Token exchange with {secret.host} is unavailable"
-            ) from e
-
-        if response.status_code != 200:
-            logger.error(
-                f"Token exchange with {secret.host} returned HTTP "
-                f"{response.status_code}: {response.text[:500]}"
-            )
-            message = (
-                f"Token exchange with {secret.host} returned "
-                f"HTTP {response.status_code}"
-            )
-            if response.status_code >= 500 or response.status_code == 429:
-                raise UpstreamServiceError(message)
-            raise AuthenticationError(message)
-
-        try:
-            body = response.json()
-            token = body["access_token"]
-            expires_in = int(body["expires_in"])
-        except (ValueError, KeyError, TypeError) as e:
-            logger.error(f"Token exchange with {secret.host} returned a malformed body")
-            raise AuthenticationError(
-                f"Token exchange with {secret.host} returned a malformed response"
-            ) from e
-        if not isinstance(token, str) or not token:
-            raise AuthenticationError(
-                f"Token exchange with {secret.host} returned an empty token"
-            )
-        return MintedToken(
-            token=token, expires_at=requested_at + timedelta(seconds=expires_in)
-        )
-
-
-def aws_subject_token(credentials: AwsCredentials, region: str, audience: str) -> str:
-    """Serialize a SigV4-signed ``GetCallerIdentity`` request for Google STS.
-
-    Google proves the caller's AWS identity by sending this request to AWS
-    itself. The serialization is Google's ``aws4_request`` subject token: a
-    URL-encoded JSON object with ``url``, ``method`` and a ``headers`` list.
-    https://cloud.google.com/iam/docs/reference/sts/rest/v1/TopLevel/token
-
-    Args:
-        credentials: The federation session's credentials
-        region: AWS region whose STS endpoint the request names
-        audience: The workload identity pool provider resource name
-    """
-    signer = google_aws.RequestSigner(region)
-    signed = signer.get_request_options(
-        google_aws.AwsSecurityCredentials(
-            access_key_id=credentials.access_key_id,
-            secret_access_key=credentials.secret_access_key,
-            session_token=credentials.session_token,
-        ),
-        AWS_GET_CALLER_IDENTITY_URL.format(region=region),
-        "POST",
-        # Signed, so the request cannot be presented for another provider.
-        additional_headers={"x-goog-cloud-target-resource": audience},
-    )
-    return urllib.parse.quote(
-        json.dumps(
-            {
-                "url": signed["url"],
-                "method": signed["method"],
-                "headers": [
-                    {"key": key, "value": value}
-                    for key, value in signed["headers"].items()
-                ],
-            }
-        )
-    )
-
-
-def _rfc3339(value: object) -> datetime:
-    """Parse a Google ``Timestamp`` JSON value into an aware datetime."""
-    if not isinstance(value, str):
-        raise ValueError("timestamp is not a string")
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-class GcpTokenExchange:
-    """Exchange adapter for Google workload identity federation.
-
-    Two calls: Google STS trades the signed ``GetCallerIdentity`` request for
-    a federated token scoped to the IAM Credentials API, which then issues an
-    access token for the secret's service account.
-    """
-
-    def __init__(self, http_client: Optional[httpx.AsyncClient] = None) -> None:
-        self._http_client = http_client
-
-    @property
-    def http_client(self) -> httpx.AsyncClient:
-        """Shared client, created on first use so the pool outlives one call."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=_EXCHANGE_TIMEOUT)
-        return self._http_client
-
-    async def aclose(self) -> None:
-        """Close the HTTP client, if one was created."""
-        if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
-
-    @capture_async()
-    async def exchange(
-        self,
-        identity: FederationIdentity,
-        region: str,
-        secret: GcpWifSecret,
-    ) -> MintedToken:
-        """Obtain an access token for ``secret.service_account``.
+        The provider replays the request against the regional STS endpoint, so
+        the region comes from the SDK configuration rather than
+        ``endpoint_url()``, which may name a VPC endpoint. The result is
+        Google's ``aws4_request`` subject token: a URL-encoded JSON object with
+        ``url``, ``method`` and a ``headers`` list.
+        https://cloud.google.com/iam/docs/reference/sts/rest/v1/TopLevel/token
 
         Args:
             identity: The assumed federation-role session
-            region: AWS region the signed ``GetCallerIdentity`` request names
-            secret: The ``gcp_wif`` secret
+            audience: The provider's workload identity pool provider resource
+                name, bound to the request through a signed header
 
         Raises:
-            AuthenticationError: Google STS or IAM Credentials refused, the
-                transport failed, or a response was malformed.
+            ConfigurationError: No AWS region configured.
         """
-        exchange = f"Google STS exchange for {secret.service_account}"
-        federated = await self._post_json(
-            exchange,
-            GOOGLE_STS_TOKEN_URL,
-            data={
-                "grant_type": GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE,
-                "audience": secret.audience,
-                "scope": GOOGLE_IAM_SCOPE,
-                "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
-                "subject_token_type": AWS_SUBJECT_TOKEN_TYPE,
-                "subject_token": aws_subject_token(
-                    identity.credentials, region, secret.audience
-                ),
-            },
+        region = self.region()
+        credentials = identity.credentials
+        signed = google_aws.RequestSigner(region).get_request_options(
+            google_aws.AwsSecurityCredentials(
+                access_key_id=credentials.access_key_id,
+                secret_access_key=credentials.secret_access_key,
+                session_token=credentials.session_token,
+            ),
+            AWS_GET_CALLER_IDENTITY_URL.format(region=region),
+            "POST",
+            # Signed, so the request cannot be presented for another provider.
+            additional_headers={"x-goog-cloud-target-resource": audience},
         )
-        federated_token = federated.get("access_token")
-        if not isinstance(federated_token, str) or not federated_token:
-            raise AuthenticationError(f"{exchange} returned an empty token")
+        return urllib.parse.quote(
+            json.dumps(
+                {
+                    "url": signed["url"],
+                    "method": signed["method"],
+                    "headers": [
+                        {"key": key, "value": value}
+                        for key, value in signed["headers"].items()
+                    ],
+                }
+            )
+        )
 
-        impersonation = f"Impersonation of {secret.service_account}"
-        access = await self._post_json(
-            impersonation,
-            GOOGLE_IAM_CREDENTIALS_URL.format(service_account=secret.service_account),
-            headers={"Authorization": f"Bearer {federated_token}"},
-            json_body={
-                "scope": secret.scopes,
-                "lifetime": f"{secret.token_lifetime_seconds}s",
-            },
-        )
-        token = access.get("accessToken")
-        try:
-            expires_at = _rfc3339(access.get("expireTime"))
-        except ValueError as e:
-            logger.error(f"{impersonation} returned an unparseable expireTime")
-            raise AuthenticationError(
-                f"{impersonation} returned a malformed response"
-            ) from e
-        if not isinstance(token, str) or not token:
-            raise AuthenticationError(f"{impersonation} returned an empty token")
-        return MintedToken(token=token, expires_at=expires_at)
+
+class _HttpTokenExchange:
+    """Shared HTTP client and response handling for exchange adapters.
+
+    Subclasses implement ``exchange(proof, secret)`` for their secret type
+    and may override ``timeout``.
+    """
+
+    timeout: httpx.Timeout = _EXCHANGE_TIMEOUT
+
+    def __init__(self, http_client: Optional[httpx.AsyncClient] = None) -> None:
+        self._http_client = http_client
+
+    @property
+    def http_client(self) -> httpx.AsyncClient:
+        """Shared client, created on first use so the pool outlives one call."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=self.timeout)
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the HTTP client, if one was created."""
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def _post_json(
         self,
@@ -605,12 +465,16 @@ class GcpTokenExchange:
         json_body: Optional[dict[str, object]] = None,
         headers: Optional[dict[str, str]] = None,
     ) -> dict[str, object]:
-        """POST and return the JSON object in a 200 response.
+        """POST a form or JSON body and return the JSON object in a 200 response.
+
+        ``step`` names the call in messages and logs, which carry the response
+        status and (truncated) body but never the request.
 
         Raises:
-            AuthenticationError: Transport failure, non-200 response, or a
-                body that is not a JSON object. Messages and logs carry the
-                step name and Google's response, never request contents.
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response.
+            AuthenticationError: Any other non-200 response, or a body that is
+                not a JSON object.
         """
         try:
             response = await self.http_client.post(
@@ -618,12 +482,15 @@ class GcpTokenExchange:
             )
         except httpx.HTTPError as e:
             logger.error(f"{step} failed: {type(e).__name__}: {e}")
-            raise AuthenticationError(f"{step} failed") from e
+            raise UpstreamServiceError(f"{step} is unavailable") from e
         if response.status_code != 200:
             logger.error(
                 f"{step} returned HTTP {response.status_code}: {response.text[:500]}"
             )
-            raise AuthenticationError(f"{step} returned HTTP {response.status_code}")
+            message = f"{step} returned HTTP {response.status_code}"
+            if response.status_code >= 500 or response.status_code == 429:
+                raise UpstreamServiceError(message)
+            raise AuthenticationError(message)
         try:
             body = response.json()
         except ValueError as e:
@@ -635,8 +502,170 @@ class GcpTokenExchange:
         return body
 
 
+def _required_token(body: dict[str, object], key: str, step: str) -> str:
+    """The non-empty string at ``body[key]``.
+
+    Raises:
+        AuthenticationError: The value is missing, empty or not a string.
+    """
+    token = body.get(key)
+    if not isinstance(token, str) or not token:
+        raise AuthenticationError(f"{step} returned an empty token")
+    return token
+
+
+def _expires_in(value: object) -> int:
+    """Parse an OAuth ``expires_in`` JSON value (seconds).
+
+    Raises:
+        ValueError: Not a number or numeric string.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError("expires_in is not a number")
+    return int(value)
+
+
+def _rfc3339(value: object) -> datetime:
+    """Parse a Google ``Timestamp`` JSON value into an aware datetime.
+
+    Raises:
+        ValueError: Not an RFC 3339 string.
+    """
+    if not isinstance(value, str):
+        raise ValueError("timestamp is not a string")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+class AnthropicTokenExchange(_HttpTokenExchange):
+    """Exchange adapter for Anthropic's RFC 7523 JWT-bearer token endpoint."""
+
+    @capture_async(name="anthropic_exchange")
+    async def exchange(self, proof: str, secret: AnthropicWifSecret) -> MintedToken:
+        """POST the STS web identity token to ``https://<host>/v1/oauth/token``.
+
+        Raises:
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response.
+            AuthenticationError: Any other non-200 response, or a response
+                without ``access_token`` and ``expires_in``.
+        """
+        step = f"Token exchange with {secret.host}"
+        requested_at = datetime.now(timezone.utc)
+        body = await self._post_json(
+            step,
+            f"https://{secret.host}/v1/oauth/token",
+            json_body={
+                "grant_type": JWT_BEARER_GRANT_TYPE,
+                "assertion": proof,
+                "federation_rule_id": secret.federation_rule_id,
+                "organization_id": secret.organization_id,
+                "service_account_id": secret.service_account_id,
+                "workspace_id": secret.workspace_id,
+            },
+        )
+        try:
+            expires_in = _expires_in(body.get("expires_in"))
+        except ValueError as e:
+            logger.error(f"{step} returned a malformed body")
+            raise AuthenticationError(f"{step} returned a malformed response") from e
+        return MintedToken(
+            token=_required_token(body, "access_token", step),
+            expires_at=requested_at + timedelta(seconds=expires_in),
+        )
+
+
+class GcpTokenExchange(_HttpTokenExchange):
+    """Exchange adapter for Google workload identity federation.
+
+    Two calls: Google STS trades the signed ``GetCallerIdentity`` request for
+    a federated token scoped to the IAM Credentials API, which then issues an
+    access token for the secret's service account.
+    """
+
+    @capture_async(name="gcp_exchange")
+    async def exchange(self, proof: str, secret: GcpWifSecret) -> MintedToken:
+        """Obtain an access token for ``secret.service_account``.
+
+        Args:
+            proof: The signed ``GetCallerIdentity`` request, serialized as
+                Google's ``aws4_request`` subject token
+            secret: The ``gcp_wif`` secret
+
+        Raises:
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response, from either call.
+            AuthenticationError: Google STS or IAM Credentials refused, or a
+                response was malformed.
+        """
+        exchange = f"Google STS exchange for {secret.service_account}"
+        federated = await self._post_json(
+            exchange,
+            GOOGLE_STS_TOKEN_URL,
+            data={
+                "grant_type": GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE,
+                "audience": secret.audience,
+                "scope": GOOGLE_IAM_SCOPE,
+                "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
+                "subject_token_type": AWS_SUBJECT_TOKEN_TYPE,
+                "subject_token": proof,
+            },
+        )
+        federated_token = _required_token(federated, "access_token", exchange)
+
+        impersonation = f"Impersonation of {secret.service_account}"
+        access = await self._post_json(
+            impersonation,
+            GOOGLE_IAM_CREDENTIALS_URL.format(service_account=secret.service_account),
+            headers={"Authorization": f"Bearer {federated_token}"},
+            json_body={
+                "scope": secret.scopes,
+                "lifetime": f"{secret.token_lifetime_seconds}s",
+            },
+        )
+        try:
+            expires_at = _rfc3339(access.get("expireTime"))
+        except ValueError as e:
+            logger.error(f"{impersonation} returned an unparseable expireTime")
+            raise AuthenticationError(
+                f"{impersonation} returned a malformed response"
+            ) from e
+        return MintedToken(
+            token=_required_token(access, "accessToken", impersonation),
+            expires_at=expires_at,
+        )
+
+
+class _TokenExchange[S: MintSecretBase](Protocol):
+    """The shape every exchange adapter exposes, for its own secret type."""
+
+    async def exchange(self, proof: str, secret: S) -> MintedToken: ...
+
+    async def aclose(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class _MintRoute[S: MintSecretBase]:
+    """How one secret type is minted.
+
+    Attributes:
+        prove: Prove the federation identity for the secret, in the form its
+            provider verifies
+        adapter: Exchange that proof for the provider's token
+    """
+
+    prove: Callable[[FederationIdentity, S], Awaitable[str]]
+    adapter: _TokenExchange[S]
+
+
 class TokenMintService:
-    """Mint an upstream token for a secret that describes how to obtain one."""
+    """Mint an upstream token for a secret that describes how to obtain one.
+
+    A new provider needs a ``MintSecretBase`` subclass, an adapter with the
+    ``exchange(proof, secret)`` shape, and one entry in ``_routes``.
+    """
 
     def __init__(
         self,
@@ -652,11 +681,27 @@ class TokenMintService:
         )
         self.anthropic = anthropic or AnthropicTokenExchange()
         self.gcp = gcp or GcpTokenExchange()
+        # Each route is typed for its own secret class, which the dict cannot
+        # express; mint() looks a route up by the secret's exact type.
+        self._routes: dict[type[MintSecretBase], _MintRoute[Any]] = {
+            AnthropicWifSecret: _MintRoute(self._web_identity_proof, self.anthropic),
+            GcpWifSecret: _MintRoute(self._signed_caller_identity_proof, self.gcp),
+        }
 
     async def aclose(self) -> None:
-        """Release adapter resources."""
-        await self.anthropic.aclose()
-        await self.gcp.aclose()
+        """Release every adapter's resources."""
+        for route in self._routes.values():
+            await route.adapter.aclose()
+
+    async def _web_identity_proof(
+        self, identity: FederationIdentity, secret: AnthropicWifSecret
+    ) -> str:
+        return (await self.sts.web_identity_token(identity, secret.audience)).token
+
+    async def _signed_caller_identity_proof(
+        self, identity: FederationIdentity, secret: GcpWifSecret
+    ) -> str:
+        return await self.sts.signed_caller_identity(identity, secret.audience)
 
     @capture_async()
     async def mint(
@@ -668,37 +713,32 @@ class TokenMintService:
         """Validate the federation role, prove the caller's identity, and exchange.
 
         Raises:
-            AuthenticationError: Role not allowed, STS refused, or the
-                exchange failed.
+            AuthenticationError: Role not allowed, no route for the secret
+                type, STS refused, or the exchange failed.
             CredentialsError: Caller credentials expired, not an assumed role,
                 or an identity field unusable as a session tag.
             UpstreamServiceError: STS or the provider was unavailable, or
                 minting exceeded ``MINT_DEADLINE_SECONDS``.
-            ConfigurationError: A ``gcp_wif`` secret with no AWS
-                region configured.
+            ConfigurationError: The proof needs an AWS region and none is
+                configured.
         """
         validate_federation_role_arn(
             secret.federation_role_arn,
             self.federation_config.allowed_account_ids,
             self.federation_config.role_path_prefix,
         )
-        if not isinstance(secret, (AnthropicWifSecret, GcpWifSecret)):
+        route = self._routes.get(type(secret))
+        if route is None:
             raise AuthenticationError(
                 f"No token exchange for secret type {type(secret).__name__}"
             )
         try:
             async with asyncio.timeout(MINT_DEADLINE_SECONDS):
-                if isinstance(secret, AnthropicWifSecret):
-                    identity = await self.sts.assume_federation_role(
-                        credentials, principal, secret.federation_role_arn
-                    )
-                    proof = await self.sts.web_identity_token(identity, secret.audience)
-                    return await self.anthropic.exchange(proof.token, secret)
-                region = self.sts.region()
                 identity = await self.sts.assume_federation_role(
                     credentials, principal, secret.federation_role_arn
                 )
-                return await self.gcp.exchange(identity, region, secret)
+                proof = await route.prove(identity, secret)
+                return await route.adapter.exchange(proof, secret)
         except TimeoutError as e:
             logger.error(f"Token minting exceeded {MINT_DEADLINE_SECONDS} s")
             raise UpstreamServiceError("Token minting timed out") from e

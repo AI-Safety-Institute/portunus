@@ -644,7 +644,7 @@ class GcpWifSecret(MintSecretBase):
 
 
 # Every secret shape. A new mint provider subclasses MintSecretBase, joins this
-# union, and gets an exchange branch in
+# union, and gets an exchange adapter and a route in
 # services.federation_service.TokenMintService.
 SecretsManagerSecret = Union[
     SecretsManagerAuthPayload, AnthropicWifSecret, GcpWifSecret

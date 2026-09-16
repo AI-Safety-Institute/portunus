@@ -52,7 +52,6 @@ from portunus.services.federation_service import (
     StsFederationService,
     TokenMintService,
     WebIdentityToken,
-    aws_subject_token,
     caller_project,
     caller_role_name,
     caller_session,
@@ -95,6 +94,8 @@ GCP_IAM_URL = (
     "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
     f"{GCP_SERVICE_ACCOUNT}:generateAccessToken"
 )
+# Stands in for the signed GetCallerIdentity request in adapter tests.
+PROOF = "signed-get-caller-identity"
 
 
 def _secret(**overrides: object) -> AnthropicWifSecret:
@@ -544,6 +545,83 @@ class TestStsFederationService:
             service.region()
 
 
+def _decode_subject_token(token: str) -> tuple[dict, dict[str, str]]:
+    """Decode an aws4_request subject token into (request, lower-cased headers)."""
+    request = json.loads(urllib.parse.unquote(token))
+    headers = {h["key"].lower(): h["value"] for h in request["headers"]}
+    return request, headers
+
+
+_SIGV4_AUTHORIZATION = re.compile(
+    r"^AWS4-HMAC-SHA256 Credential=ASIAFED/\d{8}/eu-west-2/sts/aws4_request, "
+    r"SignedHeaders=(?P<signed>[a-z0-9;-]+), Signature=[0-9a-f]{64}$"
+)
+
+
+def _regional_sts(region: str | None = REGION) -> StsFederationService:
+    """An STS service whose SDK session is configured for ``region``."""
+    session = MagicMock()
+    session.get_config_variable = MagicMock(return_value=region)
+    return StsFederationService(session, FEDERATION_CONFIG)
+
+
+class TestSignedCallerIdentity:
+    @pytest.mark.asyncio
+    async def test_is_a_signed_regional_get_caller_identity_request(self):
+        token = await _regional_sts().signed_caller_identity(_identity(), GCP_AUDIENCE)
+
+        request, headers = _decode_subject_token(token)
+        assert request["method"] == "POST"
+        assert request["url"] == (
+            f"https://sts.{REGION}.amazonaws.com"
+            "?Action=GetCallerIdentity&Version=2011-06-15"
+        )
+        assert headers["host"] == f"sts.{REGION}.amazonaws.com"
+        assert headers["x-amz-security-token"] == "fed-token"
+        assert headers["x-goog-cloud-target-resource"] == GCP_AUDIENCE
+        assert re.fullmatch(r"\d{8}T\d{6}Z", headers["x-amz-date"])
+        match = _SIGV4_AUTHORIZATION.fullmatch(headers["authorization"])
+        assert match is not None
+        signed = set(match["signed"].split(";"))
+        assert {"host", "x-amz-date", "x-goog-cloud-target-resource"} <= signed
+        assert "x-amz-security-token" in signed
+
+    @pytest.mark.asyncio
+    async def test_never_contains_the_secret_key(self):
+        token = await _regional_sts().signed_caller_identity(_identity(), GCP_AUDIENCE)
+
+        assert "fed-secret" not in urllib.parse.unquote(token)
+
+    @pytest.mark.asyncio
+    async def test_omits_the_session_token_header_for_long_lived_keys(self):
+        identity = replace(
+            _identity(),
+            credentials=AwsCredentials(access_key_id="AKIAFED", secret_access_key="s"),
+        )
+
+        token = await _regional_sts().signed_caller_identity(identity, GCP_AUDIENCE)
+
+        _, headers = _decode_subject_token(token)
+        assert "x-amz-security-token" not in headers
+
+    @pytest.mark.asyncio
+    async def test_names_the_sdk_region_not_the_configured_endpoint(self):
+        token = await _regional_sts("us-west-2").signed_caller_identity(
+            _identity(), GCP_AUDIENCE
+        )
+
+        request, headers = _decode_subject_token(token)
+        assert request["url"].startswith("https://sts.us-west-2.amazonaws.com?")
+        assert "/us-west-2/sts/aws4_request," in headers["authorization"]
+
+    @pytest.mark.asyncio
+    async def test_requires_a_configured_region(self):
+        with pytest.raises(ConfigurationError):
+            await _regional_sts(region=None).signed_caller_identity(
+                _identity(), GCP_AUDIENCE
+            )
+
+
 def _exchange(
     handler: Callable[[httpx.Request], httpx.Response] | Exception,
 ) -> tuple[AnthropicTokenExchange, list[httpx.Request]]:
@@ -625,54 +703,6 @@ class TestAnthropicTokenExchange:
             await adapter.exchange("header.payload.signature", _secret())
 
 
-def _decode_subject_token(token: str) -> tuple[dict, dict[str, str]]:
-    """Decode an aws4_request subject token into (request, lower-cased headers)."""
-    request = json.loads(urllib.parse.unquote(token))
-    headers = {h["key"].lower(): h["value"] for h in request["headers"]}
-    return request, headers
-
-
-_SIGV4_AUTHORIZATION = re.compile(
-    r"^AWS4-HMAC-SHA256 Credential=ASIAFED/\d{8}/eu-west-2/sts/aws4_request, "
-    r"SignedHeaders=(?P<signed>[a-z0-9;-]+), Signature=[0-9a-f]{64}$"
-)
-
-
-class TestAwsSubjectToken:
-    def test_is_a_signed_regional_get_caller_identity_request(self):
-        token = aws_subject_token(_identity().credentials, REGION, GCP_AUDIENCE)
-
-        request, headers = _decode_subject_token(token)
-        assert request["method"] == "POST"
-        assert request["url"] == (
-            f"https://sts.{REGION}.amazonaws.com"
-            "?Action=GetCallerIdentity&Version=2011-06-15"
-        )
-        assert headers["host"] == f"sts.{REGION}.amazonaws.com"
-        assert headers["x-amz-security-token"] == "fed-token"
-        assert headers["x-goog-cloud-target-resource"] == GCP_AUDIENCE
-        assert re.fullmatch(r"\d{8}T\d{6}Z", headers["x-amz-date"])
-        match = _SIGV4_AUTHORIZATION.fullmatch(headers["authorization"])
-        assert match is not None
-        signed = set(match["signed"].split(";"))
-        assert {"host", "x-amz-date", "x-goog-cloud-target-resource"} <= signed
-        assert "x-amz-security-token" in signed
-
-    def test_never_contains_the_secret_key(self):
-        token = aws_subject_token(_identity().credentials, REGION, GCP_AUDIENCE)
-
-        assert "fed-secret" not in urllib.parse.unquote(token)
-
-    def test_omits_the_session_token_header_for_long_lived_keys(self):
-        credentials = AwsCredentials(access_key_id="AKIAFED", secret_access_key="s")
-
-        _, headers = _decode_subject_token(
-            aws_subject_token(credentials, REGION, GCP_AUDIENCE)
-        )
-
-        assert "x-amz-security-token" not in headers
-
-
 GOOGLE_STS_RESPONSE = {
     "access_token": "federated-token",
     "issued_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
@@ -741,24 +771,18 @@ class TestGcpTokenExchange:
     async def test_exchanges_a_signed_caller_identity_and_impersonates(self):
         adapter, requests = _gcp_exchange(_google())
 
-        minted = await adapter.exchange(_identity(), REGION, _gcp_secret())
+        minted = await adapter.exchange(PROOF, _gcp_secret())
 
         (_, sts_request), (_, iam_request) = requests
         assert sts_request.method == "POST"
-        form = _sts_form(sts_request)
-        subject_token = form.pop("subject_token")
-        assert form == {
+        assert _sts_form(sts_request) == {
             "grant_type": GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE,
             "audience": GCP_AUDIENCE,
             "scope": GOOGLE_IAM_SCOPE,
             "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
             "subject_token_type": AWS_SUBJECT_TOKEN_TYPE,
+            "subject_token": PROOF,
         }
-        request, headers = _decode_subject_token(subject_token)
-        assert request["url"].startswith(f"https://sts.{REGION}.amazonaws.com?")
-        assert headers["x-amz-security-token"] == "fed-token"
-        assert headers["x-goog-cloud-target-resource"] == GCP_AUDIENCE
-        assert "fed-secret" not in sts_request.content.decode()
 
         assert iam_request.method == "POST"
         assert iam_request.headers["authorization"] == "Bearer federated-token"
@@ -777,7 +801,7 @@ class TestGcpTokenExchange:
         # no segment (or another task's) for the instrumented HTTP client.
         adapter, requests = _gcp_exchange(_google())
 
-        await adapter.exchange(_identity(), REGION, _gcp_secret())
+        await adapter.exchange(PROOF, _gcp_secret())
 
         assert {thread for thread, _ in requests} == {threading.get_ident()}
 
@@ -792,7 +816,7 @@ class TestGcpTokenExchange:
             token_lifetime_seconds=900,
         )
 
-        await adapter.exchange(_identity(), REGION, secret)
+        await adapter.exchange(PROOF, secret)
 
         (_, iam_request) = requests[1]
         body = json.loads(iam_request.content)
@@ -813,7 +837,7 @@ class TestGcpTokenExchange:
             )
         )
 
-        minted = await adapter.exchange(_identity(), REGION, _gcp_secret())
+        minted = await adapter.exchange(PROOF, _gcp_secret())
 
         assert minted.expires_at == datetime(
             2026, 1, 1, 13, 0, 0, 123456, tzinfo=timezone.utc
@@ -832,13 +856,12 @@ class TestGcpTokenExchange:
         )
 
         with pytest.raises(AuthenticationError, match="HTTP 400") as exc_info:
-            await adapter.exchange(_identity(), REGION, _gcp_secret())
+            await adapter.exchange(PROOF, _gcp_secret())
 
         assert len(requests) == 1
         assert "invalid_grant" in caplog.text
-        for value in ("fed-secret", "fed-token", "ASIAFED", "GetCallerIdentity"):
-            assert value not in str(exc_info.value)
-            assert value not in caplog.text
+        assert PROOF not in str(exc_info.value)
+        assert PROOF not in caplog.text
 
     @pytest.mark.asyncio
     async def test_impersonation_rejection_raises_without_leaking_tokens(self, caplog):
@@ -848,18 +871,32 @@ class TestGcpTokenExchange:
         )
 
         with pytest.raises(AuthenticationError, match="HTTP 403") as exc_info:
-            await adapter.exchange(_identity(), REGION, _gcp_secret())
+            await adapter.exchange(PROOF, _gcp_secret())
 
         assert len(requests) == 2
         assert "federated-token" not in str(exc_info.value)
         assert "federated-token" not in caplog.text
 
     @pytest.mark.asyncio
-    async def test_transport_failure_raises(self):
+    async def test_transport_failure_raises_upstream_service_error(self):
         adapter, _ = _gcp_exchange(_google(sts=httpx.ConnectError("refused")))
 
-        with pytest.raises(AuthenticationError, match="failed"):
-            await adapter.exchange(_identity(), REGION, _gcp_secret())
+        with pytest.raises(UpstreamServiceError, match="unavailable"):
+            await adapter.exchange(PROOF, _gcp_secret())
+
+    @pytest.mark.parametrize("status", [500, 503, 429])
+    @pytest.mark.asyncio
+    async def test_server_errors_and_rate_limits_raise_upstream_service_error(
+        self, status: int
+    ):
+        adapter, requests = _gcp_exchange(
+            _google(iam=httpx.Response(status, text="busy"))
+        )
+
+        with pytest.raises(UpstreamServiceError, match=f"HTTP {status}"):
+            await adapter.exchange(PROOF, _gcp_secret())
+
+        assert len(requests) == 2
 
     @pytest.mark.asyncio
     async def test_empty_federated_token_stops_before_impersonation(self):
@@ -868,7 +905,7 @@ class TestGcpTokenExchange:
         )
 
         with pytest.raises(AuthenticationError, match="empty token"):
-            await adapter.exchange(_identity(), REGION, _gcp_secret())
+            await adapter.exchange(PROOF, _gcp_secret())
 
         assert len(requests) == 1
 
@@ -887,7 +924,7 @@ class TestGcpTokenExchange:
         adapter, _ = _gcp_exchange(_google(iam=httpx.Response(200, json=body)))
 
         with pytest.raises(AuthenticationError, match=message):
-            await adapter.exchange(_identity(), REGION, _gcp_secret())
+            await adapter.exchange(PROOF, _gcp_secret())
 
     @pytest.mark.asyncio
     async def test_non_json_success_body_raises(self):
@@ -896,14 +933,14 @@ class TestGcpTokenExchange:
         )
 
         with pytest.raises(AuthenticationError, match="malformed"):
-            await adapter.exchange(_identity(), REGION, _gcp_secret())
+            await adapter.exchange(PROOF, _gcp_secret())
 
 
 class TestTokenMintService:
     def _service(self) -> tuple[TokenMintService, MagicMock, MagicMock, MagicMock]:
         sts = MagicMock()
-        sts.region = MagicMock(return_value=REGION)
         sts.assume_federation_role = AsyncMock(return_value=_identity())
+        sts.signed_caller_identity = AsyncMock(return_value=PROOF)
         tokens = iter(["jwt-1", "jwt-2", "jwt-3"])
         sts.web_identity_token = AsyncMock(
             side_effect=lambda *args, **kwargs: WebIdentityToken(
@@ -912,8 +949,8 @@ class TestTokenMintService:
         )
         anthropic = MagicMock()
         anthropic.exchange = AsyncMock(
-            side_effect=lambda assertion, secret: MintedToken(
-                token=f"token-for-{assertion}", expires_at=NOW + timedelta(hours=1)
+            side_effect=lambda proof, secret: MintedToken(
+                token=f"token-for-{proof}", expires_at=NOW + timedelta(hours=1)
             )
         )
         gcp = MagicMock()
@@ -957,6 +994,7 @@ class TestTokenMintService:
             _identity(), "https://api.anthropic.com"
         )
         anthropic.exchange.assert_awaited_once_with("jwt-1", secret)
+        sts.signed_caller_identity.assert_not_awaited()
         assert minted.token == "token-for-jwt-1"
 
     @pytest.mark.asyncio
@@ -974,11 +1012,12 @@ class TestTokenMintService:
             await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
 
         sts.web_identity_token.assert_not_awaited()
+        sts.signed_caller_identity.assert_not_awaited()
         anthropic.exchange.assert_not_awaited()
         gcp.exchange.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_gcp_mint_hands_the_session_to_the_gcp_adapter(self):
+    async def test_gcp_mint_signs_the_caller_identity_and_exchanges(self):
         service, sts, anthropic, gcp = self._service()
         secret = _gcp_secret()
 
@@ -987,21 +1026,70 @@ class TestTokenMintService:
         sts.assume_federation_role.assert_awaited_once_with(
             CALLER_CREDENTIALS, CALLER, ROLE_ARN
         )
-        gcp.exchange.assert_awaited_once_with(_identity(), REGION, secret)
+        sts.signed_caller_identity.assert_awaited_once_with(_identity(), GCP_AUDIENCE)
+        gcp.exchange.assert_awaited_once_with(PROOF, secret)
         sts.web_identity_token.assert_not_awaited()
         anthropic.exchange.assert_not_awaited()
         assert minted.token == "ya29.example"
 
     @pytest.mark.asyncio
-    async def test_gcp_mint_requires_a_region_before_any_aws_call(self):
+    async def test_gcp_mint_propagates_a_missing_region(self):
         service, sts, _, gcp = self._service()
-        sts.region = MagicMock(side_effect=ConfigurationError("no region"))
+        sts.signed_caller_identity = AsyncMock(
+            side_effect=ConfigurationError("no region")
+        )
 
         with pytest.raises(ConfigurationError):
             await service.mint(CALLER_CREDENTIALS, CALLER, _gcp_secret())
 
-        sts.assume_federation_role.assert_not_awaited()
         gcp.exchange.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_anthropic_mint_end_to_end(self):
+        session, clients = _sts_session(
+            assume_role=ASSUME_ROLE_RESPONSE,
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        anthropic, requests = _exchange(_token_response)
+        service = TokenMintService(
+            sts=StsFederationService(session, FEDERATION_CONFIG),
+            anthropic=anthropic,
+            federation_config=FEDERATION_CONFIG,
+        )
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+
+        assume, web_identity = clients
+        assume.assume_role.assert_awaited_once()
+        assert web_identity.create_kwargs["aws_session_token"] == "fed-token"
+        (request,) = requests
+        assert json.loads(request.content)["assertion"] == "header.payload.signature"
+        assert minted.token == "sk-ant-oat01-example"
+
+    @pytest.mark.asyncio
+    async def test_gcp_mint_end_to_end(self):
+        session, clients = _sts_session(assume_role=ASSUME_ROLE_RESPONSE)
+        session.get_config_variable = MagicMock(return_value=REGION)
+        gcp, requests = _gcp_exchange(_google())
+        service = TokenMintService(
+            sts=StsFederationService(session, FEDERATION_CONFIG),
+            gcp=gcp,
+            federation_config=FEDERATION_CONFIG,
+        )
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _gcp_secret())
+
+        (assume,) = clients
+        assume.get_web_identity_token.assert_not_awaited()
+        (_, sts_request), _ = requests
+        request, headers = _decode_subject_token(
+            _sts_form(sts_request)["subject_token"]
+        )
+        assert request["url"].startswith(f"https://sts.{REGION}.amazonaws.com?")
+        assert headers["x-amz-security-token"] == "fed-token"
+        assert headers["x-goog-cloud-target-resource"] == GCP_AUDIENCE
+        assert "fed-secret" not in sts_request.content.decode()
+        assert minted.token == "ya29.example"
 
     @pytest.mark.asyncio
     async def test_each_mint_uses_a_fresh_identity_token(self):
