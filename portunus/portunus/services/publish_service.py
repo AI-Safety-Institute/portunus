@@ -232,8 +232,8 @@ class PublishService:
         """Build one request-body chunk record.
 
         ``dropped=True``: sentinel for a chunk the queue couldn't accept
-        (``body_bytes`` empty). ``truncated=True``: payload capped (WS deflate
-        path only). ``final_chunk=True``: terminal chunk of a streamed
+        (``body_bytes`` empty). ``truncated=True``: capture is incomplete
+        or capped. ``final_chunk=True``: terminal chunk of a streamed
         (``num_chunks=0``) body, emitted with Envoy ``end_of_stream``, so the
         ETL can detect a lost trailing chunk. ``frame_index``: per-direction WS
         frame ordinal (None for HTTP); Glue keys WS frames by (request_id,
