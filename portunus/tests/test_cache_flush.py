@@ -7,22 +7,11 @@ import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from redis.exceptions import ConnectionError
 
 from portunus.app import portunus
 from portunus.services.cache_service import CacheService
-
-
-class FakeStateService:
-    """Minimal StateService stand-in that hands out a (possibly None) redis client."""
-
-    def __init__(self, client):
-        self._client = client
-
-    async def acquire_redis_connection(self):
-        return self._client
-
-    async def health_check(self):
-        return self._client is not None
+from portunus.services.state_service import StateService
 
 
 @pytest_asyncio.fixture
@@ -45,7 +34,17 @@ def mock_xray():
 async def client_with_cache():
     async with AsyncExitStack() as stack:
 
-        async def factory(state_service):
+        async def factory(redis_client):
+            state_service = StateService()
+            redis_factory = stack.enter_context(
+                patch("portunus.services.state_service.aioredis.Redis")
+            )
+            if redis_client is None:
+                redis_factory.side_effect = ConnectionError("Unavailable")
+            else:
+                redis_factory.return_value = redis_client
+            stack.push_async_callback(state_service.close)
+            stack.push_async_callback(state_service.close_redis_client)
             cache = CacheService(state_service=state_service)
             stack.enter_context(patch("portunus.app.cache_service", cache))
             return await stack.enter_async_context(
@@ -64,7 +63,7 @@ class TestCacheFlush:
         await fake_redis.set("auth:two", "cached")
         assert await fake_redis.dbsize() == 2
 
-        http = await client_with_cache(FakeStateService(fake_redis))
+        http = await client_with_cache(fake_redis)
         resp = await http.post("/cache/flush")
 
         assert resp.status_code == 200
@@ -75,7 +74,7 @@ class TestCacheFlush:
 
     @pytest.mark.asyncio
     async def test_flush_redis_unavailable(self, client_with_cache, mock_xray):
-        http = await client_with_cache(FakeStateService(None))
+        http = await client_with_cache(None)
         resp = await http.post("/cache/flush")
 
         assert resp.status_code == 503
@@ -85,7 +84,7 @@ class TestCacheFlush:
     async def test_flush_redis_error(self, client_with_cache, fake_redis, mock_xray):
         fake_redis.flushdb = AsyncMock(side_effect=ConnectionError("connection reset"))
 
-        http = await client_with_cache(FakeStateService(fake_redis))
+        http = await client_with_cache(fake_redis)
         resp = await http.post("/cache/flush")
 
         assert resp.status_code == 500
@@ -97,7 +96,7 @@ class TestCacheFlush:
     ):
         fake_redis.flushdb = AsyncMock(side_effect=ConnectionError("boom"))
 
-        http = await client_with_cache(FakeStateService(fake_redis))
+        http = await client_with_cache(fake_redis)
         resp = await http.post("/cache/flush")
 
         assert resp.status_code == 500

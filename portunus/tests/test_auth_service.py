@@ -18,12 +18,10 @@ def auth_service():
     mock_cache_service = MagicMock()
     mock_cache_service.get_cached_auth_result = AsyncMock(return_value=None)
     mock_cache_service.cache_auth_result = AsyncMock(return_value=True)
-    mock_validation_service = MagicMock()
 
     return AuthService(
         secrets_service=mock_secrets_service,
         cache_service=mock_cache_service,
-        validation_service=mock_validation_service,
     )
 
 

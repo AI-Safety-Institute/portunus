@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- Cached authentication avoids a Redis probe before each operation. Cache commands
+  retry bounded pool contention without extending the entry's remaining lifetime.
+
 ## [0.9.0] - 2026-09-11
 
 ### Added
