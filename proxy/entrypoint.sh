@@ -5,9 +5,22 @@
 export WS_TARGET_HOST=${WS_TARGET_HOST:-${TARGET_HOST}}
 export WS_TARGET_PORT=${WS_TARGET_PORT:-${TARGET_PORT}}
 
+# HTTP/2 multiplexes requests over connections; preserve separate limits.
+export TARGET_MAX_REQUESTS=${TARGET_MAX_REQUESTS:-1024}
+export TARGET_MAX_PENDING_REQUESTS=${TARGET_MAX_PENDING_REQUESTS:-1024}
+
 # Pre-shared key proving the proxy's identity to Portunus's gRPC server.
 # Substituted into envoy.yaml as the x-portunus-proxy-key initial_metadata.
 export PORTUNUS_API_KEY=${PORTUNUS_API_KEY:-""}
+if [ -z "$PORTUNUS_API_KEY" ]; then
+  if [ "${PORTUNUS_API_KEY_OPTIONAL:-false}" != "true" ]; then
+    echo "[entrypoint] FATAL: PORTUNUS_API_KEY is required; PORTUNUS_API_KEY_OPTIONAL=true is for local development only" >&2
+    exit 1
+  fi
+elif [ "$(printf '%s' "$PORTUNUS_API_KEY" | wc -c)" -lt 16 ]; then
+  echo "[entrypoint] FATAL: PORTUNUS_API_KEY must contain at least 16 bytes" >&2
+  exit 1
+fi
 
 # TARGET_HOST_HTTP2_OPTIONS
 if [ -z "$TARGET_HOST_HTTP2_OPTIONS" ]; then
@@ -105,12 +118,19 @@ envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
 # The drain rides on wget — hard-require it so an image regression fails the
 # container at boot, not silently at the first SIGTERM.
 command -v wget >/dev/null || { echo "[entrypoint] FATAL: wget missing — SIGTERM drain cannot work" >&2; exit 1; }
+command -v timeout >/dev/null || { echo "[entrypoint] FATAL: timeout missing — SIGTERM drain cannot be bounded" >&2; exit 1; }
 
 ADMIN="http://127.0.0.1:${ADMIN_PORT:-9901}"
 DRAIN_TIME_S="${DRAIN_TIME_S:-60}"
 
+admin_request() {
+  remaining=$((deadline - $(date +%s)))
+  [ "$remaining" -gt 0 ] || return 1
+  timeout "$remaining" wget --timeout=2 --tries=1 -q "$@" 2>/dev/null
+}
+
 admin_post() {
-  wget -q -O /dev/null --post-data='' "${ADMIN}${1}" 2>/dev/null
+  admin_request -O /dev/null --post-data='' "${ADMIN}${1}"
 }
 
 # Active work Envoy still owes someone, summed from /stats:
@@ -124,7 +144,7 @@ admin_post() {
 # Prints 0 if the admin endpoint is unreachable, failing toward "stop now"
 # rather than hanging until SIGKILL.
 active_work() {
-  wget -q -O - "${ADMIN}/stats?filter=downstream_cx_active|upstream_rq_active" 2>/dev/null \
+  admin_request -O - "${ADMIN}/stats?filter=downstream_cx_active|upstream_rq_active" \
     | awk -F': ' '
         $1 ~ /^http\.admin\./ { next }
         $1 ~ /^cluster\.portunus_health_cluster\./ { next }
@@ -136,9 +156,9 @@ active_work() {
 drain_and_quit() {
   trap '' TERM INT # one drain; from here ECS only escalates to SIGKILL
   echo "[entrypoint] SIGTERM: draining for up to ${DRAIN_TIME_S}s" >&2
+  deadline=$(($(date +%s) + DRAIN_TIME_S))
   admin_post "/healthcheck/fail"
   admin_post "/drain_listeners?graceful&skip_exit"
-  deadline=$(($(date +%s) + DRAIN_TIME_S))
   cx=$(active_work)
   while [ "$(date +%s)" -lt "$deadline" ] && [ "${cx:-0}" -gt 0 ]; do
     sleep 1

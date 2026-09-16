@@ -47,13 +47,15 @@ TARGET_HOST=api.example.com
 WS_TARGET_HOST=ws.example.com     # optional, separate WS upstream
 
 # Portunus gRPC
-PORTUNUS_HOST=portunus.internal
+PORTUNUS_HOST=127.0.0.1
 PORTUNUS_GRPC_PORT=9000
-PORTUNUS_API_KEY=pre-shared-key   # carried in initial_metadata as
-                                   # `x-portunus-proxy-key`. Must equal
-                                   # `GRPC_PROXY_API_KEY` on the Portunus
-                                   # side; in CDK both come from the same
-                                   # Secrets Manager value.
+PORTUNUS_API_KEY=replace-with-random-shared-key
+PORTUNUS_API_KEY_OPTIONAL=false
+
+# Upstream concurrency (applies independently to HTTP and WebSocket clusters)
+TARGET_MAX_CONNECTIONS=10000
+TARGET_MAX_REQUESTS=1024
+TARGET_MAX_PENDING_REQUESTS=1024
 
 # Rate limiting
 RATE_LIMIT_PERCENT_ENABLED=0       # 0 disables
@@ -62,6 +64,21 @@ RATE_LIMIT_INTERVAL_SECONDS=60
 ```
 
 See `entrypoint.sh` for full list of environment variables and defaults.
+
+`PORTUNUS_API_KEY` must match the backend's `GRPC_PROXY_API_KEY` and contain at
+least 16 bytes. The proxy refuses to start with a missing or shorter key.
+Local development can explicitly allow an empty key with
+`PORTUNUS_API_KEY_OPTIONAL=true`, paired with the backend's corresponding
+`GRPC_PROXY_API_KEY_OPTIONAL=true`; this does not permit a short nonempty key.
+
+Request concurrency is independent of connection concurrency, particularly for
+HTTP/2. Both upstream clusters expose remaining request and pending-request
+capacity through the loopback admin stats endpoint. Raising these limits
+requires sufficient upstream, backend and memory capacity.
+
+On shutdown, admin requests and active-stream draining share `DRAIN_TIME_S`.
+If the admin endpoint cannot respond within that deadline, the entrypoint
+terminates Envoy; sessions still open at the deadline can be disconnected.
 
 Request signing is **not** proxy-side configuration: there is no signing env
 var. A tenant is a signing tenant iff its Secrets Manager secret carries a

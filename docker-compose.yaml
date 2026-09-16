@@ -92,6 +92,7 @@ services:
       # not env-var-driven.)
       WS_TARGET_HOST_TRANSPORT_SOCKET: "null"
       ENVOY_LOG_LEVEL: info
+      PORTUNUS_API_KEY_OPTIONAL: "true"
       AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
       # Uncomment the three env vars below to
       # enable rate-limiting
