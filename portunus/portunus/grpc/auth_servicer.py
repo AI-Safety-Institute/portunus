@@ -184,16 +184,11 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                     request_id=request_id,
                 )
 
-            # If a signing pass follows, defer the authorization replacement to
-            # it: the signing pass re-reads the bearer payload from the
-            # authorization header to recover credentials (cache hit), so we
-            # must NOT clobber the header here on the signing branch.
+            # The signing pass needs the original bearer payload to reauthenticate.
+            # Defer replacing authorization until that pass completes.
             signing_required = auth_result.signing_key is not None
 
-            # Reject WS upgrades from signing tenants: the signing pass would
-            # sign an empty body (the upgrade GET has none) and attach
-            # meaningless headers, wasting a KMS.Sign call. No provider supports
-            # signed WS today.
+            # Signing-enabled credentials cannot be used for WebSocket upgrades.
             is_ws_upgrade = headers.get("upgrade", "").lower() == "websocket"
             if signing_required and is_ws_upgrade:
                 return _denied(
