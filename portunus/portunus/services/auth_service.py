@@ -160,7 +160,6 @@ class AuthService:
                             signing_key=cached_result.signing_key,
                             principal_info=cached_result.principal_info,
                         )
-            # redis.exceptions.TimeoutError does not subclass the builtin.
             except (TimeoutError, RedisTimeoutError) as e:
                 logger.warning(
                     f"Cache read timed out during auth for {request_id} "
