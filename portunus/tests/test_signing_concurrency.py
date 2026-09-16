@@ -8,6 +8,7 @@ bodies can't pile up), and releases the semaphore on success and failure.
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -74,7 +75,6 @@ class _BlockingSigner:
         self.active = 0
         self.max_active = 0
         self.calls = 0
-        self.thread_names: list[str] = []
         self.release = threading.Event()
 
     def __call__(self, req: Any, key: Any, api_key: Any, creds: Any) -> Any:
@@ -82,7 +82,6 @@ class _BlockingSigner:
             self.calls += 1
             self.active += 1
             self.max_active = max(self.max_active, self.active)
-            self.thread_names.append(threading.current_thread().name)
         try:
             assert self.release.wait(timeout=10), "signer never released"
             return dict(_HEADERS)
@@ -209,19 +208,29 @@ async def test_cancelled_caller_holds_capacity_until_signer_finishes(
 
 
 @pytest.mark.asyncio
-async def test_signing_runs_on_dedicated_kms_executor(
+async def test_pending_signing_leaves_default_executor_available(
     monkeypatch, signable_request, signing_key, credentials
 ):
-    """The signer executes on the sized 'kms-sign' pool, not to_thread's."""
+    """A pending signing operation leaves the default executor available."""
     _patch_settings(monkeypatch, workers=2, max_concurrent=2, timeout=1.0)
     signer = _BlockingSigner()
-    signer.release.set()
-
-    await sign_request_async(
-        signable_request, signing_key, "key", credentials, sign_fn=signer
-    )
-    assert signer.thread_names, "signer never ran"
-    assert all(name.startswith("kms-sign") for name in signer.thread_names)
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=1) as default_executor:
+        loop.set_default_executor(default_executor)
+        holder = asyncio.create_task(
+            sign_request_async(
+                signable_request, signing_key, "key", credentials, sign_fn=signer
+            )
+        )
+        try:
+            await _wait_for(lambda: signer.active == 1)
+            async with asyncio.timeout(1):
+                assert await asyncio.to_thread(lambda: "default work") == "default work"
+        finally:
+            signer.release.set()
+            async with asyncio.timeout(1):
+                result = await holder
+        assert result == _HEADERS
 
 
 @pytest.mark.asyncio
