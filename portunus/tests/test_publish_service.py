@@ -20,6 +20,7 @@ class _FakeFirehoseClient:
         failed_per_call: int = 0,
         raise_on_call: bool = False,
         fail_first_n_calls: int = 0,
+        responses: list[dict] | None = None,
     ) -> None:
         self.calls: list[list[bytes]] = []
         self._failed_per_call = failed_per_call
@@ -27,12 +28,15 @@ class _FakeFirehoseClient:
         # If set, the first N calls fail the last `failed_per_call` records
         # (with an ErrorCode); later calls succeed — models transient throttling.
         self._fail_first_n_calls = fail_first_n_calls
+        self._responses = list(responses or [])
 
     async def put_record_batch(self, **kwargs) -> dict:
         if self._raise:
             raise RuntimeError("firehose unavailable")
         records = [r["Data"] for r in kwargs["Records"]]
         self.calls.append(records)
+        if self._responses:
+            return self._responses.pop(0)
         call_no = len(self.calls)
         transient = self._fail_first_n_calls and call_no <= self._fail_first_n_calls
         should_fail = transient or not self._fail_first_n_calls
@@ -137,6 +141,47 @@ async def test_put_record_batch_empty_is_noop() -> None:
     client = _FakeFirehoseClient()
     assert await _service(client).put_record_batch("audit", []) == 0
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {
+            "FailedPutCount": 2,
+            "RequestResponses": [{"ErrorCode": "ServiceUnavailableException"}],
+        },
+        {
+            "FailedPutCount": 2,
+            "RequestResponses": [
+                {"ErrorCode": "ServiceUnavailableException"},
+                {"RecordId": "ok"},
+                {"RecordId": "ok"},
+            ],
+        },
+        {"FailedPutCount": 0, "RequestResponses": []},
+        {"FailedPutCount": 0, "RequestResponses": [{}, {}, {}]},
+    ],
+)
+async def test_inconsistent_firehose_response_retries_all_unconfirmed_records(response):
+    records = [b"a\n", b"b\n", b"c\n"]
+    client = _FakeFirehoseClient(responses=[response])
+
+    assert await _service(client).put_record_batch("audit", records) == 0
+    assert client.calls == [records, records]
+
+
+@pytest.mark.asyncio
+async def test_repeated_inconsistent_firehose_responses_count_all_records_as_failed():
+    response = {
+        "FailedPutCount": 2,
+        "RequestResponses": [{"ErrorCode": "ServiceUnavailableException"}],
+    }
+    records = [b"a\n", b"b\n", b"c\n"]
+    client = _FakeFirehoseClient(responses=[response, response])
+
+    assert await _service(client).put_record_batch("audit", records) == len(records)
+    assert client.calls == [records, records]
 
 
 # --- build_* produce newline-terminated JSON --------------------------------
