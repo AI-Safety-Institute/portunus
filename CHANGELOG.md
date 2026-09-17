@@ -43,8 +43,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `audience` (default `https://api.openai.com/v1`), is exchanged at
   `https://auth.openai.com/oauth/token` (RFC 8693 token exchange) for the
   secret's `identity_provider_id` and `service_account_id`. OpenAI never
-  issues the access token beyond the STS token's expiry, so it is valid for
-  at most 15 minutes.
+  issues the access token beyond the STS token's expiry, so Portunus requests
+  a 30-minute STS token for this exchange (`anthropic_wif` keeps requesting
+  15 minutes, which Anthropic doubles); the access token is valid for about
+  30 minutes. The federation role's policy must allow `sts:DurationSeconds`
+  up to 1800.
 - The CLI's default session policy allows `sts:AssumeRole` on every role under
   the federation role path in the caller's account,
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`

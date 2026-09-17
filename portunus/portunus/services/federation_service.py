@@ -53,13 +53,15 @@ TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
 JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
 # The algorithms STS GetWebIdentityToken signs with.
 SigningAlgorithm = Literal["RS256", "ES384"]
-# The identity token only has to outlive the exchange call. The session must
-# outlive the token by more than the call latency: GetWebIdentityToken
-# rejects a DurationSeconds longer than the session's remaining lifetime
-# (SessionDurationEscalationException), so a 900 s session cannot issue a
-# 900 s token.
+# The session must outlive the identity token by more than the call latency:
+# GetWebIdentityToken rejects a DurationSeconds longer than the session's
+# remaining lifetime (SessionDurationEscalationException), so a 900 s session
+# cannot issue a 900 s token. Keep this above every identity token lifetime.
 FEDERATION_SESSION_SECONDS = 3600
 IDENTITY_TOKEN_SECONDS = 900
+# OpenAI tokens never outlive the identity token; Anthropic's are capped at
+# twice its remaining life. Both settle at roughly 30-minute provider tokens.
+OPENAI_IDENTITY_TOKEN_SECONDS = 1800
 IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "RS256"
 # OpenAI: "Use ES384 unless your environment requires RS256 compatibility."
 OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "ES384"
@@ -321,17 +323,25 @@ class StsFederationService:
         identity: FederationIdentity,
         audience: str,
         signing_algorithm: SigningAlgorithm = IDENTITY_TOKEN_SIGNING_ALGORITHM,
+        duration_seconds: int = IDENTITY_TOKEN_SECONDS,
     ) -> WebIdentityToken:
         """Issue a fresh STS-signed JWT for ``audience`` from the federation session.
 
         Providers treat the JWT ID as single-use, so callers must request a new
         token for every exchange rather than reuse one. ``signing_algorithm``
-        is whichever the provider prefers.
+        is whichever the provider prefers. ``duration_seconds`` is the token's
+        lifetime, which bounds the provider token's; STS accepts 60 to 3600 s
+        and the value must fall inside the federation session's remaining life.
 
         Raises:
+            ValueError: ``duration_seconds`` is outside STS's 60..3600 s range.
             AuthenticationError: STS refused to issue the token.
             UpstreamServiceError: STS could not be reached.
         """
+        if not 60 <= duration_seconds <= 3600:
+            raise ValueError(
+                f"duration_seconds must be between 60 and 3600, got {duration_seconds}"
+            )
         tags = [
             {"Key": self.federation_config.user_tag_key, "Value": identity.user},
             {
@@ -353,7 +363,7 @@ class StsFederationService:
                 response = await sts.get_web_identity_token(
                     Audience=[audience],
                     SigningAlgorithm=signing_algorithm,
-                    DurationSeconds=IDENTITY_TOKEN_SECONDS,
+                    DurationSeconds=duration_seconds,
                     Tags=tags,
                 )
         except ClientError as e:
@@ -612,7 +622,10 @@ class TokenMintService:
         self, identity: FederationIdentity, secret: OpenAiWifSecret
     ) -> str:
         token = await self.sts.web_identity_token(
-            identity, secret.audience, OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM
+            identity,
+            secret.audience,
+            OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
+            OPENAI_IDENTITY_TOKEN_SECONDS,
         )
         return token.token
 
