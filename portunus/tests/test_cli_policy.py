@@ -91,6 +91,15 @@ def test_namespace_is_the_first_two_segments_of_the_secret_name(
 
 
 @pytest.mark.parametrize(
+    "secret_name",
+    ["projects/*/grant-AbCdEf", "pro?jects/example/grant-AbCdEf", "*/*/grant"],
+)
+def test_wildcards_in_namespace_segments_are_rejected(secret_name: str):
+    with pytest.raises(ValueError, match="wildcard"):
+        _federation_role_pattern(SECRET_PREFIX + secret_name, ACCOUNT, "/portunus-fed/")
+
+
+@pytest.mark.parametrize(
     "secret_arn",
     [
         f"{SECRET_PREFIX}test-api-key-AbCdEf",
