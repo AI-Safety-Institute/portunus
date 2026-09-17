@@ -6,8 +6,8 @@ Minting has two independent parts:
 1. Identity proof (:class:`StsFederationService`): with the caller's own
    credentials, assume the secret's federation role, then have that session
    request an STS web identity token. The result is a signed JWT whose subject
-   is the federation role and whose tags carry the caller's role name and
-   project.
+   is the federation role and whose tags carry the user, the caller's session
+   name and the project.
 2. Exchange (:class:`AnthropicTokenExchange`): trade the JWT for a provider
    bearer token. Each provider gets its own adapter.
 
@@ -68,8 +68,9 @@ _FEDERATION_NAMESPACE_PATH = re.compile(
     rf"{_IAM_PATH_SEGMENT}/{_IAM_PATH_SEGMENT}/", re.ASCII
 )
 _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
-# STS tag values are [\p{L}\p{Z}\p{N}_.:/=+\-@]*. Role names may also contain
-# ",", so a valid session name is not always a valid tag value.
+# STS tag values are [\p{L}\p{Z}\p{N}_.:/=+\-@]*. Role names, session names
+# and source identities may also contain ",", so a valid one is not always a
+# valid tag value.
 _SESSION_TAG_VALUE = re.compile(r"^[\w .:/=+\-@]*$")
 # /authorise has a 9 s budget (app.py), and the caller's identity check and
 # secret fetch run before minting starts. The per-call limits below add up to
@@ -90,11 +91,16 @@ class FederationIdentity:
     Attributes:
         credentials: The federation session's credentials
         session_name: The caller's IAM role name (the session's RoleSessionName)
+        user: The caller's STS source identity, or its IAM role name when its
+            session carries none
+        agent: The caller's own RoleSessionName
         project: The caller's project, or "" when unknown
     """
 
     credentials: AwsCredentials
     session_name: str
+    user: str
+    agent: str
     project: str
 
 
@@ -157,7 +163,7 @@ def validate_federation_role_arn(
 
 
 def caller_role_name(principal: PrincipalInfo) -> str:
-    """The caller's IAM role name: the federation RoleSessionName and user tag.
+    """The caller's IAM role name: the federation RoleSessionName.
 
     Raises:
         CredentialsError: The caller is not an assumed role, or its role name
@@ -172,6 +178,33 @@ def caller_role_name(principal: PrincipalInfo) -> str:
     if not _SESSION_TAG_VALUE.fullmatch(name):
         raise CredentialsError("Caller role name cannot be used as a session tag")
     return name
+
+
+def caller_agent(principal: PrincipalInfo) -> str:
+    """The caller's own RoleSessionName: the agent tag.
+
+    Raises:
+        CredentialsError: The caller is not an assumed role, or its session
+            name is not usable as a tag value.
+    """
+    if not principal.session_name:
+        raise CredentialsError("Token minting requires an assumed-role caller")
+    if not _SESSION_TAG_VALUE.fullmatch(principal.session_name):
+        raise CredentialsError("Caller session name cannot be used as a session tag")
+    return principal.session_name
+
+
+def caller_user(role_name: str, source_identity: Optional[str]) -> str:
+    """The user tag: the caller's STS source identity, else its IAM role name.
+
+    Raises:
+        CredentialsError: The source identity is not usable as a tag value.
+    """
+    if not source_identity:
+        return role_name
+    if not _SESSION_TAG_VALUE.fullmatch(source_identity):
+        raise CredentialsError("Caller source identity cannot be used as a session tag")
+    return source_identity
 
 
 def caller_project(principal: PrincipalInfo) -> str:
@@ -232,12 +265,14 @@ class StsFederationService:
         """Assume ``role_arn`` with the caller's credentials.
 
         Raises:
-            CredentialsError: Caller credentials expired, or the caller's
-                role name or project cannot be used as a session tag.
+            CredentialsError: Caller credentials expired, the caller has no
+                session name, or its role name, session name, source identity
+                or project cannot be used as a session tag.
             AuthenticationError: STS refused the assumption.
             UpstreamServiceError: STS could not be reached.
         """
         session_name = caller_role_name(principal)
+        agent = caller_agent(principal)
         project = caller_project(principal)
         try:
             async with self.boto_session.create_client(
@@ -275,6 +310,8 @@ class StsFederationService:
                 expiration=session["Expiration"],
             ),
             session_name=session_name,
+            user=caller_user(session_name, response.get("SourceIdentity")),
+            agent=agent,
             project=project,
         )
 
@@ -292,10 +329,8 @@ class StsFederationService:
             UpstreamServiceError: STS could not be reached.
         """
         tags = [
-            {
-                "Key": self.federation_config.user_tag_key,
-                "Value": identity.session_name,
-            },
+            {"Key": self.federation_config.user_tag_key, "Value": identity.user},
+            {"Key": self.federation_config.agent_tag_key, "Value": identity.agent},
             {"Key": self.federation_config.project_tag_key, "Value": identity.project},
         ]
         try:
@@ -441,7 +476,8 @@ class TokenMintService:
         Raises:
             AuthenticationError: Role not allowed, STS refused, or the
                 exchange failed.
-            CredentialsError: Caller credentials expired or not an assumed role.
+            CredentialsError: Caller credentials expired, not an assumed role,
+                or an identity field unusable as a session tag.
             UpstreamServiceError: STS or the provider was unavailable, or
                 minting exceeded ``MINT_DEADLINE_SECONDS``.
         """

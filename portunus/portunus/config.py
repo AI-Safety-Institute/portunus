@@ -195,7 +195,9 @@ class FederationConfig(BaseModel):
         role_path_prefix: IAM path every federation role ARN must start with
         sts_endpoint_url: STS endpoint for AssumeRole and GetWebIdentityToken.
             None means AWS_ENDPOINT_URL if set, else the regional endpoint.
-        user_tag_key: Session tag key carrying the caller's IAM role name
+        user_tag_key: Session tag key carrying the user: the caller's STS
+            source identity, else its IAM role name
+        agent_tag_key: Session tag key carrying the caller's role session name
         project_tag_key: Session tag key carrying the caller's project
     """
 
@@ -213,7 +215,11 @@ class FederationConfig(BaseModel):
     )
     user_tag_key: str = Field(
         default="portunus:user",
-        description="Session tag key for the caller's IAM role name",
+        description="Session tag key for the user (source identity or role name)",
+    )
+    agent_tag_key: str = Field(
+        default="portunus:agent",
+        description="Session tag key for the caller's role session name",
     )
     project_tag_key: str = Field(
         default="portunus:project",
@@ -371,6 +377,7 @@ def get_config() -> PortunusConfig:
         ),
         sts_endpoint_url=os.environ.get("FEDERATION_STS_ENDPOINT_URL", None),
         user_tag_key=os.environ.get("FEDERATION_USER_TAG_KEY", "portunus:user"),
+        agent_tag_key=os.environ.get("FEDERATION_AGENT_TAG_KEY", "portunus:agent"),
         project_tag_key=os.environ.get(
             "FEDERATION_PROJECT_TAG_KEY", "portunus:project"
         ),
