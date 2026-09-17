@@ -12,9 +12,10 @@ Minting has two independent parts:
    against AWS.
 2. Exchange: trade the proof for a provider bearer token. Each provider has an
    adapter with the same ``exchange(proof, secret)`` shape.
-   :class:`AnthropicTokenExchange` posts the JWT to the provider's OAuth
-   endpoint; :class:`GcpTokenExchange` trades the signed request at Google STS
-   and impersonates a service account with the result.
+   :class:`AnthropicTokenExchange` and :class:`OpenAiTokenExchange` post the
+   JWT to the provider's token endpoint; :class:`GcpTokenExchange` trades the
+   signed request at Google STS and impersonates a service account with the
+   result.
 
 :class:`TokenMintService` pairs each secret type with its proof and adapter.
 """
@@ -27,7 +28,7 @@ import urllib.parse
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional, Protocol, Sequence
+from typing import Any, Literal, Optional, Protocol, Sequence
 
 import httpx
 from aiobotocore.config import AioConfig
@@ -47,6 +48,7 @@ from portunus.models import (
     AwsCredentials,
     GcpWifSecret,
     MintSecretBase,
+    OpenAiWifSecret,
     PrincipalInfo,
 )
 from portunus.services.xray_service import capture_async
@@ -54,6 +56,10 @@ from portunus.services.xray_service import capture_async
 logger = logging.getLogger("api.access")
 
 JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
+JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
+# The algorithms STS GetWebIdentityToken signs with.
+SigningAlgorithm = Literal["RS256", "ES384"]
 # The identity token only has to outlive the exchange call. The session must
 # outlive the token by more than the call latency: GetWebIdentityToken
 # rejects a DurationSeconds longer than the session's remaining lifetime
@@ -61,14 +67,16 @@ JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 # 900 s token.
 FEDERATION_SESSION_SECONDS = 3600
 IDENTITY_TOKEN_SECONDS = 900
-IDENTITY_TOKEN_SIGNING_ALGORITHM = "RS256"
+IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "RS256"
+# OpenAI: "Use ES384 unless your environment requires RS256 compatibility."
+OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "ES384"
+OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 AWS_SUBJECT_TOKEN_TYPE = "urn:ietf:params:aws:token-type:aws4_request"
 # Google replays the signed request here; it must be the regional endpoint.
 AWS_GET_CALLER_IDENTITY_URL = (
     "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15"
 )
 GOOGLE_STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
-GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
 GOOGLE_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 # The only scope the federated token needs: calling generateAccessToken.
 GOOGLE_IAM_SCOPE = "https://www.googleapis.com/auth/iam"
@@ -338,12 +346,16 @@ class StsFederationService:
 
     @capture_async()
     async def web_identity_token(
-        self, identity: FederationIdentity, audience: str
+        self,
+        identity: FederationIdentity,
+        audience: str,
+        signing_algorithm: SigningAlgorithm = IDENTITY_TOKEN_SIGNING_ALGORITHM,
     ) -> WebIdentityToken:
         """Issue a fresh STS-signed JWT for ``audience`` from the federation session.
 
         Providers treat the JWT ID as single-use, so callers must request a new
-        token for every exchange rather than reuse one.
+        token for every exchange rather than reuse one. ``signing_algorithm``
+        is whichever the provider prefers.
 
         Raises:
             AuthenticationError: STS refused to issue the token.
@@ -369,7 +381,7 @@ class StsFederationService:
             ) as sts:
                 response = await sts.get_web_identity_token(
                     Audience=[audience],
-                    SigningAlgorithm=IDENTITY_TOKEN_SIGNING_ALGORITHM,
+                    SigningAlgorithm=signing_algorithm,
                     DurationSeconds=IDENTITY_TOKEN_SECONDS,
                     Tags=tags,
                 )
@@ -530,6 +542,29 @@ def _expires_in(value: object) -> int:
     return int(value)
 
 
+def _oauth_token(
+    body: dict[str, object], step: str, requested_at: datetime
+) -> MintedToken:
+    """The ``access_token`` and ``expires_in`` of an OAuth token response.
+
+    ``requested_at`` is when the request was sent, so the expiry computed from
+    ``expires_in`` is never later than the provider's.
+
+    Raises:
+        AuthenticationError: ``access_token`` is missing or empty, or
+            ``expires_in`` is not a number.
+    """
+    try:
+        expires_in = _expires_in(body.get("expires_in"))
+    except ValueError as e:
+        logger.error(f"{step} returned a malformed body")
+        raise AuthenticationError(f"{step} returned a malformed response") from e
+    return MintedToken(
+        token=_required_token(body, "access_token", step),
+        expires_at=requested_at + timedelta(seconds=expires_in),
+    )
+
+
 def _rfc3339(value: object) -> datetime:
     """Parse a Google ``Timestamp`` JSON value into an aware datetime.
 
@@ -571,15 +606,36 @@ class AnthropicTokenExchange(_HttpTokenExchange):
                 "workspace_id": secret.workspace_id,
             },
         )
-        try:
-            expires_in = _expires_in(body.get("expires_in"))
-        except ValueError as e:
-            logger.error(f"{step} returned a malformed body")
-            raise AuthenticationError(f"{step} returned a malformed response") from e
-        return MintedToken(
-            token=_required_token(body, "access_token", step),
-            expires_at=requested_at + timedelta(seconds=expires_in),
+        return _oauth_token(body, step, requested_at)
+
+
+class OpenAiTokenExchange(_HttpTokenExchange):
+    """Exchange adapter for OpenAI's RFC 8693 token exchange endpoint."""
+
+    @capture_async(name="openai_exchange")
+    async def exchange(self, proof: str, secret: OpenAiWifSecret) -> MintedToken:
+        """POST the STS web identity token to ``OPENAI_TOKEN_URL``.
+
+        Raises:
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response.
+            AuthenticationError: Any other non-200 response, or a response
+                without ``access_token`` and ``expires_in``.
+        """
+        step = "Token exchange with OpenAI"
+        requested_at = datetime.now(timezone.utc)
+        body = await self._post_json(
+            step,
+            OPENAI_TOKEN_URL,
+            json_body={
+                "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
+                "subject_token_type": JWT_TOKEN_TYPE,
+                "subject_token": proof,
+                "identity_provider_id": secret.identity_provider_id,
+                "service_account_id": secret.service_account_id,
+            },
         )
+        return _oauth_token(body, step, requested_at)
 
 
 class GcpTokenExchange(_HttpTokenExchange):
@@ -612,7 +668,7 @@ class GcpTokenExchange(_HttpTokenExchange):
             exchange,
             GOOGLE_STS_TOKEN_URL,
             data={
-                "grant_type": GOOGLE_TOKEN_EXCHANGE_GRANT_TYPE,
+                "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
                 "audience": secret.audience,
                 "scope": GOOGLE_IAM_SCOPE,
                 "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
@@ -681,6 +737,7 @@ class TokenMintService:
         sts: Optional[StsFederationService] = None,
         anthropic: Optional[AnthropicTokenExchange] = None,
         gcp: Optional[GcpTokenExchange] = None,
+        openai: Optional[OpenAiTokenExchange] = None,
         federation_config: Optional[FederationConfig] = None,
         boto_session: Optional[AioSession] = None,
     ) -> None:
@@ -690,10 +747,12 @@ class TokenMintService:
         )
         self.anthropic = anthropic or AnthropicTokenExchange()
         self.gcp = gcp or GcpTokenExchange()
+        self.openai = openai or OpenAiTokenExchange()
         # Each route is typed for its own secret class, which the dict cannot
         # express; mint() looks a route up by the secret's exact type.
         self._routes: dict[type[MintSecretBase], _MintRoute[Any]] = {
             AnthropicWifSecret: _MintRoute(self._web_identity_proof, self.anthropic),
+            OpenAiWifSecret: _MintRoute(self._openai_identity_proof, self.openai),
             GcpWifSecret: _MintRoute(self._signed_caller_identity_proof, self.gcp),
         }
 
@@ -706,6 +765,14 @@ class TokenMintService:
         self, identity: FederationIdentity, secret: AnthropicWifSecret
     ) -> str:
         return (await self.sts.web_identity_token(identity, secret.audience)).token
+
+    async def _openai_identity_proof(
+        self, identity: FederationIdentity, secret: OpenAiWifSecret
+    ) -> str:
+        token = await self.sts.web_identity_token(
+            identity, secret.audience, OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM
+        )
+        return token.token
 
     async def _signed_caller_identity_proof(
         self, identity: FederationIdentity, secret: GcpWifSecret

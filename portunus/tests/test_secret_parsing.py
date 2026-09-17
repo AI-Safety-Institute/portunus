@@ -8,8 +8,10 @@ import pytest
 from portunus.exceptions import AuthenticationError
 from portunus.models import (
     GCP_CLOUD_PLATFORM_SCOPE,
+    OPENAI_API_AUDIENCE,
     AnthropicWifSecret,
     GcpWifSecret,
+    OpenAiWifSecret,
     SecretsManagerAuthPayload,
     SigningKey,
 )
@@ -27,6 +29,13 @@ WIF_SECRET = {
     "organization_id": "org_example",
     "service_account_id": "sa_example",
     "workspace_id": "ws_example",
+}
+OPENAI_SECRET = {
+    "type": "openai_wif",
+    "host": "api.openai.com",
+    "federation_role_arn": ROLE_ARN,
+    "identity_provider_id": "idp_example",
+    "service_account_id": "svc_acct_example",
 }
 GCP_SECRET = {
     "type": "gcp_wif",
@@ -131,6 +140,60 @@ class TestParseSecret:
     )
     def test_anthropic_wif_missing_or_invalid_fields_raise(self, changes: dict):
         data = {k: v for k, v in {**WIF_SECRET, **changes}.items() if v is not None}
+
+        with pytest.raises(AuthenticationError):
+            parse_secret(json.dumps(data))
+
+    def test_openai_wif_secret(self):
+        secret = parse_secret(json.dumps(OPENAI_SECRET))
+
+        assert isinstance(secret, OpenAiWifSecret)
+        assert secret.host == "api.openai.com"
+        assert secret.federation_role_arn == ROLE_ARN
+        assert secret.identity_provider_id == "idp_example"
+        assert secret.service_account_id == "svc_acct_example"
+        assert secret.audience == OPENAI_API_AUDIENCE == "https://api.openai.com/v1"
+
+    def test_openai_wif_audience_override(self):
+        raw = json.dumps({**OPENAI_SECRET, "audience": "https://api.example.com"})
+
+        secret = parse_secret(raw)
+
+        assert isinstance(secret, OpenAiWifSecret)
+        assert secret.audience == "https://api.example.com"
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"signing_key": {"provider_id": "key1", "kms_key_arn": "arn:kms"}},
+            {"token_duration_seconds": 600},
+            {"organization_id": "org_example"},
+            {"unknown": 1},
+        ],
+    )
+    def test_openai_wif_rejects_unknown_fields(self, extra: dict):
+        with pytest.raises(AuthenticationError, match="invalid fields"):
+            parse_secret(json.dumps({**OPENAI_SECRET, **extra}))
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"identity_provider_id": None},
+            {"identity_provider_id": ""},
+            {"identity_provider_id": "idp example"},
+            {"identity_provider_id": "idp/example"},
+            {"identity_provider_id": "idp_exampl\u00e9"},
+            {"service_account_id": None},
+            {"service_account_id": ""},
+            {"service_account_id": "svc_acct_example\n"},
+            {"host": None},
+            {"host": ""},
+            {"federation_role_arn": None},
+            {"audience": ""},
+        ],
+    )
+    def test_openai_wif_missing_or_invalid_fields_raise(self, changes: dict):
+        data = {k: v for k, v in {**OPENAI_SECRET, **changes}.items() if v is not None}
 
         with pytest.raises(AuthenticationError):
             parse_secret(json.dumps(data))
