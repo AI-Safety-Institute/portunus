@@ -31,7 +31,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the secret's name: a secret named `projects/example/<name>` gets
   `arn:aws:iam::<caller account>:role/portunus-fed/projects/example/*`
   (`--federation-role-path` overrides the path). A secret with fewer than two
-  leading path segments gets no `sts:AssumeRole` statement.
+  leading path segments gets no `sts:AssumeRole` statement; a namespace segment
+  containing `*` or `?` is rejected rather than widening the grant.
 - `/authorise` responses may carry `output_header` and `output_prefix`, letting
   the backend choose which upstream header receives the credential and with
   what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
