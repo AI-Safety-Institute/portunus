@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 import boto3
@@ -12,6 +13,7 @@ from portunus.services.arn_service import extract_arn_parts, get_role_arn
 from portunus.services.payload_service import encode_payload
 
 TEMP_CRED_DURATION_SECONDS = 12 * 60 * 60
+_IAM_WILDCARDS = re.compile(r"[*?]")
 
 
 def _federation_role_pattern(
@@ -27,11 +29,20 @@ def _federation_role_pattern(
 
     Returns None when the name has fewer than two leading path segments; the
     default policy then grants no sts:AssumeRole.
+
+    Raises:
+        ValueError: A namespace segment contains ``*`` or ``?``, which are
+            wildcards in an IAM resource ARN and would widen the grant.
     """
     _, _, name = secret_arn.partition(":secret:")
     segments = name.split("/")
     if len(segments) < 3 or not (segments[0] and segments[1]):
         return None
+    for segment in segments[:2]:
+        if _IAM_WILDCARDS.search(segment):
+            raise ValueError(
+                f"secret name segment {segment!r} contains an IAM wildcard character"
+            )
     return (
         f"arn:aws:iam::{account_id}:role{federation_role_path}"
         f"{segments[0]}/{segments[1]}/*"
