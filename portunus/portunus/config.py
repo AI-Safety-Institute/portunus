@@ -197,7 +197,8 @@ class FederationConfig(BaseModel):
             None means AWS_ENDPOINT_URL if set, else the regional endpoint.
         user_tag_key: Session tag key carrying the user: the caller's STS
             source identity, else its IAM role name
-        agent_tag_key: Session tag key carrying the caller's role session name
+        principal_tag_key: Session tag key carrying the caller's IAM role name
+        session_tag_key: Session tag key carrying the caller's role session name
         project_tag_key: Session tag key carrying the caller's project
     """
 
@@ -217,8 +218,12 @@ class FederationConfig(BaseModel):
         default="portunus:user",
         description="Session tag key for the user (source identity or role name)",
     )
-    agent_tag_key: str = Field(
-        default="portunus:agent",
+    principal_tag_key: str = Field(
+        default="portunus:principal",
+        description="Session tag key for the caller's IAM role name",
+    )
+    session_tag_key: str = Field(
+        default="portunus:session",
         description="Session tag key for the caller's role session name",
     )
     project_tag_key: str = Field(
@@ -377,7 +382,12 @@ def get_config() -> PortunusConfig:
         ),
         sts_endpoint_url=os.environ.get("FEDERATION_STS_ENDPOINT_URL", None),
         user_tag_key=os.environ.get("FEDERATION_USER_TAG_KEY", "portunus:user"),
-        agent_tag_key=os.environ.get("FEDERATION_AGENT_TAG_KEY", "portunus:agent"),
+        principal_tag_key=os.environ.get(
+            "FEDERATION_PRINCIPAL_TAG_KEY", "portunus:principal"
+        ),
+        session_tag_key=os.environ.get(
+            "FEDERATION_SESSION_TAG_KEY", "portunus:session"
+        ),
         project_tag_key=os.environ.get(
             "FEDERATION_PROJECT_TAG_KEY", "portunus:project"
         ),

@@ -191,7 +191,8 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `FEDERATION_ROLE_PATH_PREFIX` | IAM path federation role ARNs must start with | `/portunus-fed/` |
 | `FEDERATION_STS_ENDPOINT_URL` | STS endpoint for federation calls. Defaults to `AWS_ENDPOINT_URL` if set, else `https://sts.<region>.amazonaws.com` | - |
 | `FEDERATION_USER_TAG_KEY` | Session tag key carrying the user on identity tokens: the caller's STS source identity, or its IAM role name when the session has none | `portunus:user` |
-| `FEDERATION_AGENT_TAG_KEY` | Session tag key carrying the caller's role session name on identity tokens | `portunus:agent` |
+| `FEDERATION_PRINCIPAL_TAG_KEY` | Session tag key carrying the caller's IAM role name on identity tokens | `portunus:principal` |
+| `FEDERATION_SESSION_TAG_KEY` | Session tag key carrying the caller's role session name on identity tokens | `portunus:session` |
 | `FEDERATION_PROJECT_TAG_KEY` | Session tag key carrying the caller's project on identity tokens | `portunus:project` |
 
 ### Secret formats
@@ -225,7 +226,7 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
 
 1. Verifies the caller with STS and fetches the secret, as for stored keys.
 2. Checks `federation_role_arn` is `arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><namespace>/<name>` with `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS` and `<namespace>` exactly two path segments (`projects/example` above). Nothing else is called if this fails.
-3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`, tagged with the user (`FEDERATION_USER_TAG_KEY`: the caller's STS source identity if its session carries one, else its IAM role name), the caller's role session name (`FEDERATION_AGENT_TAG_KEY`) and project (`FEDERATION_PROJECT_TAG_KEY`). A service acting for a user sets `SourceIdentity` when assuming its own role, so the user tag names that user and the agent tag the acting session.
+3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`, tagged with the user (`FEDERATION_USER_TAG_KEY`: the caller's STS source identity if its session carries one, else its IAM role name), the caller's IAM role name (`FEDERATION_PRINCIPAL_TAG_KEY`), its role session name (`FEDERATION_SESSION_TAG_KEY`) and its project (`FEDERATION_PROJECT_TAG_KEY`). A service acting for a user sets `SourceIdentity` when assuming its own role, so the user tag names that user while the principal tag names the service's role and the session tag its acting session.
 4. Exchanges the token at `https://<host>/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
 If STS or the token endpoint cannot be reached or answers 5xx/429, or steps 3–4 take longer than 6 s, `/authorise` returns 503 rather than 403.
