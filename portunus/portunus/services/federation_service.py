@@ -44,8 +44,12 @@ from portunus.services.xray_service import capture_async
 logger = logging.getLogger("api.access")
 
 JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-# Both only have to outlive the exchange call. 900 s is the AssumeRole minimum.
-FEDERATION_SESSION_SECONDS = 900
+# The identity token only has to outlive the exchange call. The session must
+# outlive the token by more than the call latency: GetWebIdentityToken
+# rejects a DurationSeconds longer than the session's remaining lifetime
+# (SessionDurationEscalationException), so a 900 s session cannot issue a
+# 900 s token.
+FEDERATION_SESSION_SECONDS = 3600
 IDENTITY_TOKEN_SECONDS = 900
 IDENTITY_TOKEN_SIGNING_ALGORITHM = "RS256"
 
