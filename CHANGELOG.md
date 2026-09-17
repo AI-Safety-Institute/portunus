@@ -25,15 +25,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   minting), `<prefix>` `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`)
   and `<namespace>` exactly two path segments, e.g.
   `arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example`.
-  The identity token carries three request tags: the user (the caller's STS
-  source identity, else its IAM role name), the caller's role session name
-  and its project, under `FEDERATION_USER_TAG_KEY`, `FEDERATION_AGENT_TAG_KEY`
-  and `FEDERATION_PROJECT_TAG_KEY` (defaults `portunus:user`,
-  `portunus:agent`, `portunus:project`). `FEDERATION_STS_ENDPOINT_URL` is
-  also new. Mint secrets reject unknown fields. Minted results are cached
-  until the earliest of `CACHE_DURATION`, the caller's credential expiry and
-  five minutes before the token expires; concurrent misses for one payload
-  share a mint per process.
+  The identity token carries four request tags: the user (the caller's STS
+  source identity, else its IAM role name), the caller's IAM role name, its
+  role session name and its project, under `FEDERATION_USER_TAG_KEY`,
+  `FEDERATION_PRINCIPAL_TAG_KEY`, `FEDERATION_SESSION_TAG_KEY` and
+  `FEDERATION_PROJECT_TAG_KEY` (defaults `portunus:user`,
+  `portunus:principal`, `portunus:session`, `portunus:project`).
+  `FEDERATION_STS_ENDPOINT_URL` is also new. Mint secrets reject unknown
+  fields. Minted results are cached until the earliest of `CACHE_DURATION`, the
+  caller's credential expiry and five minutes before the token expires;
+  concurrent misses for one payload share a mint per process.
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
   provider's token endpoint cannot be reached or answers 5xx/429, or when
   minting exceeds its 6 s deadline.
