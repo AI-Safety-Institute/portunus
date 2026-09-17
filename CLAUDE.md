@@ -103,7 +103,7 @@ Logging captures full request/response bodies, headers, and trailers verbatim â€
 - `FEDERATION_ALLOWED_ACCOUNT_IDS`: Comma-separated account IDs whose federation roles a mint secret may name (unset disables minting)
 - `FEDERATION_ROLE_PATH_PREFIX`: IAM path federation role ARNs must start with (default: "/portunus-fed/")
 - `FEDERATION_STS_ENDPOINT_URL`: STS endpoint for federation calls (default: `AWS_ENDPOINT_URL`, else the regional endpoint)
-- `FEDERATION_USER_TAG_KEY`, `FEDERATION_AGENT_TAG_KEY`, `FEDERATION_PROJECT_TAG_KEY`: Session tag keys on the identity token (defaults: "portunus:user", "portunus:agent", "portunus:project")
+- `FEDERATION_USER_TAG_KEY`, `FEDERATION_PRINCIPAL_TAG_KEY`, `FEDERATION_SESSION_TAG_KEY`, `FEDERATION_PROJECT_TAG_KEY`: Session tag keys on the identity token (defaults: "portunus:user", "portunus:principal", "portunus:session", "portunus:project")
 
 ## Development
 - Root project includes all dependencies: `uv sync`

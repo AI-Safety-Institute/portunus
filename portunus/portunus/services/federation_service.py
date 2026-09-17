@@ -6,8 +6,8 @@ Minting has two independent parts:
 1. Identity proof (:class:`StsFederationService`): with the caller's own
    credentials, assume the secret's federation role, then have that session
    request an STS web identity token. The result is a signed JWT whose subject
-   is the federation role and whose tags carry the user, the caller's session
-   name and the project.
+   is the federation role and whose tags carry the user, the caller's role
+   name, its session name and the project.
 2. Exchange (:class:`AnthropicTokenExchange`): trade the JWT for a provider
    bearer token. Each provider gets its own adapter.
 
@@ -90,17 +90,18 @@ class FederationIdentity:
 
     Attributes:
         credentials: The federation session's credentials
-        session_name: The caller's IAM role name (the session's RoleSessionName)
         user: The caller's STS source identity, or its IAM role name when its
             session carries none
-        agent: The caller's own RoleSessionName
+        principal: The caller's IAM role name (also the federation session's
+            RoleSessionName)
+        session: The caller's own RoleSessionName
         project: The caller's project, or "" when unknown
     """
 
     credentials: AwsCredentials
-    session_name: str
     user: str
-    agent: str
+    principal: str
+    session: str
     project: str
 
 
@@ -163,7 +164,7 @@ def validate_federation_role_arn(
 
 
 def caller_role_name(principal: PrincipalInfo) -> str:
-    """The caller's IAM role name: the federation RoleSessionName.
+    """The caller's IAM role name: the principal tag and federation RoleSessionName.
 
     Raises:
         CredentialsError: The caller is not an assumed role, or its role name
@@ -180,8 +181,8 @@ def caller_role_name(principal: PrincipalInfo) -> str:
     return name
 
 
-def caller_agent(principal: PrincipalInfo) -> str:
-    """The caller's own RoleSessionName: the agent tag.
+def caller_session(principal: PrincipalInfo) -> str:
+    """The caller's own RoleSessionName: the session tag.
 
     Raises:
         CredentialsError: The caller is not an assumed role, or its session
@@ -271,8 +272,8 @@ class StsFederationService:
             AuthenticationError: STS refused the assumption.
             UpstreamServiceError: STS could not be reached.
         """
-        session_name = caller_role_name(principal)
-        agent = caller_agent(principal)
+        role_name = caller_role_name(principal)
+        session = caller_session(principal)
         project = caller_project(principal)
         try:
             async with self.boto_session.create_client(
@@ -285,7 +286,7 @@ class StsFederationService:
             ) as sts:
                 response = await sts.assume_role(
                     RoleArn=role_arn,
-                    RoleSessionName=session_name,
+                    RoleSessionName=role_name,
                     DurationSeconds=FEDERATION_SESSION_SECONDS,
                 )
         except ClientError as e:
@@ -301,17 +302,17 @@ class StsFederationService:
                 f"AssumeRole on federation role failed: {type(e).__name__}: {e}"
             )
             raise UpstreamServiceError("STS is unavailable") from e
-        session = response["Credentials"]
+        issued = response["Credentials"]
         return FederationIdentity(
             credentials=AwsCredentials(
-                access_key_id=session["AccessKeyId"],
-                secret_access_key=session["SecretAccessKey"],
-                session_token=session["SessionToken"],
-                expiration=session["Expiration"],
+                access_key_id=issued["AccessKeyId"],
+                secret_access_key=issued["SecretAccessKey"],
+                session_token=issued["SessionToken"],
+                expiration=issued["Expiration"],
             ),
-            session_name=session_name,
-            user=caller_user(session_name, response.get("SourceIdentity")),
-            agent=agent,
+            user=caller_user(role_name, response.get("SourceIdentity")),
+            principal=role_name,
+            session=session,
             project=project,
         )
 
@@ -330,7 +331,11 @@ class StsFederationService:
         """
         tags = [
             {"Key": self.federation_config.user_tag_key, "Value": identity.user},
-            {"Key": self.federation_config.agent_tag_key, "Value": identity.agent},
+            {
+                "Key": self.federation_config.principal_tag_key,
+                "Value": identity.principal,
+            },
+            {"Key": self.federation_config.session_tag_key, "Value": identity.session},
             {"Key": self.federation_config.project_tag_key, "Value": identity.project},
         ]
         try:

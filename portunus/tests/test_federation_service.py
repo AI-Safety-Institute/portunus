@@ -40,9 +40,9 @@ from portunus.services.federation_service import (
     StsFederationService,
     TokenMintService,
     WebIdentityToken,
-    caller_agent,
     caller_project,
     caller_role_name,
+    caller_session,
     caller_user,
     validate_federation_role_arn,
 )
@@ -96,9 +96,9 @@ def _identity() -> FederationIdentity:
             session_token="fed-token",
             expiration=NOW + timedelta(minutes=15),
         ),
-        session_name=CALLER_ROLE,
         user=CALLER_ROLE,
-        agent="session",
+        principal=CALLER_ROLE,
+        session="session",
         project="example",
     )
 
@@ -195,7 +195,7 @@ class TestValidateFederationRoleArn:
 
 
 class TestCallerIdentityFields:
-    def test_role_name_comes_from_assumed_role_principal(self):
+    def test_principal_is_the_callers_role_name(self):
         assert caller_role_name(CALLER) == CALLER_ROLE
 
     @pytest.mark.parametrize(
@@ -211,7 +211,7 @@ class TestCallerIdentityFields:
         assert caller_project(PrincipalInfo(project="unknown")) == ""
         assert caller_project(PrincipalInfo(project=None)) == ""
 
-    def test_role_name_with_a_comma_cannot_be_a_session_tag(self):
+    def test_principal_with_a_comma_cannot_be_a_session_tag(self):
         with pytest.raises(CredentialsError, match="session tag"):
             caller_role_name(PrincipalInfo(principal="assumed-role/role,name"))
 
@@ -219,8 +219,8 @@ class TestCallerIdentityFields:
         with pytest.raises(CredentialsError, match="session tag"):
             caller_project(PrincipalInfo(project="team,project"))
 
-    def test_agent_is_the_callers_session_name(self):
-        assert caller_agent(CALLER) == "session"
+    def test_session_is_the_callers_session_name(self):
+        assert caller_session(CALLER) == "session"
 
     @pytest.mark.parametrize("session_name", [None, ""])
     def test_caller_without_a_session_name_is_rejected(self, session_name: str | None):
@@ -228,11 +228,11 @@ class TestCallerIdentityFields:
             principal=f"assumed-role/{CALLER_ROLE}", session_name=session_name
         )
         with pytest.raises(CredentialsError, match="assumed-role"):
-            caller_agent(principal)
+            caller_session(principal)
 
     def test_session_name_with_a_comma_cannot_be_a_session_tag(self):
         with pytest.raises(CredentialsError, match="session tag"):
-            caller_agent(PrincipalInfo(session_name="i-0123,abc"))
+            caller_session(PrincipalInfo(session_name="i-0123,abc"))
 
     def test_user_is_the_source_identity_when_set(self):
         assert caller_user(CALLER_ROLE, SOURCE_IDENTITY) == SOURCE_IDENTITY
@@ -317,7 +317,7 @@ class TestStsFederationService:
         assert identity == _identity()
 
     @pytest.mark.asyncio
-    async def test_source_identity_on_the_callers_session_becomes_the_user(self):
+    async def test_source_identity_becomes_the_user_but_not_the_principal(self):
         session, _ = _sts_session(
             assume_role={**ASSUME_ROLE_RESPONSE, "SourceIdentity": SOURCE_IDENTITY}
         )
@@ -327,6 +327,8 @@ class TestStsFederationService:
             CALLER_CREDENTIALS, CALLER, ROLE_ARN
         )
 
+        assert identity.user == SOURCE_IDENTITY
+        assert identity.principal == CALLER_ROLE
         assert identity == replace(_identity(), user=SOURCE_IDENTITY)
 
     @pytest.mark.asyncio
@@ -424,7 +426,8 @@ class TestStsFederationService:
             allowed_account_ids=[ACCOUNT],
             sts_endpoint_url=STS_ENDPOINT,
             user_tag_key="example:user",
-            agent_tag_key="example:agent",
+            principal_tag_key="example:principal",
+            session_tag_key="example:session",
             project_tag_key="example:project",
         )
         service = StsFederationService(session, federation_config)
@@ -442,7 +445,8 @@ class TestStsFederationService:
             DurationSeconds=IDENTITY_TOKEN_SECONDS,
             Tags=[
                 {"Key": "example:user", "Value": SOURCE_IDENTITY},
-                {"Key": "example:agent", "Value": "session"},
+                {"Key": "example:principal", "Value": CALLER_ROLE},
+                {"Key": "example:session", "Value": "session"},
                 {"Key": "example:project", "Value": "example"},
             ],
         )
