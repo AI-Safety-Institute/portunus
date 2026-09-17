@@ -35,9 +35,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   fields. Minted results are cached until the earlier of `CACHE_DURATION` and
   one minute before the token expires; concurrent misses for one payload share
   a mint per process.
-- `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
-  provider's token endpoint cannot be reached or answers 5xx/429, or when
-  minting exceeds its 6 s deadline.
+- `/authorise` returns 503 (`UpstreamServiceError`) when STS or a provider's
+  token endpoint (Anthropic's or OpenAI's) cannot be reached or answers
+  5xx/429, or when minting exceeds its 6 s deadline.
+- The `openai_wif` secret type mints OpenAI access tokens. The federation
+  session's STS web identity token, signed with ES384 for the secret's
+  `audience` (default `https://api.openai.com/v1`), is exchanged at
+  `https://auth.openai.com/oauth/token` (RFC 8693 token exchange) for the
+  secret's `identity_provider_id` and `service_account_id`. OpenAI never
+  issues the access token beyond the STS token's expiry, so it is valid for
+  at most 15 minutes.
 - The CLI's default session policy allows `sts:AssumeRole` on every role under
   the federation role path in the caller's account,
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
