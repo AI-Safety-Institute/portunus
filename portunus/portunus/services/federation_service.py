@@ -8,18 +8,21 @@ Minting has two independent parts:
    request an STS web identity token. The result is a signed JWT whose subject
    is the federation role and whose tags carry the user, the caller's role
    name, its session name and the project.
-2. Exchange (:class:`AnthropicTokenExchange`): trade the JWT for a provider
-   bearer token. Each provider gets its own adapter.
+2. Exchange: trade the JWT for a provider bearer token. Each provider has an
+   adapter with the same ``exchange(proof, secret)`` shape:
+   :class:`AnthropicTokenExchange` and :class:`OpenAiTokenExchange` post the
+   JWT to the provider's token endpoint.
 
-:class:`TokenMintService` sequences the two for a given secret type.
+:class:`TokenMintService` pairs each secret type with its proof and adapter.
 """
 
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence
+from typing import Any, Literal, Optional, Protocol, Sequence
 
 import httpx
 from aiobotocore.config import AioConfig
@@ -37,6 +40,7 @@ from portunus.models import (
     AnthropicWifSecret,
     AwsCredentials,
     MintSecretBase,
+    OpenAiWifSecret,
     PrincipalInfo,
 )
 from portunus.services.xray_service import capture_async
@@ -44,6 +48,10 @@ from portunus.services.xray_service import capture_async
 logger = logging.getLogger("api.access")
 
 JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+TOKEN_EXCHANGE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
+JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
+# The algorithms STS GetWebIdentityToken signs with.
+SigningAlgorithm = Literal["RS256", "ES384"]
 # The identity token only has to outlive the exchange call. The session must
 # outlive the token by more than the call latency: GetWebIdentityToken
 # rejects a DurationSeconds longer than the session's remaining lifetime
@@ -51,7 +59,10 @@ JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 # 900 s token.
 FEDERATION_SESSION_SECONDS = 3600
 IDENTITY_TOKEN_SECONDS = 900
-IDENTITY_TOKEN_SIGNING_ALGORITHM = "RS256"
+IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "RS256"
+# OpenAI: "Use ES384 unless your environment requires RS256 compatibility."
+OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "ES384"
+OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 
 # IAM's character classes are ASCII; re.ASCII keeps \w from admitting more.
 # A path segment is IAM's path charset (printable ASCII) minus the "/"
@@ -305,12 +316,16 @@ class StsFederationService:
 
     @capture_async()
     async def web_identity_token(
-        self, identity: FederationIdentity, audience: str
+        self,
+        identity: FederationIdentity,
+        audience: str,
+        signing_algorithm: SigningAlgorithm = IDENTITY_TOKEN_SIGNING_ALGORITHM,
     ) -> WebIdentityToken:
         """Issue a fresh STS-signed JWT for ``audience`` from the federation session.
 
         Providers treat the JWT ID as single-use, so callers must request a new
-        token for every exchange rather than reuse one.
+        token for every exchange rather than reuse one. ``signing_algorithm``
+        is whichever the provider prefers.
 
         Raises:
             AuthenticationError: STS refused to issue the token.
@@ -336,7 +351,7 @@ class StsFederationService:
             ) as sts:
                 response = await sts.get_web_identity_token(
                     Audience=[audience],
-                    SigningAlgorithm=IDENTITY_TOKEN_SIGNING_ALGORITHM,
+                    SigningAlgorithm=signing_algorithm,
                     DurationSeconds=IDENTITY_TOKEN_SECONDS,
                     Tags=tags,
                 )
@@ -354,8 +369,14 @@ class StsFederationService:
         )
 
 
-class AnthropicTokenExchange:
-    """Exchange adapter for Anthropic's RFC 7523 JWT-bearer token endpoint."""
+class _HttpTokenExchange:
+    """Shared HTTP client and response handling for exchange adapters.
+
+    Subclasses implement ``exchange(proof, secret)`` for their secret type
+    and may override ``timeout``.
+    """
+
+    timeout: httpx.Timeout = _EXCHANGE_TIMEOUT
 
     def __init__(self, http_client: Optional[httpx.AsyncClient] = None) -> None:
         self._http_client = http_client
@@ -364,7 +385,7 @@ class AnthropicTokenExchange:
     def http_client(self) -> httpx.AsyncClient:
         """Shared client, created on first use so the pool outlives one call."""
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=_EXCHANGE_TIMEOUT)
+            self._http_client = httpx.AsyncClient(timeout=self.timeout)
         return self._http_client
 
     async def aclose(self) -> None:
@@ -373,9 +394,106 @@ class AnthropicTokenExchange:
             await self._http_client.aclose()
             self._http_client = None
 
-    @capture_async()
-    async def exchange(self, assertion: str, secret: AnthropicWifSecret) -> MintedToken:
-        """POST the JWT to ``https://<host>/v1/oauth/token``.
+    async def _post_json(
+        self,
+        step: str,
+        url: str,
+        *,
+        data: Optional[dict[str, str]] = None,
+        json_body: Optional[dict[str, object]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, object]:
+        """POST a form or JSON body and return the JSON object in a 200 response.
+
+        ``step`` names the call in messages and logs, which carry the response
+        status and (truncated) body but never the request.
+
+        Raises:
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response.
+            AuthenticationError: Any other non-200 response, or a body that is
+                not a JSON object.
+        """
+        try:
+            response = await self.http_client.post(
+                url, data=data, json=json_body, headers=headers
+            )
+        except httpx.HTTPError as e:
+            # Not chained: the exception carries the request, whose body holds
+            # the proof or federated token.
+            logger.error(f"{step} failed: {type(e).__name__}: {e}")
+            raise UpstreamServiceError(f"{step} is unavailable") from None
+        if response.status_code != 200:
+            logger.error(
+                f"{step} returned HTTP {response.status_code}: {response.text[:500]}"
+            )
+            message = f"{step} returned HTTP {response.status_code}"
+            if response.status_code >= 500 or response.status_code == 429:
+                raise UpstreamServiceError(message)
+            raise AuthenticationError(message)
+        try:
+            body = response.json()
+        except ValueError as e:
+            logger.error(f"{step} returned a malformed body")
+            raise AuthenticationError(f"{step} returned a malformed response") from e
+        if not isinstance(body, dict):
+            logger.error(f"{step} returned a non-object body")
+            raise AuthenticationError(f"{step} returned a malformed response")
+        return body
+
+
+def _required_token(body: dict[str, object], key: str, step: str) -> str:
+    """The non-empty string at ``body[key]``.
+
+    Raises:
+        AuthenticationError: The value is missing, empty or not a string.
+    """
+    token = body.get(key)
+    if not isinstance(token, str) or not token:
+        raise AuthenticationError(f"{step} returned an empty token")
+    return token
+
+
+def _expires_in(value: object) -> int:
+    """Parse an OAuth ``expires_in`` JSON value (seconds).
+
+    Raises:
+        ValueError: Not a number or numeric string.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError("expires_in is not a number")
+    return int(value)
+
+
+def _oauth_token(
+    body: dict[str, object], step: str, requested_at: datetime
+) -> MintedToken:
+    """The ``access_token`` and ``expires_in`` of an OAuth token response.
+
+    ``requested_at`` is when the request was sent, so the expiry computed from
+    ``expires_in`` is never later than the provider's.
+
+    Raises:
+        AuthenticationError: ``access_token`` is missing or empty, or
+            ``expires_in`` is not a number.
+    """
+    try:
+        expires_in = _expires_in(body.get("expires_in"))
+    except ValueError as e:
+        logger.error(f"{step} returned a malformed body")
+        raise AuthenticationError(f"{step} returned a malformed response") from e
+    return MintedToken(
+        token=_required_token(body, "access_token", step),
+        expires_at=requested_at + timedelta(seconds=expires_in),
+    )
+
+
+class AnthropicTokenExchange(_HttpTokenExchange):
+    """Exchange adapter for Anthropic's RFC 7523 JWT-bearer token endpoint."""
+
+    @capture_async(name="anthropic_exchange")
+    async def exchange(self, proof: str, secret: AnthropicWifSecret) -> MintedToken:
+        """POST the STS web identity token to ``https://<host>/v1/oauth/token``.
 
         Raises:
             UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
@@ -383,66 +501,86 @@ class AnthropicTokenExchange:
             AuthenticationError: Any other non-200 response, or a response
                 without ``access_token`` and ``expires_in``.
         """
-        url = f"https://{secret.host}/v1/oauth/token"
+        step = f"Token exchange with {secret.host}"
         requested_at = datetime.now(timezone.utc)
-        try:
-            response = await self.http_client.post(
-                url,
-                json={
-                    "grant_type": JWT_BEARER_GRANT_TYPE,
-                    "assertion": assertion,
-                    "federation_rule_id": secret.federation_rule_id,
-                    "organization_id": secret.organization_id,
-                    "service_account_id": secret.service_account_id,
-                    "workspace_id": secret.workspace_id,
-                },
-            )
-        except httpx.HTTPError as e:
-            logger.error(
-                f"Token exchange with {secret.host} failed: {type(e).__name__}: {e}"
-            )
-            raise UpstreamServiceError(
-                f"Token exchange with {secret.host} is unavailable"
-            ) from e
-
-        if response.status_code != 200:
-            logger.error(
-                f"Token exchange with {secret.host} returned HTTP "
-                f"{response.status_code}: {response.text[:500]}"
-            )
-            message = (
-                f"Token exchange with {secret.host} returned "
-                f"HTTP {response.status_code}"
-            )
-            if response.status_code >= 500 or response.status_code == 429:
-                raise UpstreamServiceError(message)
-            raise AuthenticationError(message)
-
-        try:
-            body = response.json()
-            token = body["access_token"]
-            expires_in = int(body["expires_in"])
-        except (ValueError, KeyError, TypeError) as e:
-            logger.error(f"Token exchange with {secret.host} returned a malformed body")
-            raise AuthenticationError(
-                f"Token exchange with {secret.host} returned a malformed response"
-            ) from e
-        if not isinstance(token, str) or not token:
-            raise AuthenticationError(
-                f"Token exchange with {secret.host} returned an empty token"
-            )
-        return MintedToken(
-            token=token, expires_at=requested_at + timedelta(seconds=expires_in)
+        body = await self._post_json(
+            step,
+            f"https://{secret.host}/v1/oauth/token",
+            json_body={
+                "grant_type": JWT_BEARER_GRANT_TYPE,
+                "assertion": proof,
+                "federation_rule_id": secret.federation_rule_id,
+                "organization_id": secret.organization_id,
+                "service_account_id": secret.service_account_id,
+                "workspace_id": secret.workspace_id,
+            },
         )
+        return _oauth_token(body, step, requested_at)
+
+
+class OpenAiTokenExchange(_HttpTokenExchange):
+    """Exchange adapter for OpenAI's RFC 8693 token exchange endpoint."""
+
+    @capture_async(name="openai_exchange")
+    async def exchange(self, proof: str, secret: OpenAiWifSecret) -> MintedToken:
+        """POST the STS web identity token to ``OPENAI_TOKEN_URL``.
+
+        Raises:
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response.
+            AuthenticationError: Any other non-200 response, or a response
+                without ``access_token`` and ``expires_in``.
+        """
+        step = "Token exchange with OpenAI"
+        requested_at = datetime.now(timezone.utc)
+        body = await self._post_json(
+            step,
+            OPENAI_TOKEN_URL,
+            json_body={
+                "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
+                "subject_token_type": JWT_TOKEN_TYPE,
+                "subject_token": proof,
+                "identity_provider_id": secret.identity_provider_id,
+                "service_account_id": secret.service_account_id,
+            },
+        )
+        return _oauth_token(body, step, requested_at)
+
+
+class _TokenExchange[S: MintSecretBase](Protocol):
+    """The shape every exchange adapter exposes, for its own secret type."""
+
+    async def exchange(self, proof: str, secret: S) -> MintedToken: ...
+
+    async def aclose(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class _MintRoute[S: MintSecretBase]:
+    """How one secret type is minted.
+
+    Attributes:
+        prove: Prove the federation identity for the secret, in the form its
+            provider verifies
+        adapter: Exchange that proof for the provider's token
+    """
+
+    prove: Callable[[FederationIdentity, S], Awaitable[str]]
+    adapter: _TokenExchange[S]
 
 
 class TokenMintService:
-    """Mint an upstream token for a secret that describes how to obtain one."""
+    """Mint an upstream token for a secret that describes how to obtain one.
+
+    A new provider needs a ``MintSecretBase`` subclass, an adapter with the
+    ``exchange(proof, secret)`` shape, and one entry in ``_routes``.
+    """
 
     def __init__(
         self,
         sts: Optional[StsFederationService] = None,
         anthropic: Optional[AnthropicTokenExchange] = None,
+        openai: Optional[OpenAiTokenExchange] = None,
         federation_config: Optional[FederationConfig] = None,
         boto_session: Optional[AioSession] = None,
     ) -> None:
@@ -451,10 +589,31 @@ class TokenMintService:
             boto_session=boto_session, federation_config=self.federation_config
         )
         self.anthropic = anthropic or AnthropicTokenExchange()
+        self.openai = openai or OpenAiTokenExchange()
+        # Each route is typed for its own secret class, which the dict cannot
+        # express; mint() looks a route up by the secret's exact type.
+        self._routes: dict[type[MintSecretBase], _MintRoute[Any]] = {
+            AnthropicWifSecret: _MintRoute(self._web_identity_proof, self.anthropic),
+            OpenAiWifSecret: _MintRoute(self._openai_identity_proof, self.openai),
+        }
 
     async def aclose(self) -> None:
-        """Release adapter resources."""
-        await self.anthropic.aclose()
+        """Release every adapter's resources."""
+        for route in self._routes.values():
+            await route.adapter.aclose()
+
+    async def _web_identity_proof(
+        self, identity: FederationIdentity, secret: AnthropicWifSecret
+    ) -> str:
+        return (await self.sts.web_identity_token(identity, secret.audience)).token
+
+    async def _openai_identity_proof(
+        self, identity: FederationIdentity, secret: OpenAiWifSecret
+    ) -> str:
+        token = await self.sts.web_identity_token(
+            identity, secret.audience, OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM
+        )
+        return token.token
 
     @capture_async()
     async def mint(
@@ -466,8 +625,8 @@ class TokenMintService:
         """Validate the federation role, prove the caller's identity, and exchange.
 
         Raises:
-            AuthenticationError: Role not allowed, STS refused, or the
-                exchange failed.
+            AuthenticationError: Role not allowed, no route for the secret
+                type, STS refused, or the exchange failed.
             CredentialsError: Caller credentials expired, not an assumed role,
                 or an identity field unusable as a session tag.
             UpstreamServiceError: STS or the provider was unavailable, or
@@ -478,7 +637,8 @@ class TokenMintService:
             self.federation_config.allowed_account_ids,
             self.federation_config.role_path_prefix,
         )
-        if not isinstance(secret, AnthropicWifSecret):
+        route = self._routes.get(type(secret))
+        if route is None:
             raise AuthenticationError(
                 f"No token exchange for secret type {type(secret).__name__}"
             )
@@ -487,8 +647,8 @@ class TokenMintService:
                 identity = await self.sts.assume_federation_role(
                     credentials, principal, secret.federation_role_arn
                 )
-                proof = await self.sts.web_identity_token(identity, secret.audience)
-                return await self.anthropic.exchange(proof.token, secret)
+                proof = await route.prove(identity, secret)
+                return await route.adapter.exchange(proof, secret)
         except TimeoutError as e:
             logger.error(f"Token minting exceeded {MINT_DEADLINE_SECONDS} s")
             raise UpstreamServiceError("Token minting timed out") from e
