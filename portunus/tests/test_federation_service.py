@@ -38,6 +38,7 @@ from portunus.services.federation_service import (
     IDENTITY_TOKEN_SECONDS,
     JWT_BEARER_GRANT_TYPE,
     JWT_TOKEN_TYPE,
+    OPENAI_IDENTITY_TOKEN_SECONDS,
     OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
     OPENAI_TOKEN_URL,
     TOKEN_EXCHANGE_GRANT_TYPE,
@@ -484,6 +485,34 @@ class TestStsFederationService:
         assert kwargs["DurationSeconds"] == IDENTITY_TOKEN_SECONDS
 
     @pytest.mark.asyncio
+    async def test_web_identity_token_requests_the_given_duration(self):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        await service.web_identity_token(
+            _identity(), OPENAI_API_AUDIENCE, "ES384", duration_seconds=1800
+        )
+
+        (client,) = clients
+        kwargs = client.get_web_identity_token.await_args.kwargs
+        assert kwargs["DurationSeconds"] == 1800
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("duration_seconds", [59, 3601])
+    async def test_web_identity_token_rejects_durations_outside_sts_bounds(
+        self, duration_seconds: int
+    ):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        with pytest.raises(ValueError, match="between 60 and 3600"):
+            await service.web_identity_token(
+                _identity(), OPENAI_API_AUDIENCE, duration_seconds=duration_seconds
+            )
+
+        assert clients == []
+
+    @pytest.mark.asyncio
     async def test_web_identity_token_failure_raises_authentication_error(self):
         session, _ = _sts_session(
             get_web_identity_token=_client_error("AccessDenied", "GetWebIdentityToken")
@@ -845,9 +874,13 @@ class TestTokenMintService:
             CALLER_CREDENTIALS, CALLER, ROLE_ARN
         )
         sts.web_identity_token.assert_awaited_once_with(
-            _identity(), OPENAI_API_AUDIENCE, OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM
+            _identity(),
+            OPENAI_API_AUDIENCE,
+            OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
+            OPENAI_IDENTITY_TOKEN_SECONDS,
         )
         assert OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM == "ES384"
+        assert OPENAI_IDENTITY_TOKEN_SECONDS == 1800
         openai.exchange.assert_awaited_once_with("jwt-1", secret)
         anthropic.exchange.assert_not_awaited()
         assert minted.token == "openai-token-for-jwt-1"
@@ -861,7 +894,7 @@ class TestTokenMintService:
         )
 
         sts.web_identity_token.assert_awaited_once_with(
-            _identity(), "https://example.com", "ES384"
+            _identity(), "https://example.com", "ES384", 1800
         )
 
     @pytest.mark.asyncio
@@ -882,6 +915,9 @@ class TestTokenMintService:
         assume, web_identity = clients
         assume.assume_role.assert_awaited_once()
         assert web_identity.create_kwargs["aws_session_token"] == "fed-token"
+        web_identity_kwargs = web_identity.get_web_identity_token.await_args.kwargs
+        assert web_identity_kwargs["SigningAlgorithm"] == "RS256"
+        assert web_identity_kwargs["DurationSeconds"] == IDENTITY_TOKEN_SECONDS
         (request,) = requests
         assert json.loads(request.content)["assertion"] == "header.payload.signature"
         assert minted.token == "sk-ant-oat01-example"
@@ -907,7 +943,7 @@ class TestTokenMintService:
         web_identity.get_web_identity_token.assert_awaited_once_with(
             Audience=[OPENAI_API_AUDIENCE],
             SigningAlgorithm="ES384",
-            DurationSeconds=IDENTITY_TOKEN_SECONDS,
+            DurationSeconds=OPENAI_IDENTITY_TOKEN_SECONDS,
             Tags=[
                 {"Key": "portunus:user", "Value": CALLER_ROLE},
                 {"Key": "portunus:principal", "Value": CALLER_ROLE},
