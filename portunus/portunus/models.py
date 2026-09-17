@@ -592,10 +592,39 @@ class AnthropicWifSecret(MintSecretBase):
     audience: str = Field(default="https://api.anthropic.com", min_length=1)
 
 
-# Every secret shape. A new mint provider (e.g. gcp_wif)
-# subclasses MintSecretBase, joins this union, and gets an exchange branch in
+OPENAI_API_AUDIENCE = "https://api.openai.com/v1"
+# Opaque ids ("idp_...", "svc_acct_..."); nothing beyond the charset is documented.
+OPENAI_ID_PATTERN = r"^[A-Za-z0-9_-]+$"
+
+
+class OpenAiWifSecret(MintSecretBase):
+    """Mint an OpenAI access token via workload identity federation.
+
+    The federation session requests an ES384-signed STS web identity token
+    for ``audience`` and exchanges it at ``https://auth.openai.com/oauth/token``
+    (RFC 8693 token exchange) using the identifiers below.
+
+    Attributes:
+        identity_provider_id: The OpenAI workload identity provider that
+            trusts the federation role's account as an OIDC issuer.
+        service_account_id: The OpenAI service account the token acts as; its
+            mapping under the provider must admit the federation role.
+        audience: The provider's configured audience, carried as the token's
+            ``aud``.
+    """
+
+    type: Literal["openai_wif"]
+    identity_provider_id: str = Field(min_length=1, pattern=OPENAI_ID_PATTERN)
+    service_account_id: str = Field(min_length=1, pattern=OPENAI_ID_PATTERN)
+    audience: str = Field(default=OPENAI_API_AUDIENCE, min_length=1)
+
+
+# Every secret shape. A new mint provider subclasses MintSecretBase, joins this
+# union, and gets an exchange adapter and a route in
 # services.federation_service.TokenMintService.
-SecretsManagerSecret = Union[SecretsManagerAuthPayload, AnthropicWifSecret]
+SecretsManagerSecret = Union[
+    SecretsManagerAuthPayload, AnthropicWifSecret, OpenAiWifSecret
+]
 TypedSecret = Annotated[SecretsManagerSecret, Field(discriminator="type")]
 """SecretsManagerSecret discriminated on ``type``, for validating JSON input."""
 
