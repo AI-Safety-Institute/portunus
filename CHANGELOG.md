@@ -29,6 +29,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   forwarding and logging rules. (#136)
 
 ### Fixed
+- `AuthPayload.from_contents` ignored the credential expiration that
+  `encode_payload` (and so the CLI) writes at the top level of the payload, so
+  `seconds_until_expiration()` was always None. Both locations are now read,
+  with a nested `credentials.expiration` taking precedence, and `to_dict`
+  writes the value back. Cache TTL is unchanged: results are still cached for
+  `CACHE_DURATION`, not the credential lifetime. (#147)
 - The WebSocket relay forwarded the proxy's shared-secret header
   (`PORTUNUS_API_KEY_HEADER`, default `x-api-key`), which Envoy adds to every
   upgrade request it routes to Portunus, to the upstream and included it in the

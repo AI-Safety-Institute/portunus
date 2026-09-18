@@ -431,7 +431,8 @@ class AuthPayload:
 
         The proxy removes the Bearer prefix before sending this payload. The payload
         is expected to be a base64-encoded JSON string containing "credentials" and
-        "secret_arn" fields.
+        "secret_arn" fields. The credential expiration may sit inside
+        "credentials" or at the top level (where ``encode_payload`` writes it).
 
         Args:
             raw_payload (str): Base64-encoded payload string
@@ -452,9 +453,9 @@ class AuthPayload:
             if not isinstance(decoded_payload, dict):
                 raise PayloadError("Invalid payload format")
 
-            credentials = AwsCredentials.from_dict(
-                decoded_payload.get("credentials", {})
-            )
+            credentials_data = dict(decoded_payload.get("credentials", {}))
+            credentials_data.setdefault("expiration", decoded_payload.get("expiration"))
+            credentials = AwsCredentials.from_dict(credentials_data)
             secret_arn = decoded_payload.get("secret_arn", "")
 
             return cls(raw_payload, credentials, secret_arn, target_host)
@@ -471,10 +472,11 @@ class AuthPayload:
         Returns:
             Dict[str, Any]: Dictionary with payload fields
         """
+        credentials = self.credentials.to_dict()
         result = {
-            "credentials": self.credentials.to_dict(),
+            "credentials": credentials,
             "secret_arn": self.secret_arn,
-            "expiration": None,  # This is typically set when creating temporary creds
+            "expiration": credentials["expiration"],
         }
         if self.target_host:
             result["target_host"] = self.target_host

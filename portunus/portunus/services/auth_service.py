@@ -126,8 +126,8 @@ class AuthService:
         1. First check Redis cache using the raw payload as key
         2. If not in cache, decode payload, retrieve from AWS, and cache result
 
-        The cache TTL is set to the credential expiration time to ensure
-        cached results don't outlive the credentials they were retrieved with.
+        Results are cached for the configured cache duration, not for the
+        caller's credential lifetime.
 
         Args:
             payload: The parsed base64-encoded payload from authorization header
@@ -186,15 +186,13 @@ class AuthService:
                 api_key=api_key, signing_key=signing_key, principal_info=principal_info
             )
 
-            # Cache the results for future requests (best effort)
-            # Use credential expiration as TTL so cache doesn't outlive credentials
+            # Best effort. Not bounded by the credential expiry: the cache exists
+            # to outlive it (see the CACHE_DURATION comment in config.py).
             if payload.raw and auth_result.successful:
                 try:
-                    # Store in Redis cache for fast retrieval
                     async with asyncio.timeout(3):
-                        ttl = credentials.seconds_until_expiration()
                         await self.cache_service.cache_auth_result(
-                            payload.raw, auth_result, ttl
+                            payload.raw, auth_result, self.cache_service.cache_duration
                         )
                 except Exception as e:
                     logger.error(f"Cache write error during auth: {e}")

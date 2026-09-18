@@ -201,7 +201,7 @@ class CacheService:
         Args:
             payload: The payload to use as a cache key.
             auth_result: The authentication result to cache.
-            ttl_seconds: Optional TTL override based on credential expiration.
+            ttl_seconds: Optional TTL override; defaults to the cache duration.
 
         Returns:
             True if successfully cached, False otherwise.
