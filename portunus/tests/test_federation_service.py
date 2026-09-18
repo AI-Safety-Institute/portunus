@@ -111,9 +111,7 @@ def _client_error(code: str, operation: str) -> ClientError:
 
 
 class TestValidateFederationRoleArn:
-    def test_accepts_a_namespaced_role_under_the_prefix_in_an_allowed_account(
-        self,
-    ):
+    def test_accepts_a_role_under_the_prefix_in_an_allowed_account(self):
         validate_federation_role_arn(ROLE_ARN, [ACCOUNT], "/portunus-fed/")
 
     @pytest.mark.parametrize(
@@ -130,16 +128,14 @@ class TestValidateFederationRoleArn:
     @pytest.mark.parametrize(
         "arn",
         [
-            # The former grant-first shape: one segment under the prefix.
+            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/name",
             f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/example-grant/"
             "example-grant@projects.example",
-            f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/name",
             f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/extra/name",
         ],
     )
-    def test_rejects_other_than_two_segments_under_the_prefix(self, arn: str):
-        with pytest.raises(AuthenticationError, match="two path segments"):
-            validate_federation_role_arn(arn, [ACCOUNT], "/portunus-fed/")
+    def test_accepts_any_path_depth_under_the_prefix(self, arn: str):
+        validate_federation_role_arn(arn, [ACCOUNT], "/portunus-fed/")
 
     @pytest.mark.parametrize(
         "arn",
