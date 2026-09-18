@@ -26,7 +26,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   fields, including `signing_key`:
   request signing is not available for minted tokens. Minted results are
   cached until the earliest of
-  `CACHE_DURATION`, the caller's credential expiry and five minutes before
+  `CACHE_DURATION`, the caller's credential expiry and one minute before
   the token expires; concurrent misses for one payload share a mint per
   process.
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
