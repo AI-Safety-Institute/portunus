@@ -14,13 +14,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (#136)
 
 ### Changed
-- The proxy removes every header in `KNOWN_AUTH_HEADERS` (new proxy env var,
-  default `authorization,x-api-key,x-goog-api-key,api-key`) other than the one
-  it sets from the upstream request, and excludes all of them from header
-  logging. The WebSocket relay does the same for forwarded and logged upgrade
-  headers. Previously only `API_KEY_HEADER` was excluded from logs and
-  client-supplied copies of other credential headers were forwarded upstream.
-  (#136)
+- The proxy removes the header the auth payload arrived in (`API_KEY_HEADER`)
+  from the upstream request and sets the header the credential is written to
+  (`output_header`, else `API_KEY_HEADER`); when both name the same header this
+  is the existing overwrite. The inbound header carries the caller's AWS
+  credentials, so it is removed explicitly now that the credential can be
+  written to a different header. Every other header, including other
+  credential-shaped ones, is forwarded untouched so clients can carry
+  provider-specific headers through. Header logging excludes
+  `KNOWN_AUTH_HEADERS` (new proxy env var, default
+  `authorization,x-api-key,x-goog-api-key,api-key`) plus the inbound and
+  output headers, whether or not they were forwarded; previously only
+  `API_KEY_HEADER` was excluded. The WebSocket relay applies the same
+  forwarding and logging rules. (#136)
 
 ### Fixed
 - The WebSocket relay forwarded the proxy's shared-secret header

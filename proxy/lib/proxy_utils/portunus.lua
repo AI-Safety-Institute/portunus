@@ -28,7 +28,6 @@ function portunus.new(config)
 		-- Header prefix for proxy-specific response headers
 		header_prefix = config.header_prefix,
 	}
-	-- The inbound payload header must be stripped too, even when it is not in the known list.
 	instance.credential_headers[instance.request_api_key_header] = true
 	setmetatable(instance, portunus_client)
 	return instance
@@ -284,17 +283,17 @@ function portunus_client:resolve_upstream_auth(auth_response)
 	return header:lower(), prefix .. auth_response.api_key
 end
 
---- Sets the single upstream auth header and removes every other credential header
+--- Sets the upstream auth header and removes the header the payload arrived in
+-- Every other header is forwarded untouched; when the two names match this is
+-- a plain overwrite.
 -- @param request_handle The Envoy request handle
 -- @param auth_response Parsed AuthorizationResponse
 -- @return header Lowercased name of the header that now carries the credential
 function portunus_client:apply_upstream_auth(request_handle, auth_response)
 	local header, value = self:resolve_upstream_auth(auth_response)
 	local headers = request_handle:headers()
-	for name in pairs(self.credential_headers) do
-		if name ~= header then
-			headers:remove(name)
-		end
+	if header ~= self.request_api_key_header then
+		headers:remove(self.request_api_key_header)
 	end
 	headers:replace(header, value)
 	return header

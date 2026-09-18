@@ -16,7 +16,7 @@ It consists of two main components:
       - **Plaintext**: `"sk-1234567890abcdef"` (works with any proxy target)
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
   - If successful, Portunus returns the real API key to the Envoy instance
-  - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default) and removes any other credential headers before allowing the request to proceed
+  - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default), removing the `API_KEY_HEADER` header when the two differ, before allowing the request to proceed. Every other header is forwarded untouched
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
   - As the above is happening, Envoy also sends request and response data to the Portunus `/log/..` endpoints for storage
 
@@ -168,7 +168,7 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `PORTUNUS_API_KEY_HEADER` | Header carrying the shared secret | `x-api-key` |
 | `API_KEY_HEADER` | Header name for the API key | `authorization` |
 | `API_KEY_PREFIX` | Prefix for the API key value | `Bearer ` |
-| `KNOWN_AUTH_HEADERS` | Comma-separated header names that may carry an upstream credential. The proxy removes all of them except the one it sets from the upstream request, and excludes all of them from header logging | `authorization,x-api-key,x-goog-api-key,api-key` |
+| `KNOWN_AUTH_HEADERS` | Comma-separated header names excluded from header logging, in addition to `API_KEY_HEADER` and the header the credential is written to. Does not affect which headers are forwarded | `authorization,x-api-key,x-goog-api-key,api-key` |
 | `PORTUNUS_HEADER_PREFIX` | Prefix for proxy response headers (`x-{prefix}-*`) | `portunus` |
 | `RATE_LIMIT_PERCENT_ENABLED` | Percentage of traffic to rate limit (0 = disabled) | `0` |
 | `RATE_LIMIT_INTERVAL_SECONDS` | Rate limit time window (seconds) | - |
