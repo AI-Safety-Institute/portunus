@@ -76,7 +76,7 @@ function envoy_on_request(request_handle)
 	-- 4. Extracts authorization payload from headers
 	-- 5. Calls Portunus service to retrieve real API key
 	-- 6. Handles errors from Portunus service
-	-- 7. Sets the upstream auth header to the real credential and strips other credential headers
+	-- 7. Sets the upstream auth header to the real credential and removes the header the payload arrived in
 	-- 8. Adds Content-Digest and Signature headers if applicable
 	-- 9. Logs request body, headers, and trailers
 
@@ -181,7 +181,6 @@ function envoy_on_request(request_handle)
 			:dynamicMetadata()
 			:set("envoy.filters.http.lua", "request_id", auth_response.request_id)
 
-		-- Also strips the inbound header that held the auth payload when it differs.
 		local upstream_auth_header = portunus:apply_upstream_auth(request_handle, auth_response)
 
 		-- Add Content-Digest and Signature headers if present

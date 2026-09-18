@@ -259,7 +259,7 @@ describe("proxy_utils.portunus", function()
 			["content-type"] = "application/json",
 		}
 
-		it("should replace api_key_header and remove the other credential headers by default", function()
+		it("should overwrite api_key_header and forward every other header by default", function()
 			local headers = fake_headers(client_headers)
 
 			local result = portunus_client:apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
@@ -267,13 +267,16 @@ describe("proxy_utils.portunus", function()
 			assert.equals("authorization", result)
 			assert.same({
 				authorization = "Bearer sk-1",
+				["x-api-key"] = "client-supplied",
+				["x-goog-api-key"] = "client-supplied",
+				["api-key"] = "client-supplied",
 				["content-type"] = "application/json",
 			}, headers.store)
-			assert.spy(headers.remove).was_not.called_with(match._, "authorization")
+			assert.spy(headers.remove).was_not.called()
 			assert.spy(headers.replace).was.called(1)
 		end)
 
-		it("should move the credential to output_header and remove the inbound header", function()
+		it("should move the credential to output_header and remove only the inbound header", function()
 			local headers = fake_headers(client_headers)
 
 			local result = portunus_client:apply_upstream_auth(handle_for(headers), {
@@ -286,12 +289,37 @@ describe("proxy_utils.portunus", function()
 			assert.equals("x-goog-api-key", result)
 			assert.same({
 				["x-goog-api-key"] = "sk-1",
+				["x-api-key"] = "client-supplied",
+				["api-key"] = "client-supplied",
 				["content-type"] = "application/json",
 			}, headers.store)
+			assert.spy(headers.remove).was.called(1)
 			assert.spy(headers.remove).was.called_with(match._, "authorization")
 		end)
 
-		it("should remove an api_key_header that is not in the known list", function()
+		it("should forward a client authorization header when the inbound header is x-api-key", function()
+			local client = portunus_module.new({
+				api_key_header = "x-api-key",
+				api_key_prefix = "",
+				known_auth_headers = "authorization,x-api-key,x-goog-api-key,api-key",
+			})
+			local headers = fake_headers({
+				["x-api-key"] = "payload",
+				authorization = "Bearer client-supplied",
+				accept = "*/*",
+			})
+
+			client:apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
+
+			assert.same({
+				["x-api-key"] = "sk-1",
+				authorization = "Bearer client-supplied",
+				accept = "*/*",
+			}, headers.store)
+			assert.spy(headers.remove).was_not.called()
+		end)
+
+		it("should remove an inbound header that is not in the known list", function()
 			local client = portunus_module.new({
 				api_key_header = "x-custom-auth",
 				api_key_prefix = "",
@@ -312,6 +340,7 @@ describe("proxy_utils.portunus", function()
 
 			assert.same({
 				authorization = "Bearer sk-1",
+				["x-api-key"] = "client-supplied",
 				accept = "*/*",
 			}, headers.store)
 		end)
@@ -343,6 +372,22 @@ describe("proxy_utils.portunus", function()
 			}, "x-custom-token")
 
 			assert.same({ ["content-type"] = "application/json" }, result)
+		end)
+
+		it("should drop a forwarded authorization header when the inbound header is x-api-key", function()
+			local client = portunus_module.new({
+				api_key_header = "x-api-key",
+				api_key_prefix = "",
+				known_auth_headers = "authorization,x-api-key,x-goog-api-key,api-key",
+			})
+
+			local result = client:strip_credential_headers({
+				["x-api-key"] = "sk-1",
+				authorization = "Bearer client-supplied",
+				accept = "*/*",
+			}, "x-api-key")
+
+			assert.same({ accept = "*/*" }, result)
 		end)
 	end)
 

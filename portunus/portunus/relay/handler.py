@@ -18,7 +18,7 @@ from websockets.asyncio.client import connect as ws_connect
 from portunus.config import config
 from portunus.models import AuthResult
 from portunus.relay import WsCloseCode
-from portunus.relay.auth import WsAuthResult, authenticate_ws
+from portunus.relay.auth import AUTH_HEADER, WsAuthResult, authenticate_ws
 from portunus.relay.logger import enqueue_log, log_ws_headers, log_ws_summary
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_service import PublishService
@@ -26,11 +26,15 @@ from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
 
-# Headers that may carry an upstream credential. None of them is forwarded
-# (the relay injects exactly one credential header itself) and none is logged.
+# Headers that may carry a credential. Excluded from header logging only;
+# forwarding is decided by _BLOCKED_HEADERS.
 KNOWN_AUTH_HEADERS = frozenset(
     {"authorization", "x-api-key", "x-goog-api-key", "api-key"}
 )
+
+# Envoy sets PORTUNUS_API_KEY_HEADER on every upgrade request it routes here;
+# the relay only knows the default name.
+_PROXY_SHARED_SECRET_HEADER = "x-api-key"
 
 # Used when the auth result does not name an output header/prefix.
 _DEFAULT_OUTPUT_HEADER = "Authorization"
@@ -39,25 +43,25 @@ _DEFAULT_OUTPUT_PREFIX = "Bearer "
 # Headers NOT forwarded from client upgrade request to upstream.
 # Everything else passes through — avoids maintaining an allowlist
 # that would need updating for every new client/provider.
-_BLOCKED_HEADERS = (
-    frozenset(
-        {
-            # Hop-by-hop (handled by websockets library on new connection)
-            "connection",
-            "upgrade",
-            "sec-websocket-key",
-            "sec-websocket-version",
-            "sec-websocket-extensions",
-            # Routing (specific to this proxy, not the upstream)
-            "host",
-            # Proxy headers (could spoof source identity at upstream)
-            "x-forwarded-for",
-            "x-forwarded-host",
-            "x-forwarded-proto",
-            "x-real-ip",
-        }
-    )
-    | KNOWN_AUTH_HEADERS
+_BLOCKED_HEADERS = frozenset(
+    {
+        # Hop-by-hop (handled by websockets library on new connection)
+        "connection",
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        # Addressed to Portunus, not the upstream
+        AUTH_HEADER,
+        _PROXY_SHARED_SECRET_HEADER,
+        # Routing (specific to this proxy, not the upstream)
+        "host",
+        # Proxy headers (could spoof source identity at upstream)
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    }
 )
 _BLOCKED_HEADER_PREFIXES = ("x-portunus-",)
 
@@ -108,9 +112,13 @@ def _resolve_upstream_auth(auth_result: AuthResult) -> tuple[str, str]:
     return header, f"{prefix}{auth_result.api_key}"
 
 
-def _credential_headers(auth_header: str) -> frozenset[str]:
-    """Lowercased names of every header that can carry a credential."""
-    return KNOWN_AUTH_HEADERS | {auth_header.lower()}
+def _unlogged_headers(auth_header: str) -> frozenset[str]:
+    """Header names that may carry a credential; none of them is logged."""
+    return KNOWN_AUTH_HEADERS | {
+        AUTH_HEADER,
+        _PROXY_SHARED_SECRET_HEADER,
+        auth_header.lower(),
+    }
 
 
 def _build_upstream_headers(
@@ -118,11 +126,11 @@ def _build_upstream_headers(
 ) -> dict[str, str]:
     """Build headers for the upstream connection.
 
-    Forwards all client headers except blocked and credential-carrying ones,
-    then sets exactly one credential header from the auth result.
+    Forwards all client headers except the blocked ones, then sets the single
+    credential header named by the auth result, replacing any client copy.
     """
     auth_header, auth_value = _resolve_upstream_auth(auth_result)
-    excluded = _BLOCKED_HEADERS | _credential_headers(auth_header)
+    excluded = _BLOCKED_HEADERS | {auth_header.lower()}
     headers: dict[str, str] = {}
     for key, value in websocket.headers.items():
         lower = key.lower()
@@ -184,7 +192,7 @@ async def _publish_connection_metadata(
     # Log upgrade request headers (parity with HTTP header logging), minus the
     # internal routing headers and anything that can carry a credential.
     auth_header, _ = _resolve_upstream_auth(ws_auth.auth_result)
-    excluded = _credential_headers(auth_header)
+    excluded = _unlogged_headers(auth_header)
     upgrade_headers = {
         k: v
         for k, v in websocket.headers.items()

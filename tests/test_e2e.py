@@ -115,10 +115,10 @@ def test_auth_succeeds_with_plain_text_key(
     ["xyz"],
     indirect=True,
 )
-def test_client_credential_headers_are_stripped(
+def test_client_credential_headers_are_forwarded(
     api_key_prefix: str, api_key_header: str, docker_setup
 ):
-    """Other known credential headers sent by the client never reach the upstream."""
+    """Only the payload header changes; other credential-shaped headers pass through."""
     payload = encode_base64({"credentials": {}, "secret_arn": ""})
     response = requests.get(
         "http://localhost:8888/get",
@@ -136,7 +136,7 @@ def test_client_credential_headers_are_stripped(
     assert upstream_headers["authorization"] == api_key_prefix + docker_setup
     assert upstream_headers["x-not-a-credential"] == "kept"
     for name in ("x-api-key", "x-goog-api-key", "api-key"):
-        assert name not in upstream_headers
+        assert upstream_headers[name] == "client-supplied"
 
 
 def _wait_for_request_headers_record(request_id: str, timeout: float = 30) -> dict:

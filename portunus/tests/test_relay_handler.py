@@ -184,11 +184,10 @@ class TestBuildUpstreamHeaders:
             "user-agent": "test-client",
         }
 
-    def test_strips_known_auth_headers(self, mock_websocket, auth_result):
-        """Client copies of every known credential header are dropped."""
+    def test_forwards_other_credential_headers(self, mock_websocket, auth_result):
+        """Only the payload header is removed; other credential-shaped headers pass."""
         mock_websocket.headers = {
             "authorization": "Bearer test_payload",
-            "x-api-key": "client-supplied",
             "x-goog-api-key": "client-supplied",
             "api-key": "client-supplied",
             "content-type": "application/json",
@@ -198,16 +197,30 @@ class TestBuildUpstreamHeaders:
 
         assert headers == {
             "Authorization": "Bearer sk-test-key",
+            "x-goog-api-key": "client-supplied",
+            "api-key": "client-supplied",
             "content-type": "application/json",
         }
 
+    def test_drops_proxy_shared_secret_header(self, mock_websocket, auth_result):
+        """The x-api-key Envoy sets for Portunus is not forwarded."""
+        mock_websocket.headers = {
+            "authorization": "Bearer test_payload",
+            "x-api-key": "proxy-shared-secret",
+        }
+
+        headers = _build_upstream_headers(mock_websocket, auth_result)
+
+        assert headers == {"Authorization": "Bearer sk-test-key"}
+
     def test_honours_output_header_and_prefix(self, mock_websocket, auth_result):
-        """output_header/output_prefix select the single upstream auth header."""
+        """The credential lands in output_header and the payload header is removed."""
         auth_result.output_header = "x-goog-api-key"
         auth_result.output_prefix = ""
         mock_websocket.headers = {
             "authorization": "Bearer test_payload",
             "x-goog-api-key": "client-supplied",
+            "api-key": "client-supplied",
             "user-agent": "test-client",
         }
 
@@ -215,6 +228,7 @@ class TestBuildUpstreamHeaders:
 
         assert headers == {
             "x-goog-api-key": "sk-test-key",
+            "api-key": "client-supplied",
             "user-agent": "test-client",
         }
 
@@ -227,10 +241,10 @@ class TestBuildUpstreamHeaders:
 
         assert headers == {"Authorization": "sk-test-key"}
 
-    def test_client_copy_of_custom_output_header_is_dropped(
+    def test_client_copy_of_custom_output_header_is_replaced(
         self, mock_websocket, auth_result
     ):
-        """A client header matching output_header (any case) is not forwarded."""
+        """A client header matching output_header (any case) is replaced."""
         auth_result.output_header = "X-Custom-Token"
         mock_websocket.headers = {"x-custom-token": "client-supplied"}
 
@@ -246,7 +260,7 @@ class TestPublishConnectionMetadata:
     async def test_logged_upgrade_headers_exclude_credentials(
         self, mock_websocket, mock_publish_service, ws_auth_result
     ):
-        """Known credential headers and internal headers are not logged."""
+        """Credential-shaped headers are not logged even when they are forwarded."""
         mock_websocket.headers = {
             "authorization": "Bearer test_payload",
             "x-api-key": "client-supplied",
