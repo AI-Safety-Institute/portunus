@@ -580,10 +580,9 @@ class MintSecretBase(BaseModel):
     Attributes:
         host: Target host the token is valid for; also validated against the
             proxy's target like the static ``host`` field.
-        federation_role_arn: IAM role whose trust policy admits the caller:
-            ``arn:aws:iam::<account>:role<prefix><namespace>/<name>``, with
-            ``<prefix>`` the deployment's federation role path and
-            ``<namespace>`` exactly two path segments.
+        federation_role_arn: IAM role whose trust policy admits the caller,
+            in an allowed account and under the deployment's federation role
+            path.
     """
 
     model_config = ConfigDict(extra="forbid")

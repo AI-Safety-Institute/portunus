@@ -4,13 +4,13 @@ import json
 
 import pytest
 
-from portunus.cli import _build_default_policy, _federation_role_pattern
+from portunus.cli import _build_default_policy
 
 ACCOUNT = "123456789012"
 OTHER_ACCOUNT = "210987654321"
 SECRET_PREFIX = f"arn:aws:secretsmanager:eu-west-2:{ACCOUNT}:secret:"
 SECRET_ARN = f"{SECRET_PREFIX}projects/example/example-grant-AbCdEf"
-FLAT_SECRET_ARN = f"{SECRET_PREFIX}test-api-key-AbCdEf"
+FEDERATION_ROLES = f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/*"
 
 
 def _statements(policy_json: str) -> dict[str, dict]:
@@ -20,7 +20,7 @@ def _statements(policy_json: str) -> dict[str, dict]:
     }
 
 
-def test_default_policy_grants_the_secret_kms_sign_and_the_namespace_roles():
+def test_default_policy_grants_the_secret_kms_sign_and_the_federation_roles():
     policy = json.loads(_build_default_policy(SECRET_ARN, ACCOUNT))
     statements = _statements(json.dumps(policy))
 
@@ -39,34 +39,24 @@ def test_default_policy_grants_the_secret_kms_sign_and_the_namespace_roles():
     federation = statements["PortunusFederationAssumeRole"]
     assert federation["Effect"] == "Allow"
     assert federation["Action"] == ["sts:AssumeRole"]
-    assert (
-        federation["Resource"]
-        == f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/*"
-    )
+    assert federation["Resource"] == FEDERATION_ROLES
 
 
-def test_secret_outside_a_namespace_gets_no_assume_role_statement():
-    statements = _statements(_build_default_policy(FLAT_SECRET_ARN, ACCOUNT))
-
-    assert list(statements) == ["SecretsManagerAccess", "KMSSignAccess"]
-    assert statements["SecretsManagerAccess"]["Resource"] == FLAT_SECRET_ARN
-    assert statements["KMSSignAccess"]["Resource"] == "*"
-    assert all(
-        "sts:AssumeRole" not in statement["Action"] for statement in statements.values()
-    )
-
-
-def test_roles_are_in_the_callers_account_not_the_secrets():
-    secret_arn = (
-        f"arn:aws:secretsmanager:eu-west-2:{OTHER_ACCOUNT}:secret:"
-        "projects/example/example-grant-AbCdEf"
-    )
+@pytest.mark.parametrize(
+    "secret_arn",
+    [
+        SECRET_ARN,
+        f"{SECRET_PREFIX}test-api-key-AbCdEf",
+        f"{SECRET_PREFIX}projects/*/grant-AbCdEf",
+        f"arn:aws:secretsmanager:eu-west-2:{OTHER_ACCOUNT}:secret:projects/example/g",
+        "not-an-arn",
+    ],
+)
+def test_federation_grant_does_not_depend_on_the_secret(secret_arn: str):
     statements = _statements(_build_default_policy(secret_arn, ACCOUNT))
 
-    assert (
-        statements["PortunusFederationAssumeRole"]["Resource"]
-        == f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/*"
-    )
+    assert statements["SecretsManagerAccess"]["Resource"] == secret_arn
+    assert statements["PortunusFederationAssumeRole"]["Resource"] == FEDERATION_ROLES
 
 
 def test_federation_role_path_is_configurable():
@@ -74,52 +64,5 @@ def test_federation_role_path_is_configurable():
 
     assert (
         statements["PortunusFederationAssumeRole"]["Resource"]
-        == f"arn:aws:iam::{ACCOUNT}:role/custom-fed/projects/example/*"
+        == f"arn:aws:iam::{ACCOUNT}:role/custom-fed/*"
     )
-
-
-@pytest.mark.parametrize(
-    ("secret_name", "namespace"),
-    [
-        ("projects/example/example-grant-AbCdEf", "projects/example"),
-        ("users/some-user/grant/nested-AbCdEf", "users/some-user"),
-        ("teams/a-team/g", "teams/a-team"),
-        ("Type.1/a_b+c=d@e/grant-AbCdEf", "Type.1/a_b+c=d@e"),
-    ],
-)
-def test_namespace_is_the_first_two_segments_of_the_secret_name(
-    secret_name: str, namespace: str
-):
-    pattern = _federation_role_pattern(
-        SECRET_PREFIX + secret_name, ACCOUNT, "/portunus-fed/"
-    )
-
-    assert pattern == f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/{namespace}/*"
-
-
-@pytest.mark.parametrize(
-    "secret_name",
-    ["projects/*/grant-AbCdEf", "pro?jects/example/grant-AbCdEf", "*/*/grant"],
-)
-def test_wildcards_in_namespace_segments_are_rejected(secret_name: str):
-    with pytest.raises(ValueError, match="wildcard"):
-        _federation_role_pattern(SECRET_PREFIX + secret_name, ACCOUNT, "/portunus-fed/")
-
-
-@pytest.mark.parametrize(
-    "secret_arn",
-    [
-        f"{SECRET_PREFIX}test-api-key-AbCdEf",
-        f"{SECRET_PREFIX}projects/example-AbCdEf",
-        f"{SECRET_PREFIX}projects//grant-AbCdEf",
-        f"{SECRET_PREFIX}/projects/example/grant-AbCdEf",
-        SECRET_PREFIX,
-        "arn:aws:secretsmanager:eu-west-2:123456789012:projects/example/grant",
-        "not-an-arn",
-        "",
-    ],
-)
-def test_names_with_fewer_than_two_leading_segments_have_no_pattern(
-    secret_arn: str,
-):
-    assert _federation_role_pattern(secret_arn, ACCOUNT, "/portunus-fed/") is None
