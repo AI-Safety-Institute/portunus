@@ -20,25 +20,9 @@ NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 class TestEffectiveCacheTtl:
-    def test_defaults_to_cache_duration(self):
+    def test_cache_duration_caps_a_long_lived_token(self):
         ttl = effective_cache_ttl(
-            cache_duration=3600, credential_expiry_seconds=None, token_expires_at=None
-        )
-
-        assert ttl == 3600
-
-    def test_credential_expiry_caps_the_ttl(self):
-        ttl = effective_cache_ttl(
-            cache_duration=3600, credential_expiry_seconds=600, token_expires_at=None
-        )
-
-        assert ttl == 600
-
-    def test_cache_duration_caps_long_lived_credentials(self):
-        ttl = effective_cache_ttl(
-            cache_duration=3600,
-            credential_expiry_seconds=43200,
-            token_expires_at=None,
+            cache_duration=3600, token_expires_at=NOW + timedelta(days=1), now=NOW
         )
 
         assert ttl == 3600
@@ -46,39 +30,22 @@ class TestEffectiveCacheTtl:
     def test_token_expiry_less_margin_caps_the_ttl(self):
         ttl = effective_cache_ttl(
             cache_duration=86400,
-            credential_expiry_seconds=43200,
             token_expires_at=NOW + timedelta(seconds=3600),
             now=NOW,
         )
 
         assert ttl == 3600 - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
 
-    def test_credential_expiry_wins_over_a_longer_lived_token(self):
-        ttl = effective_cache_ttl(
-            cache_duration=86400,
-            credential_expiry_seconds=120,
-            token_expires_at=NOW + timedelta(seconds=3600),
-            now=NOW,
-        )
-
-        assert ttl == 120
-
     def test_token_inside_the_safety_margin_is_not_cached(self):
         ttl = effective_cache_ttl(
-            cache_duration=86400,
-            credential_expiry_seconds=None,
-            token_expires_at=NOW + timedelta(seconds=30),
-            now=NOW,
+            cache_duration=86400, token_expires_at=NOW + timedelta(seconds=30), now=NOW
         )
 
         assert ttl == 0
 
     def test_never_negative(self):
         ttl = effective_cache_ttl(
-            cache_duration=86400,
-            credential_expiry_seconds=None,
-            token_expires_at=NOW - timedelta(seconds=1),
-            now=NOW,
+            cache_duration=86400, token_expires_at=NOW - timedelta(seconds=1), now=NOW
         )
 
         assert ttl == 0
