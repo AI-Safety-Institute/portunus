@@ -62,11 +62,6 @@ _IAM_ROLE_ARN = re.compile(
     rf"(?P<path>/(?:{_IAM_PATH_SEGMENT}/)*)(?P<name>[\w+=,.@-]{{1,64}})$",
     re.ASCII,
 )
-# The path under the federation role prefix: exactly two segments naming the
-# namespace the role belongs to.
-_FEDERATION_NAMESPACE_PATH = re.compile(
-    rf"{_IAM_PATH_SEGMENT}/{_IAM_PATH_SEGMENT}/", re.ASCII
-)
 _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
 # STS tag values are [\p{L}\p{Z}\p{N}_.:/=+\-@]*. Role names, session names
 # and source identities may also contain ",", so a valid one is not always a
@@ -126,10 +121,9 @@ def validate_federation_role_arn(
 ) -> None:
     """Reject federation role ARNs outside the deployment's allowed set.
 
-    An accepted ARN is ``arn:aws:iam::<account>:role<prefix><namespace>/<name>``
-    where ``<namespace>`` is exactly two path segments and ``<name>`` an IAM
-    role name. The CLI scopes a payload's default session policy to the roles
-    of one namespace.
+    An accepted ARN is ``arn:aws:iam::<account>:role<prefix><name>`` where
+    ``<account>`` is allowed, ``<prefix>`` is ``role_path_prefix`` and
+    ``<name>`` is any further IAM path plus a role name.
 
     Args:
         arn: The secret's ``federation_role_arn``
@@ -137,10 +131,9 @@ def validate_federation_role_arn(
         role_path_prefix: IAM path the role must sit under
 
     Raises:
-        AuthenticationError: Malformed ARN, account not allowed, role path
-            outside ``role_path_prefix``, or not exactly two path segments
-            under it. Also when no accounts are allowed, which disables
-            minting entirely.
+        AuthenticationError: Malformed ARN, account not allowed, or role path
+            outside ``role_path_prefix``. Also when no accounts are allowed,
+            which disables minting entirely.
     """
     if not allowed_account_ids:
         raise AuthenticationError(
@@ -151,15 +144,9 @@ def validate_federation_role_arn(
         raise AuthenticationError("federation_role_arn is not an IAM role ARN")
     if match["account_id"] not in allowed_account_ids:
         raise AuthenticationError("federation_role_arn is not in an allowed account")
-    path = match["path"]
-    if not path.startswith(role_path_prefix):
+    if not match["path"].startswith(role_path_prefix):
         raise AuthenticationError(
             f"federation_role_arn is not under the {role_path_prefix} role path"
-        )
-    if not _FEDERATION_NAMESPACE_PATH.fullmatch(path[len(role_path_prefix) :]):
-        raise AuthenticationError(
-            "federation_role_arn must have exactly two path segments under the "
-            f"{role_path_prefix} role path"
         )
 
 
