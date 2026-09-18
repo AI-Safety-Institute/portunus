@@ -32,9 +32,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `FEDERATION_PROJECT_TAG_KEY` (defaults `portunus:user`,
   `portunus:principal`, `portunus:session`, `portunus:project`).
   `FEDERATION_STS_ENDPOINT_URL` is also new. Mint secrets reject unknown
-  fields. Minted results are cached until the earliest of `CACHE_DURATION`, the
-  caller's credential expiry and one minute before the token expires;
-  concurrent misses for one payload share a mint per process.
+  fields. Minted results are cached until the earlier of `CACHE_DURATION` and
+  one minute before the token expires; concurrent misses for one payload share
+  a mint per process.
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
   provider's token endpoint cannot be reached or answers 5xx/429, or when
   minting exceeds its 6 s deadline.

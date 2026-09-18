@@ -31,33 +31,23 @@ TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS = 60
 def effective_cache_ttl(
     *,
     cache_duration: int,
-    credential_expiry_seconds: Optional[int],
-    token_expires_at: Optional[datetime],
+    token_expires_at: datetime,
     now: Optional[datetime] = None,
 ) -> int:
-    """Seconds a cached auth result may live.
+    """Seconds a minted token may stay cached.
 
-    The smallest of the configured cache duration and whichever bounds are
-    given: the caller's remaining credential lifetime, and a minted token's
-    lifetime less ``TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS``. Never negative; 0
-    means do not cache.
+    The configured cache duration, or the token's lifetime less
+    ``TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS`` if that is shorter. Never negative;
+    0 means do not cache.
 
     Args:
         cache_duration: Configured maximum TTL
-        credential_expiry_seconds: Seconds until the caller's credentials
-            expire, or None to leave the TTL unbounded by them
-        token_expires_at: When a minted token expires, or None for stored keys
+        token_expires_at: When the token expires
         now: Reference time (defaults to the current UTC time)
     """
-    candidates = [cache_duration]
-    if credential_expiry_seconds is not None:
-        candidates.append(credential_expiry_seconds)
-    if token_expires_at is not None:
-        remaining = token_expires_at - (now or datetime.now(timezone.utc))
-        candidates.append(
-            int(remaining.total_seconds()) - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
-        )
-    return max(0, min(candidates))
+    remaining = token_expires_at - (now or datetime.now(timezone.utc))
+    token_ttl = int(remaining.total_seconds()) - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
+    return max(0, min(cache_duration, token_ttl))
 
 
 class CacheService:
