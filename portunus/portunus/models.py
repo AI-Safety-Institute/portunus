@@ -640,8 +640,8 @@ class GcpWifSecret(MintSecretBase):
     scopes: list[Annotated[str, Field(min_length=1)]] = Field(
         default=[GCP_CLOUD_PLATFORM_SCOPE], min_length=1
     )
-    # Minted tokens are cached until TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS (300 s)
-    # before expiry; a shorter lifetime would never be cached.
+    # The 600 s floor sits well above the cache margin
+    # (TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS), so a minted token is always cached.
     token_lifetime_seconds: int = Field(default=3600, ge=600, le=3600)
 
 
