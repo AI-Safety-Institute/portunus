@@ -20,10 +20,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the caller's credentials to obtain an STS web identity token and exchange
   it at the provider's `/v1/oauth/token` endpoint for a short-lived bearer
   token, returned with `output_header: authorization`. Federation role ARNs
-  must be `arn:aws:iam::<account>:role<prefix><namespace>/<name>` with
-  `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS` (new env var; unset disables
-  minting), `<prefix>` `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`)
-  and `<namespace>` exactly two path segments, e.g.
+  must be `arn:aws:iam::<account>:role<prefix><name>` with `<account>` in
+  `FEDERATION_ALLOWED_ACCOUNT_IDS` (new env var; unset disables minting) and
+  `<prefix>` `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`); `<name>`
+  is any further path plus the role name, e.g.
   `arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example`.
   The identity token carries four request tags: the user (the caller's STS
   source identity, else its IAM role name), the caller's IAM role name, its
@@ -38,13 +38,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
   provider's token endpoint cannot be reached or answers 5xx/429, or when
   minting exceeds its 6 s deadline.
-- The CLI's default session policy allows `sts:AssumeRole` on the federation
-  roles in the secret's namespace, taken from the first two path segments of
-  the secret's name: a secret named `projects/example/<name>` gets
-  `arn:aws:iam::<caller account>:role/portunus-fed/projects/example/*`
-  (`--federation-role-path` overrides the path). A secret with fewer than two
-  leading path segments gets no `sts:AssumeRole` statement; a namespace segment
-  containing `*` or `?` is rejected rather than widening the grant.
+- The CLI's default session policy allows `sts:AssumeRole` on every role under
+  the federation role path in the caller's account,
+  `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
+  overrides the path).
 - `/authorise` responses may carry `output_header` and `output_prefix`, letting
   the backend choose which upstream header receives the credential and with
   what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
