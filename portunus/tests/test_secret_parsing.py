@@ -7,7 +7,9 @@ import pytest
 
 from portunus.exceptions import AuthenticationError
 from portunus.models import (
+    GCP_CLOUD_PLATFORM_SCOPE,
     AnthropicWifSecret,
+    GcpWifSecret,
     SecretsManagerAuthPayload,
     SigningKey,
 )
@@ -25,6 +27,16 @@ WIF_SECRET = {
     "organization_id": "org_example",
     "service_account_id": "sa_example",
     "workspace_id": "ws_example",
+}
+GCP_SECRET = {
+    "type": "gcp_wif",
+    "host": "aiplatform.googleapis.com",
+    "federation_role_arn": ROLE_ARN,
+    "audience": (
+        "//iam.googleapis.com/projects/123456789/locations/global/"
+        "workloadIdentityPools/example-pool/providers/example-provider"
+    ),
+    "service_account": "example-sa@example-project.iam.gserviceaccount.com",
 }
 
 
@@ -123,9 +135,78 @@ class TestParseSecret:
         with pytest.raises(AuthenticationError):
             parse_secret(json.dumps(data))
 
+    def test_gcp_wif_secret(self):
+        secret = parse_secret(json.dumps(GCP_SECRET))
+
+        assert isinstance(secret, GcpWifSecret)
+        assert secret.host == "aiplatform.googleapis.com"
+        assert secret.federation_role_arn == ROLE_ARN
+        assert secret.audience == GCP_SECRET["audience"]
+        assert secret.service_account == GCP_SECRET["service_account"]
+        assert secret.scopes == [GCP_CLOUD_PLATFORM_SCOPE]
+        assert secret.token_lifetime_seconds == 3600
+
+    def test_gcp_wif_overrides(self):
+        raw = json.dumps(
+            {
+                **GCP_SECRET,
+                "scopes": ["https://www.googleapis.com/auth/generative-language"],
+                "token_lifetime_seconds": 900,
+            }
+        )
+
+        secret = parse_secret(raw)
+
+        assert isinstance(secret, GcpWifSecret)
+        assert secret.scopes == ["https://www.googleapis.com/auth/generative-language"]
+        assert secret.token_lifetime_seconds == 900
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"signing_key": {"provider_id": "key1", "kms_key_arn": "arn:kms"}},
+            {"token_duration_seconds": 600},
+            {"unknown": 1},
+        ],
+    )
+    def test_gcp_wif_rejects_unknown_fields(self, extra: dict):
+        with pytest.raises(AuthenticationError, match="invalid fields"):
+            parse_secret(json.dumps({**GCP_SECRET, **extra}))
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"audience": None},
+            {"audience": ""},
+            {"audience": "example-pool"},
+            {"audience": "https://iam.googleapis.com/projects/1/locations/global"},
+            {"service_account": None},
+            {"service_account": ""},
+            {"service_account": "not-an-email"},
+            {"service_account": "sa@example.com/../other"},
+            {"service_account": "sa@example.com:generateIdToken"},
+            {"service_account": "sa@example.com?x"},
+            {"service_account": "sa@example.com%3AgenerateIdToken"},
+            {"service_account": "sa%40example.com"},
+            {"host": ""},
+            {"federation_role_arn": None},
+            {"scopes": []},
+            {"scopes": [""]},
+            {"scopes": "https://www.googleapis.com/auth/cloud-platform"},
+            {"token_lifetime_seconds": 30},
+            {"token_lifetime_seconds": 599},
+            {"token_lifetime_seconds": 7200},
+        ],
+    )
+    def test_gcp_wif_missing_or_invalid_fields_raise(self, changes: dict):
+        data = {k: v for k, v in {**GCP_SECRET, **changes}.items() if v is not None}
+
+        with pytest.raises(AuthenticationError):
+            parse_secret(json.dumps(data))
+
     def test_unknown_type_raises(self):
         with pytest.raises(AuthenticationError):
-            parse_secret('{"type": "gcp_workload_identity", "host": "x"}')
+            parse_secret('{"type": "example_unknown", "host": "x"}')
 
     def test_validation_logs_omit_secret_contents(self, caplog):
         caplog.set_level(logging.INFO, logger="api.access")

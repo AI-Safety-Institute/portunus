@@ -607,10 +607,50 @@ class AnthropicWifSecret(MintSecretBase):
     audience: str = Field(default="https://api.anthropic.com", min_length=1)
 
 
-# Every secret shape. A new mint provider (e.g. gcp_wif)
-# subclasses MintSecretBase, joins this union, and gets an exchange branch in
+GCP_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+# Workload identity pool providers are always project-number scoped and global.
+GCP_POOL_PROVIDER_PATTERN = (
+    r"^//iam\.googleapis\.com/projects/\d+/locations/global/"
+    r"workloadIdentityPools/[^/\s]+/providers/[^/\s]+$"
+)
+# Email charset only; the value is URL-quoted into the impersonation URL path.
+GCP_SERVICE_ACCOUNT_PATTERN = r"^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$"
+
+
+class GcpWifSecret(MintSecretBase):
+    """Mint a Google service-account access token via workload identity federation.
+
+    The federation session's credentials sign an AWS ``GetCallerIdentity``
+    request, which Google STS exchanges for a federated token for
+    ``audience``; that token then impersonates ``service_account`` through the
+    IAM Credentials ``generateAccessToken`` API.
+
+    Attributes:
+        audience: Full resource name of the workload identity pool provider,
+            ``//iam.googleapis.com/projects/<number>/locations/global/``
+            ``workloadIdentityPools/<pool>/providers/<provider>``.
+        service_account: Email of the service account to impersonate.
+        scopes: OAuth scopes requested for the access token.
+        token_lifetime_seconds: Requested access token lifetime, 600-3600 s.
+    """
+
+    type: Literal["gcp_wif"]
+    audience: str = Field(pattern=GCP_POOL_PROVIDER_PATTERN)
+    service_account: str = Field(pattern=GCP_SERVICE_ACCOUNT_PATTERN)
+    scopes: list[Annotated[str, Field(min_length=1)]] = Field(
+        default=[GCP_CLOUD_PLATFORM_SCOPE], min_length=1
+    )
+    # The 600 s floor sits well above the cache margin
+    # (TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS), so a minted token is always cached.
+    token_lifetime_seconds: int = Field(default=3600, ge=600, le=3600)
+
+
+# Every secret shape. A new mint provider subclasses MintSecretBase, joins this
+# union, and gets an exchange adapter and a route in
 # services.federation_service.TokenMintService.
-SecretsManagerSecret = Union[SecretsManagerAuthPayload, AnthropicWifSecret]
+SecretsManagerSecret = Union[
+    SecretsManagerAuthPayload, AnthropicWifSecret, GcpWifSecret
+]
 TypedSecret = Annotated[SecretsManagerSecret, Field(discriminator="type")]
 """SecretsManagerSecret discriminated on ``type``, for validating JSON input."""
 
