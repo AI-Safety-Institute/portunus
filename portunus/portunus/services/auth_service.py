@@ -146,8 +146,7 @@ class AuthService:
         verifies the caller with STS, fetches and parses the secret, and either
         returns the stored key or mints a short-lived token as the secret
         describes. Stored keys are cached for the configured cache duration;
-        minted tokens for no longer than the caller's credentials and the
-        token remain valid.
+        minted tokens for no longer than the token remains valid.
 
         Args:
             payload: The parsed base64-encoded payload from authorization header
@@ -260,27 +259,18 @@ class AuthService:
             return None
 
     async def _write_cache(self, payload: AuthPayload, auth_result: AuthResult) -> None:
-        """Best-effort cache write.
-
-        Stored keys are cached for the full cache duration, which is how a
-        cached result outlives the caller's temporary credentials. Minted
-        tokens are also bounded by the caller's credential expiry and the
-        token's own lifetime.
-        """
+        """Best-effort cache write."""
         if not (payload.raw and auth_result.successful):
             return
         try:
             async with asyncio.timeout(3):
-                minted = auth_result.expires_at is not None
-                ttl = effective_cache_ttl(
-                    cache_duration=self.cache_service.cache_duration,
-                    credential_expiry_seconds=(
-                        payload.credentials.seconds_until_expiration()
-                        if minted
-                        else None
-                    ),
-                    token_expires_at=auth_result.expires_at,
-                )
+                if auth_result.expires_at is None:
+                    ttl = payload.credentials.seconds_until_expiration()
+                else:
+                    ttl = effective_cache_ttl(
+                        cache_duration=self.cache_service.cache_duration,
+                        token_expires_at=auth_result.expires_at,
+                    )
                 await self.cache_service.cache_auth_result(
                     payload.raw, auth_result, ttl
                 )

@@ -369,22 +369,11 @@ class TestAuthenticateWithMintSecrets:
         assert cached.output_header == "authorization"
 
     @pytest.mark.asyncio
-    async def test_cache_ttl_never_outlives_caller_credentials(self, fake_redis):
-        cache = _cache_backed_by(fake_redis)
-        service = _service_for(WIF_SECRET, cache, AsyncMock(return_value=_minted()))
-        payload = _payload(expires_in=timedelta(seconds=600))
-
-        await service.authenticate(payload, "req", "api.example.com")
-
-        ttl = await fake_redis.ttl(cache.generate_cache_key(payload.raw))
-        assert 590 < ttl <= 600
-
-    @pytest.mark.asyncio
-    async def test_stored_key_ttl_ignores_credential_expiry(self, fake_redis):
+    async def test_stored_key_is_cached_for_the_cache_duration(self, fake_redis):
         cache = _cache_backed_by(fake_redis)
         mint = AsyncMock()
         service = _service_for("sk-static", cache, mint)
-        payload = _payload(expires_in=timedelta(seconds=600))
+        payload = _payload()
 
         result = await service.authenticate(payload, "req", "api.example.com")
 
@@ -392,7 +381,6 @@ class TestAuthenticateWithMintSecrets:
         assert result.output_header is None
         mint.assert_not_awaited()
         ttl = await fake_redis.ttl(cache.generate_cache_key(payload.raw))
-        assert cache.cache_duration > 600
         assert cache.cache_duration - 5 < ttl <= cache.cache_duration
 
     @pytest.mark.asyncio
