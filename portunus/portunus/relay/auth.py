@@ -23,6 +23,9 @@ from portunus.services.auth_service import AuthService
 
 logger = logging.getLogger("api.access")
 
+# Upgrade-request header the auth payload is read from.
+AUTH_HEADER = "authorization"
+
 
 @dataclass
 class WsAuthResult:
@@ -76,7 +79,7 @@ async def authenticate_ws(
     Returns:
         WsAuthResult on success, None on failure (connection already closed).
     """
-    auth_header = websocket.headers.get("authorization", "")
+    auth_header = websocket.headers.get(AUTH_HEADER, "")
 
     if not auth_header:
         logger.warning(f"WS {request_id}: No authorization header")
