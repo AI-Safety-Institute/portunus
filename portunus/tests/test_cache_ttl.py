@@ -67,7 +67,7 @@ class TestEffectiveCacheTtl:
         ttl = effective_cache_ttl(
             cache_duration=86400,
             credential_expiry_seconds=None,
-            token_expires_at=NOW + timedelta(seconds=200),
+            token_expires_at=NOW + timedelta(seconds=30),
             now=NOW,
         )
 
