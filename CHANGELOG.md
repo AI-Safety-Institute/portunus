@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Secrets may describe a token to mint instead of holding a key. The
+  `anthropic_wif` type names a federation role, which Portunus assumes with
+  the caller's credentials to obtain an STS web identity token and exchange
+  it at the provider's `/v1/oauth/token` endpoint for a short-lived bearer
+  token, returned with `output_header: authorization`. Federation role ARNs
+  must be `arn:aws:iam::<account>:role<prefix><name>` with `<account>` in
+  `FEDERATION_ALLOWED_ACCOUNT_IDS` (new env var; unset disables minting) and
+  `<prefix>` `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`); `<name>`
+  is any further path plus the role name, e.g.
+  `arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example`.
+  The identity token carries four request tags: the user (the caller's STS
+  source identity, else its IAM role name), the caller's IAM role name, its
+  role session name and its project, under `FEDERATION_USER_TAG_KEY`,
+  `FEDERATION_PRINCIPAL_TAG_KEY`, `FEDERATION_SESSION_TAG_KEY` and
+  `FEDERATION_PROJECT_TAG_KEY` (defaults `portunus:user`,
+  `portunus:principal`, `portunus:session`, `portunus:project`).
+  `FEDERATION_STS_ENDPOINT_URL` is also new. Mint secrets reject unknown
+  fields, including `signing_key`:
+  request signing is not available for minted tokens. Minted results are
+  cached until the earlier of `CACHE_DURATION` and one minute before the
+  token expires; concurrent misses for one payload share a mint per
+  process.
+- `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
+  provider's token endpoint cannot be reached or answers 5xx/429, or when
+  minting exceeds its 6 s deadline.
+- The CLI's default session policy allows `sts:AssumeRole` on every role under
+  the federation role path in the caller's account,
+  `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
+  overrides the path).
 - `/authorise` responses may carry `output_header` and `output_prefix`, letting
   the backend choose which upstream header receives the credential and with
   what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
@@ -14,6 +43,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (#136)
 
 ### Changed
+- JSON secrets that carry a `type` are validated strictly against that type
+  and rejected on failure. JSON without a `type` keeps the previous
+  behaviour (stored key, or used verbatim when it matches no schema).
 - The proxy removes the header the auth payload arrived in (`API_KEY_HEADER`)
   from the upstream request and sets the header the credential is written to
   (`output_header`, else `API_KEY_HEADER`); when both name the same header this
@@ -29,6 +61,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   forwarding and logging rules. (#136)
 
 ### Fixed
+- A JSON secret that failed schema validation was logged with the pydantic
+  error, which embeds the secret's contents. Only field paths and error
+  types are logged now.
 - The WebSocket relay forwarded the proxy's shared-secret header
   (`PORTUNUS_API_KEY_HEADER`, default `x-api-key`), which Envoy adds to every
   upgrade request it routes to Portunus, to the upstream and included it in the

@@ -22,6 +22,7 @@ from portunus.exceptions import (
     CredentialsError,
     FetchSecretError,
     PayloadError,
+    UpstreamServiceError,
 )
 from portunus.logging import LoggingMiddleware
 from portunus.models import (
@@ -125,7 +126,8 @@ async def authorise(
         401: Unauthorized - invalid payload or credentials
         403: Forbidden - AWS permissions error accessing the secret
         500: Internal server error
-        503: Service unavailable - authorization timed out (backend overloaded)
+        503: Service unavailable - a dependency could not be reached, or the
+            request timed out
     """
     segment = xray_service.recorder.current_segment()
     trace_id = segment.trace_id if segment else "No-Trace-Id"
@@ -231,6 +233,9 @@ async def authorise(
         return ErrorResponse(message=e.message, debug_id=trace_id)
     except FetchSecretError as e:
         response.status_code = e.http_status_code
+        return ErrorResponse(message=e.message, debug_id=trace_id)
+    except UpstreamServiceError as e:
+        response.status_code = 503
         return ErrorResponse(message=e.message, debug_id=trace_id)
     except TimeoutError as e:
         reason = str(e) or "request deadline exceeded"
@@ -608,6 +613,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Redis connections")
     await state_service.close_redis_client()
     logger.info("Redis connections closed")
+    await auth_service.mint_service.aclose()
 
 
 portunus = FastAPI(title="Portunus", lifespan=lifespan)

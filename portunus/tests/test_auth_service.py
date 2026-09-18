@@ -1,15 +1,37 @@
 """Tests for the authentication service, including credential error handling."""
 
+import asyncio
+import base64
+import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import fakeredis.aioredis
 import pytest
+import pytest_asyncio
 import redis.exceptions
 from botocore.exceptions import ClientError
 
-from portunus.exceptions import CredentialsError
-from portunus.models import AuthPayload, AuthResult, AwsCredentials, PrincipalInfo
+from portunus.exceptions import (
+    AuthenticationError,
+    CredentialsError,
+    UpstreamServiceError,
+)
+from portunus.models import (
+    AnthropicWifSecret,
+    AuthPayload,
+    AuthResult,
+    AwsCredentials,
+    PrincipalInfo,
+    SecretsManagerAuthPayload,
+)
 from portunus.services.auth_service import AuthService
-from portunus.services.cache_service import CacheService
+from portunus.services.cache_service import (
+    TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS,
+    CacheService,
+)
+from portunus.services.federation_service import MintedToken
+from portunus.services.state_service import StateService
 
 
 @pytest.fixture
@@ -59,6 +81,13 @@ def install_sts_client(auth_service, arn=PRINCIPAL_ARN):
     mock_sts_client.__aenter__ = AsyncMock(return_value=mock_sts_client)
     mock_sts_client.__aexit__ = AsyncMock(return_value=None)
     auth_service.boto_session.create_client = MagicMock(return_value=mock_sts_client)
+
+
+def test_default_mint_service_shares_the_secrets_boto_session(auth_service):
+    assert (
+        auth_service.mint_service.sts.boto_session
+        is auth_service.secrets_service.boto_session
+    )
 
 
 class TestGetAwsIdentity:
@@ -188,9 +217,8 @@ class TestAuthenticateCacheRead:
         auth_service.secrets_service.fetch_secret = AsyncMock(
             return_value='{"api_key": "sk-live"}'
         )
-        auth_service.validation_service.validate_and_extract_api_key.return_value = (
-            "sk-live",
-            None,
+        auth_service.validation_service.validate_secret.return_value = (
+            SecretsManagerAuthPayload(secret="sk-live")
         )
 
         result = await auth_service.authenticate(payload, "req-id")
@@ -223,3 +251,214 @@ class TestAuthenticateCacheRead:
 
         secrets_service.boto_session.create_client.assert_not_called()
         secrets_service.fetch_secret.assert_not_called()
+
+
+ROLE_ARN = "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example"  # noqa: E501
+WIF_SECRET = json.dumps(
+    {
+        "type": "anthropic_wif",
+        "host": "api.example.com",
+        "federation_role_arn": ROLE_ARN,
+        "federation_rule_id": "fr_example",
+        "organization_id": "org_example",
+        "service_account_id": "sa_example",
+        "workspace_id": "ws_example",
+    }
+)
+CALLER = PrincipalInfo(
+    arn="arn:aws:sts::123456789012:assumed-role/UserProfile_TestUser_example/s",
+    account_id="123456789012",
+    principal="assumed-role/UserProfile_TestUser_example",
+    session_name="s",
+    project="example",
+)
+
+
+def _payload(expires_in: timedelta = timedelta(hours=12)) -> AuthPayload:
+    data = {
+        "credentials": {
+            "access_key_id": "AKIATEST",
+            "secret_access_key": "SECRETTEST",
+            "session_token": "TESTTOKEN",
+        },
+        "expiration": (datetime.now(timezone.utc) + expires_in).isoformat(),
+        "secret_arn": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:key",
+    }
+    return AuthPayload.from_contents(
+        base64.b64encode(json.dumps(data).encode()).decode()
+    )
+
+
+def _cache_backed_by(client: fakeredis.aioredis.FakeRedis) -> CacheService:
+    state_service = MagicMock(spec=StateService)
+    state_service.acquire_redis_connection = AsyncMock(return_value=client)
+    return CacheService(state_service=state_service)
+
+
+@pytest_asyncio.fixture
+async def fake_redis():
+    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    yield client
+    await client.aclose()
+
+
+def _service_for(raw_secret: str, cache: CacheService, mint: AsyncMock) -> AuthService:
+    """An AuthService whose STS identity and secret fetch are canned."""
+    sts_client = AsyncMock()
+    sts_client.get_caller_identity = AsyncMock(return_value={"Arn": CALLER.arn})
+    sts_client.__aenter__ = AsyncMock(return_value=sts_client)
+    sts_client.__aexit__ = AsyncMock(return_value=None)
+    boto_session = MagicMock()
+    boto_session.create_client = MagicMock(return_value=sts_client)
+    secrets_service = MagicMock(boto_session=boto_session)
+    secrets_service.fetch_secret = AsyncMock(return_value=raw_secret)
+    mint_service = MagicMock()
+    mint_service.mint = mint
+    return AuthService(
+        secrets_service=secrets_service,
+        cache_service=cache,
+        mint_service=mint_service,
+    )
+
+
+def _minted(token: str = "sk-ant-oat01-example") -> MintedToken:
+    return MintedToken(
+        token=token, expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
+    )
+
+
+class TestAuthenticateWithMintSecrets:
+    @pytest.mark.asyncio
+    async def test_mint_secret_yields_a_bearer_result(self, fake_redis):
+        cache = _cache_backed_by(fake_redis)
+        mint = AsyncMock(return_value=_minted())
+        service = _service_for(WIF_SECRET, cache, mint)
+        payload = _payload()
+
+        result = await service.authenticate(payload, "req", "api.example.com")
+
+        assert result.api_key == "sk-ant-oat01-example"
+        assert result.signing_key is None
+        assert result.output_header == "authorization"
+        assert result.output_prefix == "Bearer "
+        assert result.expires_at == mint.return_value.expires_at
+        assert result.principal_info == CALLER
+        mint.assert_awaited_once()
+        credentials, principal, secret = mint.await_args_list[0].args
+        assert credentials is payload.credentials
+        assert principal == CALLER
+        assert isinstance(secret, AnthropicWifSecret)
+        assert secret.federation_role_arn == ROLE_ARN
+
+    @pytest.mark.asyncio
+    async def test_minted_result_is_cached_until_shortly_before_expiry(
+        self, fake_redis
+    ):
+        cache = _cache_backed_by(fake_redis)
+        service = _service_for(WIF_SECRET, cache, AsyncMock(return_value=_minted()))
+        payload = _payload()
+
+        await service.authenticate(payload, "req", "api.example.com")
+
+        ttl = await fake_redis.ttl(cache.generate_cache_key(payload.raw))
+        assert 3600 - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS - 5 < ttl
+        assert ttl <= 3600 - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
+        cached = await cache.get_cached_auth_result(payload.raw)
+        assert cached is not None
+        assert cached.api_key == "sk-ant-oat01-example"
+        assert cached.output_header == "authorization"
+
+    @pytest.mark.asyncio
+    async def test_stored_key_is_cached_for_the_cache_duration(self, fake_redis):
+        cache = _cache_backed_by(fake_redis)
+        mint = AsyncMock()
+        service = _service_for("sk-static", cache, mint)
+        payload = _payload()
+
+        result = await service.authenticate(payload, "req", "api.example.com")
+
+        assert result.api_key == "sk-static"
+        assert result.output_header is None
+        mint.assert_not_awaited()
+        ttl = await fake_redis.ttl(cache.generate_cache_key(payload.raw))
+        assert cache.cache_duration - 5 < ttl <= cache.cache_duration
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_share_one_mint(self, fake_redis):
+        cache = _cache_backed_by(fake_redis)
+
+        async def slow_mint(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return _minted()
+
+        mint = AsyncMock(side_effect=slow_mint)
+        service = _service_for(WIF_SECRET, cache, mint)
+        payload = _payload()
+
+        results = await asyncio.gather(
+            *(
+                service.authenticate(payload, f"req-{i}", "api.example.com")
+                for i in range(5)
+            )
+        )
+
+        assert mint.await_count == 1
+        assert {result.api_key for result in results} == {"sk-ant-oat01-example"}
+
+    @pytest.mark.asyncio
+    async def test_distinct_payloads_mint_independently(self, fake_redis):
+        cache = _cache_backed_by(fake_redis)
+        mint = AsyncMock(side_effect=lambda *a, **k: _minted())
+        service = _service_for(WIF_SECRET, cache, mint)
+
+        await asyncio.gather(
+            service.authenticate(_payload(timedelta(hours=1)), "a", "api.example.com"),
+            service.authenticate(_payload(timedelta(hours=2)), "b", "api.example.com"),
+        )
+
+        assert mint.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_host_mismatch_is_rejected_before_minting(self, fake_redis):
+        mint = AsyncMock(return_value=_minted())
+        service = _service_for(WIF_SECRET, _cache_backed_by(fake_redis), mint)
+
+        with pytest.raises(AuthenticationError):
+            await service.authenticate(_payload(), "req", "api.other.example")
+
+        mint.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mint_failure_surfaces_as_authentication_error(self, fake_redis):
+        mint = AsyncMock(side_effect=AuthenticationError("Token exchange failed"))
+        cache = _cache_backed_by(fake_redis)
+        service = _service_for(WIF_SECRET, cache, mint)
+        payload = _payload()
+
+        with pytest.raises(AuthenticationError, match="Token exchange failed"):
+            await service.authenticate(payload, "req", "api.example.com")
+
+        assert await cache.get_cached_auth_result(payload.raw) is None
+
+    @pytest.mark.asyncio
+    async def test_expired_credentials_during_mint_surface_as_credentials_error(
+        self, fake_redis
+    ):
+        mint = AsyncMock(side_effect=CredentialsError("AWS credentials have expired"))
+        service = _service_for(WIF_SECRET, _cache_backed_by(fake_redis), mint)
+
+        with pytest.raises(CredentialsError):
+            await service.authenticate(_payload(), "req", "api.example.com")
+
+    @pytest.mark.asyncio
+    async def test_upstream_failure_during_mint_passes_through_unchanged(
+        self, fake_redis
+    ):
+        error = UpstreamServiceError("STS is unavailable")
+        mint = AsyncMock(side_effect=error)
+        service = _service_for(WIF_SECRET, _cache_backed_by(fake_redis), mint)
+
+        with pytest.raises(UpstreamServiceError) as exc_info:
+            await service.authenticate(_payload(), "req", "api.example.com")
+
+        assert exc_info.value is error

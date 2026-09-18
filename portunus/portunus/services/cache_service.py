@@ -8,6 +8,7 @@ and retrieving authentication responses in Redis.
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -19,6 +20,34 @@ from portunus.services.state_service import StateService
 from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
+
+# Minted tokens leave the cache this long before they expire. Auth is checked
+# when a request begins, not for its duration, so the margin only has to cover
+# clock skew and the latency between authorisation and the request reaching
+# the provider.
+TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS = 60
+
+
+def effective_cache_ttl(
+    *,
+    cache_duration: int,
+    token_expires_at: datetime,
+    now: Optional[datetime] = None,
+) -> int:
+    """Seconds a minted token may stay cached.
+
+    The configured cache duration, or the token's lifetime less
+    ``TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS`` if that is shorter. Never negative;
+    0 means do not cache.
+
+    Args:
+        cache_duration: Configured maximum TTL
+        token_expires_at: When the token expires
+        now: Reference time (defaults to the current UTC time)
+    """
+    remaining = token_expires_at - (now or datetime.now(timezone.utc))
+    token_ttl = int(remaining.total_seconds()) - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
+    return max(0, min(cache_duration, token_ttl))
 
 
 class CacheService:
@@ -96,12 +125,16 @@ class CacheService:
                     else None
                 )
 
+                expires_at = auth_response.get("expires_at")
                 return AuthResult(
                     api_key=auth_response["api_key"],
                     signing_key=signing_key,
                     principal_info=principal_info,
                     output_header=auth_response.get("output_header"),
                     output_prefix=auth_response.get("output_prefix"),
+                    expires_at=(
+                        datetime.fromisoformat(expires_at) if expires_at else None
+                    ),
                 )
 
             logger.info(f"Cache miss for key {cache_key[:8]}...")
@@ -125,6 +158,7 @@ class CacheService:
         ttl_seconds: Optional[int] = None,
         output_header: Optional[str] = None,
         output_prefix: Optional[str] = None,
+        expires_at: Optional[datetime] = None,
     ) -> bool:
         """
         Cache an authentication response including API key and principal info.
@@ -137,6 +171,7 @@ class CacheService:
             ttl_seconds: Optional TTL override
             output_header: Upstream header that should carry the credential
             output_prefix: Prefix for the credential value
+            expires_at: When a minted credential expires
 
         Returns:
             True if successfully cached, False otherwise.
@@ -171,6 +206,7 @@ class CacheService:
                 "signing_key": signing_key.to_dict() if signing_key else None,
                 "output_header": output_header,
                 "output_prefix": output_prefix,
+                "expires_at": expires_at.isoformat() if expires_at else None,
             }
 
             result = await client.setex(
@@ -214,6 +250,7 @@ class CacheService:
             ttl_seconds,
             output_header=auth_result.output_header,
             output_prefix=auth_result.output_prefix,
+            expires_at=auth_result.expires_at,
         )
 
     @capture_async()
