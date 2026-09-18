@@ -21,9 +21,11 @@ from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
-# Minted tokens leave the cache this long before they expire, so a cached
-# token is never handed out with only seconds of validity left.
-TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS = 300
+# Minted tokens leave the cache this long before they expire. Auth is checked
+# when a request begins, not for its duration, so the margin only has to cover
+# clock skew and the latency between authorisation and the request reaching
+# the provider.
+TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS = 60
 
 
 def effective_cache_ttl(
