@@ -29,7 +29,7 @@ proxy/
    - Extracts auth payload from header
    - Calls Portunus `/authorise` endpoint (with caching)
    - Retrieves real API key from response
-   - Sets the upstream auth header (the response's `output_header`, else `API_KEY_HEADER`) to the real API key and removes the other `KNOWN_AUTH_HEADERS`
+   - Sets the upstream auth header (the response's `output_header`, else `API_KEY_HEADER`) to the real API key and removes the inbound `API_KEY_HEADER` when it differs; every other header passes through
    - Optionally signs request (Anthropic signature format)
 3. **Envoy** forwards modified request to target API
 4. **Target API** processes request with real credentials
