@@ -2,7 +2,7 @@
 
 ## Overview
 This repo implements a secure API key proxy system with two main components:
-- **Proxy**: Envoy-based reverse proxy that forwards API requests with optional request signing
+- **Proxy**: Envoy-based reverse proxy that forwards API requests
 - **Portunus**: FastAPI service that handles API key management, authorization, and Redis-based caching
 
 ## Key Functionality

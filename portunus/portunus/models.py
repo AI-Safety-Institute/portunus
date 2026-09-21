@@ -552,7 +552,6 @@ class SecretsManagerAuthPayload(BaseModel):
 
     api_key: Annotated[str, Field(alias="secret")]
     host: Optional[str] = None
-    signing_key: Optional[SigningKey] = None
 
     @classmethod
     def from_string(cls, input: str) -> SecretsManagerAuthPayload:
@@ -573,25 +572,11 @@ class SecretsManagerAuthPayload(BaseModel):
 
 
 @dataclass
-class SigningKey:
-    provider_id: str
-    """The id the provider assigned to this key.
-
-    We pass this so the lab knows which public key this request was signed with"""
-    kms_key_arn: str
-    "Our KMS key to sign requests with"
-
-    def to_dict(self) -> dict[str, str]:
-        return asdict(self)
-
-
-@dataclass
 class AuthResult:
     """Result of an authentication operation.
 
     Attributes:
         api_key (str): The API key retrieved from Secrets Manager
-        signing_key: Request signing key details, if the secret carries one
         principal_info (PrincipalInfo): Information about the authenticated principal
         output_header: Upstream header that should carry the credential. None
             means the proxy's configured header.
@@ -600,7 +585,6 @@ class AuthResult:
     """
 
     api_key: str
-    signing_key: Optional[SigningKey]
     principal_info: PrincipalInfo
     output_header: Optional[str] = None
     output_prefix: Optional[str] = None
@@ -620,7 +604,6 @@ class AuthResult:
 
         return cls(
             api_key=data.get("api_key", ""),
-            signing_key=data.get("signing_key", None),
             principal_info=principal_info,
             output_header=data.get("output_header"),
             output_prefix=data.get("output_prefix"),

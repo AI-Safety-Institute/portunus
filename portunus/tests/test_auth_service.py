@@ -143,7 +143,6 @@ class TestAuthenticateCacheRead:
         """A cache hit returns the cached result without calling AWS."""
         auth_service.cache_service.get_cached_auth_result.return_value = AuthResult(
             api_key="sk-cached",
-            signing_key=None,
             principal_info=PrincipalInfo(arn=PRINCIPAL_ARN, account_id="123456789012"),
         )
         auth_service.boto_session.create_client = MagicMock()
@@ -189,8 +188,7 @@ class TestAuthenticateCacheRead:
             return_value='{"api_key": "sk-live"}'
         )
         auth_service.validation_service.validate_and_extract_api_key.return_value = (
-            "sk-live",
-            None,
+            "sk-live"
         )
 
         result = await auth_service.authenticate(payload, "req-id")

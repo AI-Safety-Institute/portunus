@@ -14,7 +14,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
 from portunus.exceptions import CacheError
-from portunus.models import AuthResult, PrincipalInfo, SigningKey
+from portunus.models import AuthResult, PrincipalInfo
 from portunus.services.state_service import StateService
 from portunus.services.xray_service import capture_async
 
@@ -63,7 +63,8 @@ class CacheService:
 
         Returns:
             AuthResult if found, None otherwise. Entries written before
-            output_header/output_prefix existed load with both set to None.
+            output_header/output_prefix existed load with both set to None;
+            a legacy signing_key entry is ignored.
 
         Raises:
             redis.exceptions.TimeoutError: If the Redis read times out.
@@ -86,19 +87,8 @@ class CacheService:
                     auth_response["principal_info"]
                 )
 
-                signing_key_data = auth_response.get("signing_key")
-                signing_key = (
-                    SigningKey(
-                        provider_id=signing_key_data["provider_id"],
-                        kms_key_arn=signing_key_data["kms_key_arn"],
-                    )
-                    if signing_key_data is not None
-                    else None
-                )
-
                 return AuthResult(
                     api_key=auth_response["api_key"],
-                    signing_key=signing_key,
                     principal_info=principal_info,
                     output_header=auth_response.get("output_header"),
                     output_prefix=auth_response.get("output_prefix"),
@@ -120,7 +110,6 @@ class CacheService:
         self,
         payload: str,
         api_key: str,
-        signing_key: Optional[SigningKey],
         principal_info: PrincipalInfo,
         ttl_seconds: Optional[int] = None,
         output_header: Optional[str] = None,
@@ -132,7 +121,6 @@ class CacheService:
         Args:
             payload: The payload to use as a cache key.
             api_key: The API key to cache.
-            signing_key: The request signing key details for this api key.
             principal_info: Principal information to cache and log.
             ttl_seconds: Optional TTL override
             output_header: Upstream header that should carry the credential
@@ -168,7 +156,6 @@ class CacheService:
             auth_response = {
                 "api_key": api_key,
                 "principal_info": principal_info_dict,
-                "signing_key": signing_key.to_dict() if signing_key else None,
                 "output_header": output_header,
                 "output_prefix": output_prefix,
             }
@@ -209,7 +196,6 @@ class CacheService:
         return await self.cache_auth_response(
             payload,
             auth_result.api_key,
-            auth_result.signing_key,
             auth_result.principal_info,
             ttl_seconds,
             output_header=auth_result.output_header,
@@ -221,7 +207,6 @@ class CacheService:
         self,
         payload: str,
         api_key: str,
-        signing_key: Optional[SigningKey],
         principal_info: PrincipalInfo,
     ) -> bool:
         """
@@ -230,15 +215,12 @@ class CacheService:
         Args:
             payload: The payload to use as a cache key.
             api_key: The API key to cache.
-            signing_key: The request signing key details for this api key.
             principal_info: Principal information to cache and log.
 
         Returns:
             True if successfully cached, False otherwise.
         """
-        return await self.cache_auth_response(
-            payload, api_key, signing_key, principal_info
-        )
+        return await self.cache_auth_response(payload, api_key, principal_info)
 
     @capture_async()
     async def invalidate_cache_entry(self, payload: str) -> bool:

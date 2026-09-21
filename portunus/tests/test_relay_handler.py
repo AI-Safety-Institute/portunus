@@ -51,7 +51,6 @@ def auth_result():
     """Create a test AuthResult."""
     return AuthResult(
         api_key="sk-test-key",
-        signing_key=None,
         principal_info=PrincipalInfo(
             arn="arn:aws:sts::123:assumed-role/TestRole/session",
             account_id="123",

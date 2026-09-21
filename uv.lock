@@ -207,9 +207,6 @@ wheels = [
 ]
 
 [package.optional-dependencies]
-kms = [
-    { name = "mypy-boto3-kms" },
-]
 secretsmanager = [
     { name = "mypy-boto3-secretsmanager" },
 ]
@@ -681,15 +678,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mypy-boto3-kms"
-version = "1.43.12"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/56/a5/a63234e7787019443c52f720afea57cf1a1d22a6e8e077b3c6a3916fdd98/mypy_boto3_kms-1.43.12.tar.gz", hash = "sha256:a4d23f018422a79bc4a886676f63eba548a98b06f5dcd0395e424d7c472eb340", size = 30688, upload-time = "2026-05-20T20:01:23.801Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/36/17/9d36757acee0987ef78220d1868f1ceb0cf458928444f5a81e98a4de3b44/mypy_boto3_kms-1.43.12-py3-none-any.whl", hash = "sha256:4a74f7b4aa9fcce9a1021ad2586059f2374a4b89baa251e57e6acc16282fd782", size = 39009, upload-time = "2026-05-20T20:01:20.104Z" },
-]
-
-[[package]]
 name = "mypy-boto3-secretsmanager"
 version = "1.43.0"
 source = { registry = "https://pypi.org/simple" }
@@ -816,7 +804,7 @@ dependencies = [
 dev = [
     { name = "aiobotocore" },
     { name = "aws-xray-sdk" },
-    { name = "boto3-stubs", extra = ["kms", "secretsmanager"] },
+    { name = "boto3-stubs", extra = ["secretsmanager"] },
     { name = "fakeredis" },
     { name = "freezegun" },
     { name = "moto" },
@@ -840,7 +828,7 @@ requires-dist = [{ name = "portunus", editable = "portunus" }]
 dev = [
     { name = "aiobotocore", specifier = ">=2.24.1,<3" },
     { name = "aws-xray-sdk", specifier = ">=2.14.0,<3" },
-    { name = "boto3-stubs", extras = ["secretsmanager", "kms"], specifier = ">=1.43.67,<2" },
+    { name = "boto3-stubs", extras = ["secretsmanager"], specifier = ">=1.43.67,<2" },
     { name = "fakeredis", specifier = ">=2.37.0,<3" },
     { name = "freezegun", specifier = ">=1.5.0,<2" },
     { name = "moto", specifier = ">=5.1.13,<6" },
