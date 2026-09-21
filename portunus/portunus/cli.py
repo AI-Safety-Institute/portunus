@@ -21,12 +21,6 @@ DEFAULT_POLICY_TEMPLATE = {
             "Action": ["secretsmanager:GetSecretValue"],
             "Resource": "{secret_arn}",
         },
-        {
-            "Sid": "KMSSignAccess",
-            "Effect": "Allow",
-            "Action": ["kms:Sign"],
-            "Resource": "*",
-        },
     ],
 }
 
@@ -57,7 +51,7 @@ def encode_credentials(secret_arn: str, policy: str | None = None) -> str:
     Args:
         secret_arn: The ARN of the secret in AWS Secrets Manager.
         policy: Optional IAM session policy JSON string. If None, uses the
-            default policy (secretsmanager:GetSecretValue + kms:Sign).
+            default policy (secretsmanager:GetSecretValue on the secret).
 
     Returns:
         Base64-encoded payload suitable for the Authorization header.

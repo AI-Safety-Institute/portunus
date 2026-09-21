@@ -1,6 +1,6 @@
-# ---- Builder: compile the Lua rocks and fetch yq ----
-# Kept on the same Envoy base so the compiled rock (sha2.so) is ABI-compatible
-# with the runtime image's embedded LuaJIT.
+# ---- Builder: install the Lua rocks and fetch yq ----
+# Kept on the same Envoy base so luarocks targets the Lua 5.1 layout the
+# runtime image's embedded LuaJIT searches.
 FROM envoyproxy/envoy:v1.38.4@sha256:447f857a01460642ef08ca2ab51136a44b9101fc2fa6bca2d1ae534466fa62f5 AS builder
 
 # luarocks (and the C toolchain its recommends pull in) builds the native rocks;
@@ -36,10 +36,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gettext-base wget && \
     rm -rf /var/lib/apt/lists/*
 
-# Bring over the built Lua modules (Envoy's embedded LuaJIT finds them on its
-# default /usr/local/{share,lib}/lua/5.1 search paths) and the yq binary.
+# Bring over the installed Lua modules (Envoy's embedded LuaJIT finds them on
+# its default /usr/local/share/lua/5.1 search path) and the yq binary. Every
+# rock is pure Lua, so there is no /usr/local/lib/lua/5.1 to copy.
 COPY --from=builder /usr/local/share/lua/5.1/ /usr/local/share/lua/5.1/
-COPY --from=builder /usr/local/lib/lua/5.1/ /usr/local/lib/lua/5.1/
 COPY --from=builder /usr/bin/yq /usr/bin/yq
 
 # Copy the Envoy configuration files
