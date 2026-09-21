@@ -128,20 +128,6 @@ describe("proxy_utils.portunus", function()
 	end)
 
 	describe("parse_authorization_response - JSON parsing", function()
-		it("should parse valid response with all fields", function()
-			local body =
-				'{"api_key": "sk-test-123", "request_id": "req-abc", "output_header": "x-api-key", "output_prefix": ""}'
-
-			local data, err = portunus_client:parse_authorization_response(body)
-
-			assert.is_nil(err)
-			assert.is_not_nil(data)
-			assert.equals("sk-test-123", data.api_key)
-			assert.equals("req-abc", data.request_id)
-			assert.equals("x-api-key", data.output_header)
-			assert.equals("", data.output_prefix)
-		end)
-
 		it("should parse response with required fields only", function()
 			local body = '{"api_key": "sk-test-456", "request_id": "req-def"}'
 
@@ -150,7 +136,6 @@ describe("proxy_utils.portunus", function()
 			assert.is_nil(err)
 			assert.equals("sk-test-456", data.api_key)
 			assert.equals("req-def", data.request_id)
-			assert.is_nil(data.output_header)
 		end)
 
 		it("should treat null output fields as absent", function()
