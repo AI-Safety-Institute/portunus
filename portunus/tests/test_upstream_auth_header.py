@@ -226,3 +226,29 @@ class TestAuthoriseEndpoint:
         body = response.json()
         assert body["output_header"] == "x-goog-api-key"
         assert body["output_prefix"] == ""
+
+    @pytest.mark.asyncio
+    async def test_legacy_signable_request_is_ignored(self, client, mock_xray):
+        """Proxies from before signing was removed still send signable_request."""
+        body = {
+            **AUTHORISE_BODY,
+            "signable_request": {
+                "type": "anthropic",
+                "content_digest": "sha-256=:abc:",
+                "content_type": "application/json",
+                "method": "POST",
+                "url": "https://api.example.com/v1/messages",
+            },
+        }
+        with (
+            patch("portunus.app.auth_service") as auth_service,
+            patch("portunus.app.publish_service") as publish_service,
+        ):
+            auth_service.authenticate = AsyncMock(return_value=_auth_result())
+            publish_service.publish_metadata = AsyncMock()
+
+            response = await client.post("/authorise", json=body)
+
+        assert response.status_code == 200
+        assert "signature" not in response.json()
+        assert "signature_input" not in response.json()
