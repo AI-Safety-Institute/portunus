@@ -2,7 +2,6 @@
 # ruff: noqa: E501
 import base64
 import json
-import re
 import time
 import uuid
 
@@ -205,9 +204,14 @@ def test_credential_headers_are_not_logged(
     ],
     indirect=True,
 )
-def test_request_signs_correctly(
+def test_secret_with_legacy_signing_key_is_forwarded_unsigned(
     api_key_prefix: str, api_key_header: str, docker_setup: str
 ):
+    """Secrets written for the removed request-signing feature still work.
+
+    The signing_key field is ignored: the request is forwarded with the API key
+    and none of the RFC 9421 headers.
+    """
     payload = encode_base64({"credentials": {}, "secret_arn": ""})
     response = requests.post(
         "http://localhost:8888/post",
@@ -216,46 +220,11 @@ def test_request_signs_correctly(
     )
 
     assert response.status_code == 200, response.content
-    response_data = response.json()
-    assert (
-        response_data["headers"]["Content-Digest"]
-        == "sha-256=:qEP36VVnZHuLid25my9AS/iuzXwq1eIKa5at9nJrcZc=:"
-    )
-    # cannot easily test exact signature as:
-    # 1. signature changes with timestamp & we're running the app via docker here
-    # 2. we generate a new localstack KMS key on each test run
-    assert "sig1=:" in response_data["headers"]["Signature"]
-    assert len(response_data["headers"]["Signature"]) > 32
-    assert (
-        re.match(
-            r'^sig1=\("@method" "@target-uri" "content-digest" "content-type" "x-api-key"\);created=\d+;keyid="signingkey_1234abcd";alg="ecdsa-p256-sha256"$',
-            response_data["headers"]["Signature-Input"],
-        )
-        is not None
-    )
-
-
-def test_request_without_signing(
-    api_key_prefix: str, api_key_header: str, docker_setup: str
-):
-    """Test that requests don't get Signature header when signing is disabled."""
-    payload = encode_base64({"credentials": {}, "secret_arn": ""})
-    response = requests.post(
-        "http://localhost:8888/post",
-        headers={api_key_header: f"{api_key_prefix}{payload}"},
-        json={"key3": "value3", "key1": "value1", "key2": "value2"},
-    )
-
-    assert response.status_code == 200, response.content
-    response_data = response.json()
-
-    # Verify /authorise endpoint was hit
-    assert "Authorization" in response_data["headers"]
-    assert response_data["headers"]["Authorization"] == api_key_prefix + docker_setup
-
-    # Verify that no signing headers are present when signing is disabled
-    assert "Signature" not in response_data["headers"]
-    assert "Signature-Input" not in response_data["headers"]
+    headers = response.json()["headers"]
+    assert headers["Authorization"] == api_key_prefix + "xyz"
+    assert "Content-Digest" not in headers
+    assert "Signature" not in headers
+    assert "Signature-Input" not in headers
 
 
 def test_401_passthrough_for_missing_credentials(

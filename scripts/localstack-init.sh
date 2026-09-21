@@ -14,19 +14,10 @@ echo "=========================================="
 echo ""
 
 echo "Waiting for LocalStack API to be ready..."
-while ! awslocal kms list-keys >/dev/null 2>&1; do
+while ! awslocal secretsmanager list-secrets >/dev/null 2>&1; do
   echo 'waiting for LocalStack...'
   sleep 2
 done
-
-echo "Creating test KMS key and alias"
-awslocal kms create-alias \
-  --alias-name alias/test-key \
-  --target-key-id $(awslocal kms create-key \
-      --key-spec ECC_NIST_P256 \
-      --key-usage SIGN_VERIFY \
-      --query 'KeyMetadata.Arn' \
-      --output text)
 
 echo "Creating test secret for API key"
 awslocal secretsmanager create-secret \

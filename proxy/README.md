@@ -14,9 +14,9 @@ proxy/
 └── lib/                 # Lua library and tests
     ├── proxy_utils/     # Reusable Lua modules
     │   ├── init.lua
-    │   ├── auth.lua
+    │   ├── portunus.lua
     │   ├── utils.lua
-    │   └── request_signing.lua
+    │   └── logging.lua
     ├── spec/            # Unit tests using pure busted stubs
     ├── Dockerfile.test  # Test container
     └── proxy-utils-1.0-0.rockspec
@@ -30,7 +30,6 @@ proxy/
    - Calls Portunus `/authorise` endpoint (with caching)
    - Retrieves real API key from response
    - Sets the upstream auth header (the response's `output_header`, else `API_KEY_HEADER`) to the real API key and removes the inbound `API_KEY_HEADER` when it differs; every other header passes through
-   - Optionally signs request (Anthropic signature format)
 3. **Envoy** forwards modified request to target API
 4. **Target API** processes request with real credentials
 5. **Envoy** streams response back to client, logging request/response data to Portunus
@@ -51,10 +50,6 @@ TARGET_HOST_USE_TLS=true
 PORTUNUS_HOST=portunus.internal:8080
 PORTUNUS_API_KEY=secret-key
 PORTUNUS_API_KEY_HEADER=x-api-key
-
-# Optional request signing (Anthropic)
-ANTHROPIC_REQUEST_SIGNING_PROVIDER_KEY_ID=provider-key-id
-ANTHROPIC_REQUEST_SIGNING_KMS_KEY_ARN=arn:aws:kms:...
 
 # Rate limiting
 RATE_LIMIT_PERCENT_ENABLED=0-100
@@ -91,9 +86,9 @@ a cert-load error.
 
 The `lib/` directory contains a testable Lua library that extracts complex logic from `lua.lua`:
 
-- **`proxy_utils.auth`** - Authentication: extract payloads, call Portunus, send error responses
+- **`proxy_utils.portunus`** - Portunus client: extract payloads, call `/authorise` and `/log`, send error responses
 - **`proxy_utils.utils`** - Utilities: body/header handling, base64 encoding
-- **`proxy_utils.request_signing`** - Request signing: compute content digests
+- **`proxy_utils.logging`** - Envoy log helpers that prefix the request ID
 
 ### Usage
 
@@ -106,10 +101,11 @@ local config = {
 }
 
 local proxy_utils = require("proxy_utils")
+local portunus = proxy_utils.portunus.new(config)
 
 -- Use library functions
-local payload, err = proxy_utils.auth.extract_auth_payload(request_handle, config.api_key_header, config.api_key_prefix)
-local headers, body = proxy_utils.auth.call_auth_service(request_handle, payload, digest, config)
+local payload, err = portunus:extract_auth_payload(request_handle)
+local headers, body = portunus:authorise(request_handle, payload)
 ```
 
 ### Testing
@@ -130,7 +126,7 @@ docker run --rm proxy-utils-tests
 docker run --rm proxy-utils-tests busted -o TAP
 
 # Run specific test file
-docker run --rm proxy-utils-tests busted spec/auth_spec.lua
+docker run --rm proxy-utils-tests busted spec/portunus_spec.lua
 
 # List all test names
 docker run --rm proxy-utils-tests busted --list
