@@ -6,10 +6,9 @@ validating secrets and extracting API keys with target host validation.
 """
 
 import logging
-from typing import Optional
 
 from portunus.exceptions import AuthenticationError
-from portunus.models import SecretsManagerAuthPayload, SigningKey
+from portunus.models import SecretsManagerAuthPayload
 
 logger = logging.getLogger("api.access")
 
@@ -24,7 +23,7 @@ class SecretValidationService:
 
     def validate_and_extract_api_key(
         self, secret_string: str, target_host: str | None
-    ) -> tuple[str, Optional[SigningKey]]:
+    ) -> str:
         """
         Parse secret and validate target host if secret is in JSON format.
 
@@ -33,8 +32,7 @@ class SecretValidationService:
             target_host: Expected target host from proxy (optional)
 
         Returns:
-            The API key & signing key (optional) to use.
-            Only certain labs + models require a signing key, most are api-key-only
+            The API key to use.
 
         Raises:
             AuthenticationError: If validation fails for JSON secrets with host field
@@ -59,4 +57,4 @@ class SecretValidationService:
         else:
             logger.info("Secret has no host restriction, skipping validation")
 
-        return secret.api_key, secret.signing_key
+        return secret.api_key

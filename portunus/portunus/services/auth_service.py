@@ -137,7 +137,6 @@ class AuthService:
         Returns:
             AuthResult containing:
             - API key
-            - signing key (if required for this lab / model)
             - principal information
 
         Raises:
@@ -177,14 +176,12 @@ class AuthService:
             raw_secret = await self.secrets_service.fetch_secret(payload)
 
             # Validate and extract API key
-            api_key, signing_key = self.validation_service.validate_and_extract_api_key(
+            api_key = self.validation_service.validate_and_extract_api_key(
                 raw_secret, target_host
             )
 
             # Create auth result
-            auth_result = AuthResult(
-                api_key=api_key, signing_key=signing_key, principal_info=principal_info
-            )
+            auth_result = AuthResult(api_key=api_key, principal_info=principal_info)
 
             # Cache the results for future requests (best effort)
             # Use credential expiration as TTL so cache doesn't outlive credentials
