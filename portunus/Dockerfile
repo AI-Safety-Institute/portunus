@@ -1,9 +1,8 @@
-FROM python:3.12-alpine@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a as builder
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS builder
 
 # uv pinned by version + digest — :latest is a moving tag and the build
 # toolchain is inside the trust boundary.
 COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /uvx /bin/
-RUN apk add gcc python3-dev libc-dev build-base linux-headers
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
@@ -15,14 +14,12 @@ RUN touch README.md
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
+RUN .venv/bin/python -c "from google.protobuf.internal import api_implementation; assert api_implementation.Type() == 'upb', 'native protobuf backend required'"
 
-FROM python:3.12-alpine@sha256:b64631e04e4920160c50fbe8d8df828f7f35f06f425cb44aa09bca53e708a35a as runtime
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS runtime
 
-# grpc_health_probe: static binary docker/ECS use to probe the
-# grpc.health.v1.Health service (Portunus serves only gRPC). musl-compatible;
-# the checksum content-addresses the pin, so bumping the version requires
-# updating both checksums in the same change. TARGETARCH is amd64/arm64
-# depending on the platform being built (CI publishes both).
+# The health probe is pinned by architecture-specific checksums.
+# Update both checksums when changing the release version.
 ARG GRPC_HEALTH_PROBE_VERSION=v0.4.36
 ARG TARGETARCH
 RUN case "${TARGETARCH}" in \
@@ -30,8 +27,9 @@ RUN case "${TARGETARCH}" in \
       arm64) GHP_SHA256=6534343a86abb0494bb90747482e8091700628992e256137336daedc5585d3b0 ;; \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
-    wget -q "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH}" \
-      -O /usr/local/bin/grpc_health_probe && \
+    python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
+      "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH}" \
+      /usr/local/bin/grpc_health_probe && \
     echo "${GHP_SHA256}  /usr/local/bin/grpc_health_probe" | sha256sum -c - && \
     chmod 0755 /usr/local/bin/grpc_health_probe
 

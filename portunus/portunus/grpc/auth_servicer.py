@@ -28,7 +28,6 @@ import grpc
 from envoy.config.core.v3 import base_pb2
 from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
 from envoy.type.v3 import http_status_pb2
-from google.protobuf import struct_pb2
 from google.rpc import status_pb2
 from pydantic import ValidationError
 
@@ -123,8 +122,9 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         else:
             handler = self._auth_pass
 
+        headers = _http_headers(request)
         trace_root, parent_id, sampled = parse_trace_header(
-            _http_headers(request).get("x-amzn-trace-id", "")
+            headers.get("x-amzn-trace-id", "")
         )
         if config.aws.xray_enabled and trace_root:
             # Join the trace Envoy/ALB started so this Check (and the patched
@@ -136,20 +136,20 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
                 parent_id=parent_id,
                 sampled=sampled,
             ):
-                return await handler(request, context, request_id)
+                return await handler(request, context, request_id, headers)
         if trace_root:
             # X-Ray disabled: still surface the trace id on log lines.
             set_trace_id(trace_root)
-        return await handler(request, context, request_id)
+        return await handler(request, context, request_id, headers)
 
     async def _auth_pass(
         self,
         request: external_auth_pb2.CheckRequest,
         context: grpc.aio.ServicerContext,
         request_id: str,
+        headers: dict[str, str],
     ) -> external_auth_pb2.CheckResponse:
         """Header-only auth. Sets dynamic_metadata for the signing-pass gate."""
-        headers = _http_headers(request)
         try:
             raw_payload = headers.get(config.api_key_header.lower(), "")
             if not raw_payload:
@@ -237,6 +237,7 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         request: external_auth_pb2.CheckRequest,
         context: grpc.aio.ServicerContext,
         request_id: str,
+        headers: dict[str, str],
     ) -> external_auth_pb2.CheckResponse:
         """Buffered-body pass that computes Content-Digest and signs.
 
@@ -250,7 +251,6 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         the same customer-visible status code whether or not signing is needed.
         """
         try:
-            headers = _http_headers(request)
             raw_payload = headers.get(config.api_key_header.lower(), "")
             if config.api_key_prefix and raw_payload.startswith(config.api_key_prefix):
                 raw_payload = raw_payload[len(config.api_key_prefix) :]
@@ -384,28 +384,25 @@ def _ok(
     secret_arn: Optional[str] = None,
 ) -> external_auth_pb2.CheckResponse:
     """Build a CheckResponse that allows the request with header mutations."""
-    headers_to_add: list[base_pb2.HeaderValueOption] = []
-    headers_to_remove: list[str] = []
+    response = external_auth_pb2.CheckResponse()
+    response.status.code = 0
+    ok = response.ok_response
+    ok.SetInParent()
 
     if api_key is not None:
-        headers_to_add.append(
-            base_pb2.HeaderValueOption(
-                header=base_pb2.HeaderValue(
-                    key=config.api_key_header,
-                    value=f"{config.api_key_prefix}{api_key}",
-                ),
-                append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
-            )
-        )
+        added = ok.headers.add()
+        added.header.key = config.api_key_header
+        added.header.value = f"{config.api_key_prefix}{api_key}"
+        added.append_action = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
         if config.api_key_header.lower() != "authorization":
-            headers_to_remove.append("authorization")
+            ok.headers_to_remove.append("authorization")
 
     # Strip client-forged signature headers on the auth pass. Doing it here
     # (not via the route's request_headers_to_remove) preserves the legitimate
     # values the signing pass adds: Envoy applies ext_authz mutations in order,
     # so the auth pass's remove runs before the signing pass's add.
     if signing_required is not None:
-        headers_to_remove.extend(("content-digest", "signature", "signature-input"))
+        ok.headers_to_remove.extend(("content-digest", "signature", "signature-input"))
 
     # Envoy applies headers_to_add BEFORE headers_to_remove, so the signing
     # branch must NOT also list the header in headers_to_remove (that would
@@ -414,53 +411,31 @@ def _ok(
     # client value; only strip on the non-signing branch.
     if signing_required is not None:
         if signing_required:
-            headers_to_add.append(
-                base_pb2.HeaderValueOption(
-                    header=base_pb2.HeaderValue(
-                        key="x-portunus-signing-required",
-                        value="true",
-                    ),
-                    append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
-                )
-            )
+            added = ok.headers.add()
+            added.header.key = "x-portunus-signing-required"
+            added.header.value = "true"
+            added.append_action = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
         else:
-            headers_to_remove.append("x-portunus-signing-required")
+            ok.headers_to_remove.append("x-portunus-signing-required")
 
     if content_digest is not None:
-        headers_to_add.append(
-            base_pb2.HeaderValueOption(
-                header=base_pb2.HeaderValue(
-                    key="Content-Digest",
-                    value=content_digest,
-                ),
-                append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
-            )
-        )
+        added = ok.headers.add()
+        added.header.key = "Content-Digest"
+        added.header.value = content_digest
+        added.append_action = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
 
     if signature_headers is not None:
         for key, value in signature_headers.items():
-            headers_to_add.append(
-                base_pb2.HeaderValueOption(
-                    header=base_pb2.HeaderValue(key=key, value=value),
-                    append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
-                )
-            )
+            added = ok.headers.add()
+            added.header.key = key
+            added.header.value = value
+            added.append_action = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
 
-    kwargs: Dict[str, Any] = {
-        "status": status_pb2.Status(code=0),
-        "ok_response": external_auth_pb2.OkHttpResponse(
-            headers=headers_to_add,
-            headers_to_remove=headers_to_remove,
-        ),
-    }
-    if principal_info is not None or secret_arn is not None:
-        dyn = struct_pb2.Struct()
-        if principal_info is not None:
-            dyn.update({"principal_info": principal_info})
-        if secret_arn is not None:
-            dyn.update({"secret_arn": secret_arn})
-        kwargs["dynamic_metadata"] = dyn
-    return external_auth_pb2.CheckResponse(**kwargs)
+    if principal_info is not None:
+        response.dynamic_metadata.update({"principal_info": principal_info})
+    if secret_arn is not None:
+        response.dynamic_metadata.update({"secret_arn": secret_arn})
+    return response
 
 
 def _denied(

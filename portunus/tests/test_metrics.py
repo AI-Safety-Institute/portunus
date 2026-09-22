@@ -98,7 +98,7 @@ async def test_check_outcome_counters_track_allow_and_deny(monkeypatch):
     await servicer.Check(request, _Ctx())
     assert (servicer.check_allowed_total, servicer.check_denied_total) == (0, 1)
 
-    async def fake_allow(request, context, request_id):
+    async def fake_allow(request, context, request_id, headers):
         return external_auth_pb2.CheckResponse()
 
     monkeypatch.setattr(servicer, "_auth_pass", fake_allow)

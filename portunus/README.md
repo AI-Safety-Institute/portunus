@@ -74,6 +74,26 @@ These gate the servicer process specifically; the root README documents the rest
 
 See `portunus/config.py` for the rest (Redis, Firehose stream names, rate limiting, TLS toggles, header naming).
 
+## gRPC publisher tuning
+
+The gRPC publisher accepts these optional settings:
+
+| Environment variable | Default | Allowed range |
+| --- | --- | --- |
+| `GRPC_PUBLISH_WORKERS` | `max(4, GRPC_MAX_CONCURRENT_STREAMS // 64)` | 1–64 when set |
+| `GRPC_PUBLISH_BATCH_SIZE` | 500 records | 1–3000 |
+| `GRPC_PUBLISH_COALESCE_MS` | 0 milliseconds | 0–100, finite |
+
+The batch size groups queued records across destinations. Individual Firehose
+requests still obey the 500-record and 4-MiB limits. Coalescing pauses between
+partial batches, adding up to the configured delay for new arrivals.
+Queue record and payload-byte limits continue to apply.
+
+One worker, 3000 records and 5 milliseconds passed synthetic throughput tests.
+This profile is opt-in: validate destination fairness, retry behaviour and oldest
+record age with the intended audit sinks before adopting it. Leaving these
+variables unset preserves the existing publisher defaults.
+
 ## Tests
 
 Unit tests live in `portunus/tests/` and run without Docker:

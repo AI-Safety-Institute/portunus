@@ -17,6 +17,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- The backend image uses a glibc-based Python runtime and native protobuf.
+  The gRPC server uses uvloop on supported platforms; Redis uses hiredis.
+- gRPC capture uses direct coroutine reads and writes and omits replies in
+  observation mode. Header conversion and audit timestamps do less repeated work
+  while preserving redaction and record formats.
+- The audit queue supports an optional bounded delay between partial batches;
+  it remains disabled by default, and count and payload-byte limits still apply.
+- Firehose publication uses a fixed application user-agent to avoid rebuilding
+  SDK metadata for every batch.
+- gRPC authorization normalizes request headers once and builds fresh response
+  protobufs in place, preserving the existing signing and audit metadata contract.
+- Configured-off tracing skips per-call SDK wrappers; enabled tracing is unchanged.
 - Envoy defaults to one worker instead of the host CPU count. Set
   `ENVOY_CONCURRENCY` to match its allocated CPU capacity.
 - The backend now runs the gRPC server. Set `GRPC_ENABLED=true`, and configure
@@ -49,6 +61,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Completed HTTP capture releases its processing stream after both directions
+  finish, including rejected WebSocket upgrades, without waiting for Envoy's
+  deferred close. Successful WebSocket streams retain their existing lifetime.
+- Timed-out publisher shutdown releases remaining queued payloads and shutdown
+  markers while preserving loss accounting.
 - Authorisation cache entries remain bound to the upstream host and respect
   credential expiry.
 - Audit records preserve completion and capture-loss information across
@@ -64,6 +81,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   Lua filters, Python WebSocket relay, and Kinesis Data Streams publisher.
 - `UVICORN_WORKERS`, relay `WS_*` settings, and configurable CORS handling.
   Update deployments to the gRPC configuration and Envoy WebSocket limits.
+
+## [0.10.0] - 2026-09-16
+
+### Fixed
+- The backend keeps one Kinesis client per process instead of constructing a
+  new aiobotocore client for every published record. Client construction
+  (a fresh SSL context plus CA-bundle parse, ~30-40 ms of CPU) was about 80%
+  of the backend's CPU per request under load, which capped the OpenAI proxy
+  at roughly 500 requests/s with the backend fleet at its maximum task count.
+  A single worker now handles about 7x the request rate.
+- A cache read that times out during authentication now rejects the request
+  (503 on HTTP, close code 1013 on WebSocket) instead of falling back to the
+  full STS + Secrets Manager path. Under overload the timeout is a symptom of
+  a starved event loop, and the fallback added ~1 s of work per request that
+  Envoy had already abandoned. Other cache errors still fall back as before.
 
 ## [0.9.0] - 2026-09-11
 

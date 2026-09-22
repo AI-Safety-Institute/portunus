@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 import redis.asyncio as aioredis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
 from portunus.exceptions import CacheError
@@ -109,6 +110,8 @@ class CacheService:
             # response with the upstream API key. Log only the class name.
             logger.error("Error decoding cached data: %s", type(e).__name__)
             return None
+        except RedisTimeoutError:
+            raise
         except Exception as e:
             logger.error("Error getting from cache: %s", type(e).__name__)
             raise CacheError(f"Failed to retrieve from cache: {type(e).__name__}")

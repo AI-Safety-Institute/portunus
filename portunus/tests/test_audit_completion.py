@@ -6,6 +6,7 @@ import base64
 import json
 from typing import Any, AsyncIterator
 
+import grpc
 import pytest
 from envoy.config.core.v3 import base_pb2
 from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
@@ -39,6 +40,18 @@ class _State:
 
 
 class _Context:
+    def __init__(self, requests):
+        self.requests = requests
+
+    async def read(self):
+        try:
+            return await self.requests.__anext__()
+        except StopAsyncIteration:
+            return grpc.aio.EOF
+
+    async def write(self, response):
+        pass
+
     def invocation_metadata(self) -> list[tuple[str, str]]:
         return [("x-portunus-proxy-key", "test-proxy-key")]
 
@@ -87,8 +100,7 @@ async def _capture(
 
     await queue.start()
     try:
-        async for _ in processor.Process(requests(), _Context()):  # type: ignore[arg-type]
-            pass
+        await processor.Process(None, _Context(requests()))  # type: ignore[arg-type]
     finally:
         assert await queue.stop() == 0
     return sink.records
@@ -324,3 +336,31 @@ async def test_rejected_upgrade_keeps_cap_loss_visible_in_http_body_records(
         assert bodies[-1]["final_chunk"] is True
         assert all(r["frame_index"] is None for r in bodies)
     assert not any(r["record_type"] == "ws_summary" for r in records)
+
+
+@pytest.mark.asyncio
+async def test_capture_preserves_raw_duplicate_header_values_and_redacts_credentials(
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "api_key_header", "X-Custom-Credential")
+    headers = proc_pb2.HttpHeaders(
+        headers=base_pb2.HeaderMap(
+            headers=[
+                base_pb2.HeaderValue(key="Content-Type", value="text/plain"),
+                base_pb2.HeaderValue(key="CONTENT-TYPE", raw_value=b"last/\xff"),
+                base_pb2.HeaderValue(key="X-RateLimit-Remaining", value="12"),
+                base_pb2.HeaderValue(key="x-custom-credential", raw_value=b"secret"),
+                base_pb2.HeaderValue(key="AUTHORIZATION", value="Bearer secret"),
+                base_pb2.HeaderValue(key="x-unknown", value="private"),
+            ]
+        ),
+        end_of_stream=True,
+    )
+    records = await _capture(
+        [proc_pb2.ProcessingRequest(request_headers=headers)], monkeypatch
+    )
+    captured = next(r for r in records if r["record_type"] == "request_headers")
+    assert captured["raw_headers"] == {
+        "content-type": base64.b64encode(b"last/\xff").decode("ascii"),
+        "x-ratelimit-remaining": base64.b64encode(b"12").decode("ascii"),
+    }

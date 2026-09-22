@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import sys
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
@@ -24,6 +25,11 @@ from portunus.services.auth_service import AuthService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
 from portunus.services.signing_service import reset_signing_runtime, sign_request
+
+if sys.platform not in {"win32", "cygwin"} and sys.implementation.name == "cpython":
+    from uvloop import run as run_event_loop
+else:
+    from asyncio import run as run_event_loop
 
 logger = logging.getLogger("api.grpc")
 
@@ -292,7 +298,13 @@ async def start_grpc_server(
         # raw chunk by closure, so the record count alone (10k × ~750 KB ≈
         # 6.4 GiB) would blow past the container memory cap.
         max_bytes=config.publish_queue_max_bytes,
-        num_workers=max(4, config.max_concurrent_streams // 64),
+        num_workers=(
+            config.publish_workers
+            if config.publish_workers is not None
+            else max(4, config.max_concurrent_streams // 64)
+        ),
+        max_batch=config.publish_batch_size,
+        coalesce_seconds=config.publish_coalesce_ms / 1000,
         # Workers drain in stream-grouped Firehose PutRecordBatch calls, keeping
         # records/s under the per-stream quota without an unbounded buffer.
         batch_sender=publish_service.put_record_batch,
@@ -592,7 +604,7 @@ async def run() -> None:
 
 def main() -> None:
     """Console / ``python -m portunus.grpc.server`` entrypoint."""
-    asyncio.run(run())
+    run_event_loop(run())
 
 
 if __name__ == "__main__":
