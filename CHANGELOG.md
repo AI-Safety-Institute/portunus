@@ -27,6 +27,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Configured-off tracing skips per-call SDK wrappers; enabled tracing is unchanged.
 
 ### Fixed
+- The backend base image includes glibc fixes for CVE-2026-5450 and
+  CVE-2026-5928 on both supported Linux architectures.
+- Enabled X-Ray tracing supports uvloop and explicit Python task contexts.
 - Completed HTTP capture releases its processing stream after both directions
   finish, including rejected WebSocket upgrades, without waiting for Envoy's
   deferred close. Successful WebSocket streams retain their existing lifetime.
