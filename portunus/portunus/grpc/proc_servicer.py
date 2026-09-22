@@ -4,8 +4,8 @@ Publishes per-request headers, trailers, and body chunks to Firehose; for
 upgraded WebSocket streams, post-101 bytes are parsed through
 :class:`FrameObserver` into per-frame records plus a ``WSSummaryRecord``.
 
-Envoy runs the filter with ``observability_mode: true``, so yielded
-``ProcessingResponse`` messages are ignored and a stream failure here keeps
+Envoy runs the filter with ``observability_mode: true``, so
+``ProcessingResponse`` messages are unnecessary and a stream failure here keeps
 the customer connection alive (``failure_mode_allow: true``).
 """
 
@@ -66,7 +66,7 @@ class StreamMode(Enum):
     WS_UPGRADE = "ws_upgrade"
 
 
-@dataclass
+@dataclass(slots=True)
 class _StreamState:
     """Per-stream state held for the lifetime of one ext_proc stream."""
 
@@ -111,6 +111,8 @@ class _StreamState:
     # WSSummaryRecord reflects the unobserved remainder of that direction.
     parser_desynced: bool = False
     response_headers_seen: bool = False
+    request_complete: bool = False
+    response_complete: bool = False
     summary_emitted: bool = False
     audit_metadata_published: bool = False
 
@@ -136,8 +138,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         self,
         request_iterator: AsyncIterator[proc_pb2.ProcessingRequest],
         context: grpc.aio.ServicerContext,
-    ) -> AsyncIterator[proc_pb2.ProcessingResponse]:
-        """Handle one ext_proc stream from start to end."""
+    ) -> None:
+        """Handle one stream with the gRPC coroutine read/write API."""
         received_proxy_key = extract_proxy_key(context)
         if not is_valid_proxy_key(received_proxy_key, config.grpc.proxy_api_key):
             await context.abort(
@@ -148,13 +150,36 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
 
         state: Optional[_StreamState] = None
         try:
-            async for request in request_iterator:
+            while True:
+                request = await context.read()
+                if request is grpc.aio.EOF:
+                    break
                 if state is None:
                     state = self._initialise_stream(request)
                     self._active[state.stream_id] = state
 
-                async for response in self._dispatch(state, request):
-                    yield response
+                response = await self._dispatch(state, request)
+                if response is not None:
+                    await context.write(response)
+
+                kind = request.WhichOneof("request")
+                if kind is not None:
+                    message = getattr(request, kind)
+                    ended = kind.endswith("_trailers") or getattr(
+                        message, "end_of_stream", False
+                    )
+                    if ended and kind.startswith("request_"):
+                        state.request_complete = True
+                    elif ended and kind.startswith("response_"):
+                        state.response_complete = True
+                # Completed HTTP capture need not retain Envoy's deferred-close slot.
+                # Upgraded WebSockets stay open until the transport ends.
+                if (
+                    state.mode == StreamMode.HTTP
+                    and state.request_complete
+                    and state.response_complete
+                ):
+                    return
         finally:
             if state is not None:
                 self._active.pop(state.stream_id, None)
@@ -223,15 +248,16 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         self,
         state: _StreamState,
         request: proc_pb2.ProcessingRequest,
-    ) -> AsyncIterator[proc_pb2.ProcessingResponse]:
-        """Route a single ProcessingRequest to the right handler."""
+    ) -> Optional[proc_pb2.ProcessingResponse]:
+        """Capture a message and reply only when the protocol needs it."""
         timestamp = generate_iso_timestamp()
 
         if request.HasField("request_headers"):
             await self._on_request_headers(state, request, timestamp)
             if request.request_headers.end_of_stream:
                 await self._finish_http_body(state, Direction.REQUEST, timestamp)
-            yield _empty_headers_response(request_side=True)
+            if not request.observability_mode:
+                return _empty_headers_response(request_side=True)
         elif request.HasField("request_body"):
             await self._on_body_chunk(
                 state,
@@ -242,12 +268,14 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         elif request.HasField("request_trailers"):
             await self._on_request_trailers(state, request.request_trailers, timestamp)
             await self._finish_http_body(state, Direction.REQUEST, timestamp)
-            yield _empty_trailers_response(request_side=True)
+            if not request.observability_mode:
+                return _empty_trailers_response(request_side=True)
         elif request.HasField("response_headers"):
             await self._on_response_headers(state, request.response_headers, timestamp)
             if request.response_headers.end_of_stream:
                 await self._finish_http_body(state, Direction.RESPONSE, timestamp)
-            yield _empty_headers_response(request_side=False)
+            if not request.observability_mode:
+                return _empty_headers_response(request_side=False)
         elif request.HasField("response_body"):
             await self._on_body_chunk(
                 state,
@@ -260,8 +288,10 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 state, request.response_trailers, timestamp
             )
             await self._finish_http_body(state, Direction.RESPONSE, timestamp)
-            yield _empty_trailers_response(request_side=False)
+            if not request.observability_mode:
+                return _empty_trailers_response(request_side=False)
         # Unknown variants are silently ignored for forward-compat.
+        return None
 
     async def _on_request_headers(
         self,
@@ -945,35 +975,27 @@ _CAPTURED_HEADER_ALLOWED_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _is_captured_header(name: str) -> bool:
-    """Whether a (lowercased) header name may appear in captured raw_headers.
-
-    Reads ``config.api_key_header`` at call time (not import time) so the
-    configured key header is redacted whatever it is set to.
-    """
-    if name in _REDACTED_HEADERS or name == config.api_key_header.lower():
-        return False
-    return name in _CAPTURED_HEADER_ALLOWLIST or name.startswith(
-        _CAPTURED_HEADER_ALLOWED_PREFIXES
-    )
-
-
 def _headers_to_dict(http_headers: base_pb2.HeaderMap) -> dict[str, str]:
     """Flatten Envoy's HeaderMap into a case-folded dict of base64 values.
 
-    Captures only headers admitted by :func:`_is_captured_header` (allowlist
-    minus denylist minus ``api_key_header``): ext_proc observes headers *after*
-    ext_authz rewrites them to the real upstream key, so publishing verbatim
-    would archive customer secrets. Unknown headers are dropped, not leaked.
+    Captures the allowlist minus denylist and configured ``api_key_header``.
+    ext_proc observes headers after ext_authz substitutes the real key, so
+    publishing verbatim would archive customer secrets. Unknown headers are dropped.
 
     Base64 operates on raw bytes so non-UTF-8 values survive losslessly; Glue
     ETL calls ``_decode_b64_header`` on them.
     """
-    return {
-        h.key.lower(): base64.b64encode(_header_value_bytes(h)).decode("ascii")
-        for h in http_headers.headers
-        if _is_captured_header(h.key.lower())
-    }
+    result: dict[str, str] = {}
+    api_key_header = config.api_key_header.lower()
+    for header in http_headers.headers:
+        name = header.key.lower()
+        if name in _REDACTED_HEADERS or name == api_key_header:
+            continue
+        if name in _CAPTURED_HEADER_ALLOWLIST or name.startswith(
+            _CAPTURED_HEADER_ALLOWED_PREFIXES
+        ):
+            result[name] = base64.b64encode(_header_value_bytes(header)).decode("ascii")
+    return result
 
 
 def _empty_headers_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:

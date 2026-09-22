@@ -147,12 +147,30 @@ class _FakeContext:
     def __init__(self, *, metadata: Optional[list[tuple[str, str]]] = None) -> None:
         self._metadata = list(metadata or [])
         self.aborted_with: Optional[tuple] = None
+        self.responses: list[proc_pb2.ProcessingResponse] = []
+        self.requests = None
+
+    async def read(self):
+        try:
+            return await self.requests.__anext__()
+        except StopAsyncIteration:
+            return grpc.aio.EOF
+
+    async def write(self, response):
+        self.responses.append(response)
 
     def invocation_metadata(self) -> list[tuple[str, str]]:
         return self._metadata
 
     async def abort(self, code, details: str) -> None:
         self.aborted_with = (code, details)
+
+
+async def _process_responses(servicer, stream, context):
+    context.requests = stream.__aiter__()
+    await servicer.Process(None, context)
+    for response in context.responses:
+        yield response
 
 
 _PROXY_KEY = "test-proxy-key-shhh"
@@ -223,7 +241,7 @@ async def test_http_request_headers_are_published_with_their_headers_intact():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -258,7 +276,7 @@ async def test_headers_are_read_from_raw_value_field_when_value_is_empty():
         )
         stream = _stream_from([proc_pb2.ProcessingRequest(request_headers=headers_msg)])
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -304,7 +322,7 @@ async def test_credential_headers_are_redacted_from_published_request_headers():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -358,7 +376,7 @@ async def test_credential_headers_are_redacted_from_published_response_headers()
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -391,7 +409,7 @@ async def test_http_response_body_chunks_are_published_with_their_bytes_intact()
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -486,7 +504,7 @@ async def test_body_chunks_are_dropped_when_publish_queue_is_full(monkeypatch):
         ]
     )
 
-    responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
+    responses = [r async for r in _process_responses(servicer, stream, _ctx_with_key())]
 
     assert len(responses) == 1
     assert queue.dropped_total >= 1
@@ -530,7 +548,7 @@ async def test_body_drop_emits_dropped_sentinel_record():
                 _http_body_message(body=b"second", is_request=False),
             ]
         )
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -562,7 +580,7 @@ async def test_missing_proxy_key_aborts_the_stream_before_yielding_any_response(
         )
         ctx = _ctx_with_key(value=None)
 
-        responses = [r async for r in servicer.Process(stream, ctx)]
+        responses = [r async for r in _process_responses(servicer, stream, ctx)]
 
         assert responses == []
         assert ctx.aborted_with is not None
@@ -585,7 +603,7 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
         )
         ctx = _ctx_with_key(value="wrong-key")
 
-        responses = [r async for r in servicer.Process(stream, ctx)]
+        responses = [r async for r in _process_responses(servicer, stream, ctx)]
 
         assert responses == []
         assert ctx.aborted_with[0] == grpc.StatusCode.PERMISSION_DENIED
@@ -617,7 +635,9 @@ async def test_body_events_yield_no_processing_response_under_observability_mode
             ]
         )
 
-        responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
+        responses = [
+            r async for r in _process_responses(servicer, stream, _ctx_with_key())
+        ]
 
         assert len(responses) == 1
         assert responses[0].HasField("request_headers")
@@ -641,7 +661,9 @@ async def test_headers_response_uses_headers_field_not_body_field():
             ]
         )
 
-        responses = [r async for r in servicer.Process(stream, _ctx_with_key())]
+        responses = [
+            r async for r in _process_responses(servicer, stream, _ctx_with_key())
+        ]
 
         assert len(responses) == 1
         assert responses[0].HasField("request_headers")
@@ -678,7 +700,7 @@ async def test_streamed_body_chunks_have_monotonic_ids_and_sentinel_num_chunks()
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -710,7 +732,7 @@ async def test_large_body_message_is_split_into_monotonic_body_records():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -751,7 +773,7 @@ async def test_request_and_response_chunk_ids_are_independent_per_direction():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -781,7 +803,7 @@ async def test_aborted_stream_emits_records_for_chunks_seen_so_far():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -817,7 +839,7 @@ async def test_final_chunk_marks_terminal_chunk_per_direction():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -863,7 +885,7 @@ async def test_concurrent_streams_with_same_request_id_register_independently():
             await hold.wait()
 
         async def driver(it):
-            return [r async for r in servicer.Process(it, _ctx_with_key())]
+            return [r async for r in _process_responses(servicer, it, _ctx_with_key())]
 
         task_a = asyncio.create_task(driver(iterator(ready_a, hold_a)))
         task_b = asyncio.create_task(driver(iterator(ready_b, hold_b)))
@@ -969,7 +991,7 @@ async def test_ws_tagged_stream_emits_frame_and_summary_records():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1011,7 +1033,7 @@ async def test_ws_frames_carry_monotonic_per_direction_frame_index():
                 _http_body_message(body=_ws_frame(b"dup"), is_request=False),
             ]
         )
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1036,7 +1058,7 @@ async def test_http_body_records_have_no_frame_index():
                 _http_body_message(body=b"plain-http-body", is_request=False),
             ]
         )
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1082,7 +1104,7 @@ async def test_ws_summary_uses_blocking_submit_on_normal_close():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1122,7 +1144,7 @@ async def test_http_nosig_request_headers_carry_x_portunus_debug_id():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1168,7 +1190,7 @@ async def test_signing_pass_request_headers_carry_x_portunus_debug_id():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1210,7 +1232,7 @@ async def test_ws_upgrade_request_headers_carry_x_portunus_debug_id():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1361,7 +1383,7 @@ async def test_drop_sentinel_survives_body_saturation_and_lands_in_publish():
         ]
     )
     dropped_before = queue.dropped_total
-    async for _ in servicer.Process(stream, _ctx_with_key()):
+    async for _ in _process_responses(servicer, stream, _ctx_with_key()):
         pass
 
     # The real chunk was dropped, counted exactly once (sentinel not double-counted).
@@ -1398,7 +1420,7 @@ async def test_sentinel_timeout_under_true_saturation_counts_sentinel_dropped(
             _http_body_message(body=b"chunk-b", is_request=False),
         ]
     )
-    async for _ in servicer.Process(stream, _ctx_with_key()):
+    async for _ in _process_responses(servicer, stream, _ctx_with_key()):
         pass
 
     # chunk-a: dropped, its sentinel takes the last (blocking headroom) slot.
@@ -1440,7 +1462,7 @@ async def test_ws_parse_error_bumps_truncated_counter_and_summary_reflects_it():
             ]
         )
 
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
         await _drain_queue(queue)
 
@@ -1488,7 +1510,7 @@ async def test_blocking_submits_time_out_instead_of_stalling_process(monkeypatch
     t0 = loop.time()
     # Two blocked header submits must complete in ~2 timeouts, not hang.
     async with asyncio.timeout(2.0):
-        async for _ in servicer.Process(stream, _ctx_with_key()):
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
             pass
     elapsed = loop.time() - t0
 
