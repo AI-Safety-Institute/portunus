@@ -46,6 +46,7 @@ from portunus.services.federation_service import (
     AnthropicTokenExchange,
     FederationIdentity,
     MintedToken,
+    OAuthTokenResponse,
     OpenAiTokenExchange,
     StsFederationService,
     TokenMintService,
@@ -744,23 +745,27 @@ class TestOpenAiTokenExchange:
         assert "secret.jwt.value" not in caplog.text
 
     @pytest.mark.parametrize(
-        ("body", "message"),
+        "body",
         [
-            ({"ok": 1}, "malformed"),
-            ({"access_token": "eyJ.openai.example"}, "malformed"),
-            ({"access_token": "eyJ.openai.example", "expires_in": "soon"}, "malformed"),
-            ({"expires_in": 900}, "empty token"),
-            ({"access_token": "", "expires_in": 900}, "empty token"),
+            {"ok": 1},
+            {"expires_in": 900},
+            {"access_token": "", "expires_in": 900},
+            {"access_token": "eyJ.openai.example"},
+            {"access_token": "eyJ.openai.example", "expires_in": "soon"},
+            {"access_token": "eyJ.openai.example", "expires_in": 0},
+            {"access_token": "eyJ.openai.example", "expires_in": -900},
         ],
     )
     @pytest.mark.asyncio
-    async def test_response_without_a_usable_token_raises(
-        self, body: dict, message: str
-    ):
+    async def test_response_without_a_usable_token_raises(self, body: dict, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
         adapter, _ = _openai_exchange(lambda request: httpx.Response(200, json=body))
 
-        with pytest.raises(AuthenticationError, match=message):
+        with pytest.raises(AuthenticationError, match="malformed"):
             await adapter.exchange("header.payload.signature", _openai_secret())
+
+        assert "malformed body" in caplog.text
+        assert "eyJ.openai.example" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_non_json_success_body_raises(self):
@@ -770,6 +775,30 @@ class TestOpenAiTokenExchange:
 
         with pytest.raises(AuthenticationError, match="malformed"):
             await adapter.exchange("header.payload.signature", _openai_secret())
+
+
+class TestOAuthTokenResponse:
+    def test_ignores_fields_beyond_the_token_and_its_lifetime(self):
+        parsed = OAuthTokenResponse.model_validate(OPENAI_TOKEN_RESPONSE)
+
+        assert parsed.access_token == "eyJ.openai.example"
+        assert parsed.expires_in == 900
+
+    def test_accepts_a_numeric_string_lifetime(self):
+        parsed = OAuthTokenResponse.model_validate(
+            {"access_token": "token", "expires_in": "900"}
+        )
+
+        assert parsed.expires_in == 900
+
+    def test_minted_token_expires_relative_to_the_request_time(self):
+        parsed = OAuthTokenResponse.model_validate(
+            {"access_token": "token", "expires_in": 900}
+        )
+
+        assert parsed.minted_token(NOW) == MintedToken(
+            token="token", expires_at=NOW + timedelta(seconds=900)
+        )
 
 
 class TestTokenMintService:
