@@ -619,6 +619,29 @@ class OpenAiWifSecret(MintSecretBase):
     audience: str = Field(default=OPENAI_API_AUDIENCE, min_length=1)
 
 
+OPENROUTER_API_AUDIENCE = "https://openrouter.ai/api/v1"
+
+
+class OpenRouterWifSecret(MintSecretBase):
+    """Mint an OpenRouter access token via workload identity federation.
+
+    The federation session requests an RS256-signed STS web identity token
+    for ``audience`` and exchanges it at
+    ``https://openrouter.ai/api/v1/oauth/token`` (RFC 8693 token exchange)
+    under ``federation_policy_id``.
+
+    Attributes:
+        federation_policy_id: The OpenRouter federation policy that names the
+            issuer, the expected ``sub`` and ``aud``, and the API key the
+            token acts as.
+        audience: The policy's audience, carried as the token's ``aud``.
+    """
+
+    type: Literal["openrouter_wif"]
+    federation_policy_id: str = Field(min_length=1)
+    audience: str = Field(default=OPENROUTER_API_AUDIENCE, min_length=1)
+
+
 GCP_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 # Workload identity pool providers are always project-number scoped and global.
 GCP_POOL_PROVIDER_PATTERN = (
@@ -663,7 +686,11 @@ class GcpWifSecret(MintSecretBase):
 # union, and gets an exchange adapter and a route in
 # services.federation_service.TokenMintService.
 SecretsManagerSecret = Union[
-    SecretsManagerAuthPayload, AnthropicWifSecret, OpenAiWifSecret, GcpWifSecret
+    SecretsManagerAuthPayload,
+    AnthropicWifSecret,
+    OpenAiWifSecret,
+    OpenRouterWifSecret,
+    GcpWifSecret,
 ]
 TypedSecret = Annotated[SecretsManagerSecret, Field(discriminator="type")]
 """SecretsManagerSecret discriminated on ``type``, for validating JSON input."""
