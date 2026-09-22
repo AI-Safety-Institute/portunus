@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import sys
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
@@ -24,6 +25,11 @@ from portunus.services.auth_service import AuthService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
 from portunus.services.signing_service import reset_signing_runtime, sign_request
+
+if sys.platform not in {"win32", "cygwin"} and sys.implementation.name == "cpython":
+    from uvloop import run as run_event_loop
+else:
+    from asyncio import run as run_event_loop
 
 logger = logging.getLogger("api.grpc")
 
@@ -592,7 +598,7 @@ async def run() -> None:
 
 def main() -> None:
     """Console / ``python -m portunus.grpc.server`` entrypoint."""
-    asyncio.run(run())
+    run_event_loop(run())
 
 
 if __name__ == "__main__":
