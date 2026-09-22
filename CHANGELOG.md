@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- gRPC capture uses direct coroutine reads and writes and omits replies in
+  observation mode. Header conversion and audit timestamps do less repeated work
+  while preserving redaction and record formats.
+- The audit queue supports an optional bounded delay between partial batches;
+  it remains disabled by default, and count and payload-byte limits still apply.
+- Firehose publication uses a fixed application user-agent to avoid rebuilding
+  SDK metadata for every batch.
+- Audit serialization avoids an extra copy when adding JSON record delimiters.
+- Complete WebSocket messages avoid a reassembly copy while retaining capture limits
+  and fragmented-message handling.
 - Cached authentication avoids a Redis probe before each operation. Cache commands
   retry bounded pool contention without extending the entry's remaining lifetime.
 - gRPC authorization normalizes request headers once and builds fresh response
@@ -13,6 +23,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Configured-off tracing skips per-call SDK wrappers; enabled tracing is unchanged.
 
 ### Fixed
+- Completed HTTP capture releases its processing stream after both directions
+  finish, including rejected WebSocket upgrades, without waiting for Envoy's
+  deferred close. Successful WebSocket streams retain their existing lifetime.
+- Timed-out publisher shutdown releases remaining queued payloads and shutdown
+  markers while preserving loss accounting. Blocked and later submissions are
+  rejected once shutdown starts, and cancelled submits remain accounted for.
+- Blocking gRPC capture acknowledges request and response body chunks; observation
+  mode continues to avoid replies.
 - Authentication rejects Redis connection-probe and read timeouts without
   starting additional identity or secret lookups.
 
