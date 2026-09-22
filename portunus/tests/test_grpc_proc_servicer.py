@@ -484,8 +484,8 @@ async def test_pre_101_poisoned_stream_skips_replay_and_observation():
 async def test_body_chunks_are_dropped_when_publish_queue_is_full(monkeypatch):
     """Body submits drop when queue capacity is exceeded so a slow Firehose.
 
-    can't backpressure customer traffic. Under observability_mode only the
-    request_headers event yields a response; drops still register on the queue.
+    can't backpressure customer traffic. Observation messages produce no replies;
+    drops still register on the queue.
     Setup: tiny queue + no workers so it stays full.
     """
     # Keep the drop-sentinel blocking submits from stalling the test on the
@@ -494,19 +494,20 @@ async def test_body_chunks_are_dropped_when_publish_queue_is_full(monkeypatch):
     servicer, _publish, queue = _make_servicer(queue_maxsize=2)
     # Workers deliberately not started so the queue stays full.
 
-    stream = _stream_from(
-        [
-            _http_headers_message(headers={}, is_request=True, request_id="drop-test"),
-            _http_body_message(body=b"a" * 100, is_request=False),
-            _http_body_message(body=b"b" * 100, is_request=False),
-            _http_body_message(body=b"c" * 100, is_request=False),
-            _http_body_message(body=b"d" * 100, is_request=False, end_of_stream=True),
-        ]
-    )
+    messages = [
+        _http_headers_message(headers={}, is_request=True, request_id="drop-test"),
+        _http_body_message(body=b"a" * 100, is_request=False),
+        _http_body_message(body=b"b" * 100, is_request=False),
+        _http_body_message(body=b"c" * 100, is_request=False),
+        _http_body_message(body=b"d" * 100, is_request=False, end_of_stream=True),
+    ]
+    for message in messages:
+        message.observability_mode = True
+    stream = _stream_from(messages)
 
     responses = [r async for r in _process_responses(servicer, stream, _ctx_with_key())]
 
-    assert len(responses) == 1
+    assert responses == []
     assert queue.dropped_total >= 1
 
 
@@ -612,35 +613,30 @@ async def test_wrong_proxy_key_aborts_the_stream_before_yielding_any_response():
 
 
 # ---------------------------------------------------------------------------
-# ProcessingResponse shape under observability_mode — header events yield a
-# matching HeadersResponse; body events yield nothing (Envoy ignores them)
+# ProcessingResponse shape follows the incoming protocol mode.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_body_events_yield_no_processing_response_under_observability_mode():
-    """Under observability_mode Envoy ignores yielded ProcessingResponses.
-
-    Header events yield one response, body events yield nothing (no wasted
-    protobuf/gRPC send per chunk).
-    """
+    """Observation mode captures headers and body chunks without replying."""
     servicer, _publish, queue = _make_servicer()
     await queue.start()
     try:
-        stream = _stream_from(
-            [
-                _http_headers_message(headers={}, is_request=True, request_id="shape"),
-                _http_body_message(body=b"first", is_request=True),
-                _http_body_message(body=b"last", is_request=True, end_of_stream=True),
-            ]
-        )
+        messages = [
+            _http_headers_message(headers={}, is_request=True, request_id="shape"),
+            _http_body_message(body=b"first", is_request=True),
+            _http_body_message(body=b"last", is_request=True, end_of_stream=True),
+        ]
+        for message in messages:
+            message.observability_mode = True
+        stream = _stream_from(messages)
 
         responses = [
             r async for r in _process_responses(servicer, stream, _ctx_with_key())
         ]
 
-        assert len(responses) == 1
-        assert responses[0].HasField("request_headers")
+        assert responses == []
     finally:
         await queue.stop()
 
