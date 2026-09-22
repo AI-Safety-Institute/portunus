@@ -342,14 +342,14 @@ async def test_rejected_upgrade_keeps_cap_loss_visible_in_http_body_records(
 async def test_capture_preserves_raw_duplicate_header_values_and_redacts_credentials(
     monkeypatch,
 ):
-    monkeypatch.setattr(config, "api_key_header", "X-Custom-Credential")
+    monkeypatch.setattr(config, "api_key_header", "User-Agent")
     headers = proc_pb2.HttpHeaders(
         headers=base_pb2.HeaderMap(
             headers=[
                 base_pb2.HeaderValue(key="Content-Type", value="text/plain"),
                 base_pb2.HeaderValue(key="CONTENT-TYPE", raw_value=b"last/\xff"),
                 base_pb2.HeaderValue(key="X-RateLimit-Remaining", value="12"),
-                base_pb2.HeaderValue(key="x-custom-credential", raw_value=b"secret"),
+                base_pb2.HeaderValue(key="user-agent", raw_value=b"secret"),
                 base_pb2.HeaderValue(key="AUTHORIZATION", value="Bearer secret"),
                 base_pb2.HeaderValue(key="x-unknown", value="private"),
             ]
