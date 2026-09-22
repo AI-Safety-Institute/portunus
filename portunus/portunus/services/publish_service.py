@@ -410,24 +410,24 @@ class PublishService:
             await asyncio.sleep(1.0)
 
         try:
-            async with await self.state_service.get_kinesis_client() as kinesis_client:
-                # Prepare and serialize the record data
-                data_bytes = json.dumps(record_data, default=str).encode("utf-8")
+            kinesis_client = await self.state_service.get_kinesis_client()
+            # Prepare and serialize the record data
+            data_bytes = json.dumps(record_data, default=str).encode("utf-8")
 
-                response = await kinesis_client.put_record(
-                    StreamName=stream_name,
-                    Data=data_bytes,
-                    PartitionKey=partition_key,
-                )
+            response = await kinesis_client.put_record(
+                StreamName=stream_name,
+                Data=data_bytes,
+                PartitionKey=partition_key,
+            )
 
-                shard_id = response.get("ShardId")
-                sequence_number = response.get("SequenceNumber")
-                logger.info(
-                    f"Published record to Kinesis Data Stream {stream_name} "
-                    f"with ShardId {shard_id} and SequenceNumber "
-                    f"{sequence_number[:8]}..."
-                )
-                return True
+            shard_id = response.get("ShardId")
+            sequence_number = response.get("SequenceNumber")
+            logger.info(
+                f"Published record to Kinesis Data Stream {stream_name} "
+                f"with ShardId {shard_id} and SequenceNumber "
+                f"{sequence_number[:8]}..."
+            )
+            return True
 
         except TimeoutError as e:
             logger.exception(
