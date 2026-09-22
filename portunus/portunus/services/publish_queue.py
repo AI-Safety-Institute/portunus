@@ -125,14 +125,11 @@ class BoundedPublishQueue:
         # build() returned None — target stream not configured (e.g.
         # FIREHOSE_WS_SUMMARY_STREAM unset). Counted so the skip is observable.
         self._skipped_unconfigured_total = 0
-        # Drop sentinels that couldn't be enqueued (blocking submit timed out
-        # under saturation). Off ``dropped_total`` so one lost chunk counts once.
+        # Sentinels rejected by saturation, closed admission or cancellation.
+        # Separate from dropped_total so each lost body chunk counts once.
         self._sentinel_dropped_total = 0
-        # Submission cancelled or accepted but never flushed before shutdown.
-        # Includes a wedged Firehose sender. Distinct from dropped_total (queue
-        # pressure) and delivery_failed_total (Firehose rejection); this is
-        # shutdown loss a clean exit would hide. Includes in-flight-batch
-        # records, not just ``qsize()``. ``stop_grpc_server`` alarms on it.
+        # Cancelled submissions plus accepted records left unflushed at stop,
+        # including in-flight batches; these must remain visible as audit loss.
         self._cancelled_total = 0
 
         # Default 90/10: bodies cap at 90% of maxsize, reserving headroom for
@@ -184,7 +181,7 @@ class BoundedPublishQueue:
 
     @property
     def sentinel_dropped_total(self) -> int:
-        """Drop-sentinel submits that timed out under saturation.
+        """Drop-sentinel submits rejected before queue admission.
 
         A lost gap marker, not a lost record (the record's loss is already on
         ``dropped_total``); the chunk_id gap is the downstream fallback signal.
@@ -196,8 +193,8 @@ class BoundedPublishQueue:
         """Records whose submission or delivery was cancelled.
 
         Distinct from ``dropped_total`` (submit-time queue pressure) and
-        ``delivery_failed_total`` (Firehose rejection); shutdown loss despite
-        a clean exit — alarm on it. Includes in-flight-batch records.
+        ``delivery_failed_total`` (Firehose rejection). Includes cancelled
+        blocked submissions and in-flight records left unflushed at shutdown.
         """
         return self._cancelled_total
 
