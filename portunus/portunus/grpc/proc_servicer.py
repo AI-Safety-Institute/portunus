@@ -129,6 +129,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         self._publish = publish_service
         self._queue = publish_queue
         self._active: dict[str, _StreamState] = {}
+        self._next_drop_warning = 0.0
+        self._suppressed_drop_warnings = 0
 
     @property
     def active_stream_count(self) -> int:
@@ -710,24 +712,24 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             )
         )
         if not accepted:
-            logger.warning(
-                "Body chunk dropped under queue pressure on stream %s "
-                "(%s direction, chunk_id=%d, bytes=%d) — emitting sentinel",
-                state.stream_id,
-                direction.value,
-                chunk_id,
-                len(body_bytes),
-            )
-            # Sentinel body record (empty body, ``dropped=True``, same
-            # chunk_id) so the ETL sees an explicit gap marker, not a silent
-            # chunk_id discontinuity. Submitted BLOCKING, not droppable: the
-            # droppable path rejects at the exact saturation the sentinel
-            # signals (qsize >= body_capacity), while blocking uses the reserved
-            # metadata headroom, so the tiny sentinel survives body saturation.
-            # The timeout keeps a wedged sink from stalling the stream; a
-            # timed-out sentinel counts on ``sentinel_dropped_total`` (NOT
-            # ``dropped_total``, which would double-count one lost chunk), and
-            # the chunk_id gap + counters + this log line remain the fallback.
+            now = time.monotonic()
+            if now >= self._next_drop_warning:
+                logger.warning(
+                    "Body chunk dropped under queue pressure on stream %s "
+                    "(%s direction, chunk_id=%d, bytes=%d); "
+                    "%d additional warnings suppressed; exact losses in metrics",
+                    state.stream_id,
+                    direction.value,
+                    chunk_id,
+                    len(body_bytes),
+                    self._suppressed_drop_warnings,
+                )
+                self._next_drop_warning = now + 1.0
+                self._suppressed_drop_warnings = 0
+            else:
+                self._suppressed_drop_warnings += 1
+            # Gap markers use reserved metadata space. If that also fills,
+            # rejected markers are counted separately from the lost body.
             await self._queue.submit_blocking(
                 PublishTask(
                     build=lambda chunk_id=chunk_id: build_method(  # type: ignore[misc]
