@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
@@ -120,6 +121,35 @@ async def test_put_record_batch_retries_failed_subset_and_recovers() -> None:
     assert [len(c) for c in client.calls] == [3, 2]
     # The retry carried exactly the two records that had an ErrorCode (b, c).
     assert client.calls[1] == [b"b\n", b"c\n"]
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_yields_before_retry_without_blocking_other_work(
+    monkeypatch,
+):
+    waiting, release = asyncio.Event(), asyncio.Event()
+
+    async def pause(delay):
+        assert 0.5 <= delay <= 1.5
+        waiting.set()
+        await release.wait()
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+    client = _FakeFirehoseClient(failed_per_call=1, fail_first_n_calls=1)
+    task = asyncio.create_task(
+        _service(client).put_record_batch("audit", [b"ok", b"retry"])
+    )
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=0.2)
+        assert client.calls == [[b"ok", b"retry"]]
+        # This coroutine remains schedulable while audit publishing waits.
+        assert not task.done()
+        release.set()
+        assert await asyncio.wait_for(task, timeout=1) == 0
+        assert client.calls == [[b"ok", b"retry"], [b"retry"]]
+    finally:
+        release.set()
+        await task
 
 
 @pytest.mark.asyncio
