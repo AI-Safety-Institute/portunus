@@ -82,6 +82,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `UVICORN_WORKERS`, relay `WS_*` settings, and configurable CORS handling.
   Update deployments to the gRPC configuration and Envoy WebSocket limits.
 
+### Fixed
+- Completed HTTP capture releases its processing stream after both directions
+  finish, including rejected WebSocket upgrades, without waiting for Envoy's
+  deferred close. Successful WebSocket streams retain their existing lifetime.
+- Timed-out publisher shutdown releases remaining queued payloads and shutdown
+  markers while preserving loss accounting. Blocked and later submissions are
+  rejected once shutdown starts, and cancelled submits remain accounted for.
+- Blocking gRPC capture acknowledges request and response body chunks; observation
+  mode continues to avoid replies.
+- Authentication rejects Redis connection-probe and read timeouts without
+  starting additional identity or secret lookups.
+
 ## [0.10.0] - 2026-09-16
 
 ### Fixed

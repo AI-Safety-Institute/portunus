@@ -107,6 +107,8 @@ class BoundedPublishQueue:
         self._max_batch = max_batch
         self._coalesce_seconds = coalesce_seconds
         self._workers: list[asyncio.Task] = []
+        self._closed = False
+        self._space_available = asyncio.Event()
         # Byte budget for retained payloads (queued + in-flight); None disables.
         self._max_bytes = max_bytes
         self._queued_bytes = 0
@@ -126,8 +128,8 @@ class BoundedPublishQueue:
         # Drop sentinels that couldn't be enqueued (blocking submit timed out
         # under saturation). Off ``dropped_total`` so one lost chunk counts once.
         self._sentinel_dropped_total = 0
-        # Accepted but never flushed because a drain timed out (e.g. wedged
-        # Firehose sink at shutdown). Distinct from dropped_total (queue
+        # Submission cancelled or accepted but never flushed before shutdown.
+        # Includes a wedged Firehose sender. Distinct from dropped_total (queue
         # pressure) and delivery_failed_total (Firehose rejection); this is
         # shutdown loss a clean exit would hide. Includes in-flight-batch
         # records, not just ``qsize()``. ``stop_grpc_server`` alarms on it.
@@ -191,7 +193,7 @@ class BoundedPublishQueue:
 
     @property
     def cancelled_total(self) -> int:
-        """Records accepted but never flushed when the pool stopped.
+        """Records whose submission or delivery was cancelled.
 
         Distinct from ``dropped_total`` (submit-time queue pressure) and
         ``delivery_failed_total`` (Firehose rejection); shutdown loss despite
@@ -228,7 +230,9 @@ class BoundedPublishQueue:
         )
 
     async def start(self) -> None:
-        """Spawn the worker pool. Idempotent."""
+        """Spawn workers once; a stopped queue cannot be restarted."""
+        if self._closed:
+            raise RuntimeError("Publish queue is closed")
         if self._workers:
             return
         for i in range(self._num_workers):
@@ -249,6 +253,8 @@ class BoundedPublishQueue:
         ``qsize()`` — which misses in-flight-batch records and counts the
         shutdown sentinels. Callers log it so shutdown loss is observable.
         """
+        self._closed = True
+        self._space_available.set()
         cancelled_before = self._cancelled_total
         timed_out = False
         try:
@@ -327,23 +333,30 @@ class BoundedPublishQueue:
         With ``timeout`` set, gives up rather than block forever on a saturated
         queue; the timed-out record counts on ``dropped_total`` (or
         ``sentinel_dropped_total`` when ``sentinel=True`` — see the class
-        docstring). Returns True when enqueued.
+        docstring). Returns True when enqueued; a stopping queue rejects submits.
         """
+        if self._closed:
+            self._reject_submission(sentinel=sentinel)
+            return False
         try:
             try:
                 self._queue.put_nowait(task)
             except asyncio.QueueFull:
-                if timeout is None:
-                    await self._queue.put(task)
-                else:
-                    async with asyncio.timeout(timeout):
-                        await self._queue.put(task)
+                # Woken submitters recheck admission before inserting atomically.
+                # An awaiting Queue.put could enqueue after stop released space.
+                async with asyncio.timeout(timeout):
+                    while self._queue.full() and not self._closed:
+                        self._space_available.clear()
+                        await self._space_available.wait()
+                if self._closed:
+                    self._reject_submission(sentinel=sentinel)
+                    return False
+                self._queue.put_nowait(task)
+        except asyncio.CancelledError:
+            self._reject_submission(sentinel=sentinel, cancelled=True)
+            raise
         except TimeoutError:
-            if sentinel:
-                self._sentinel_dropped_total += 1
-            else:
-                self._submitted_total += 1
-                self._dropped_total += 1
+            self._reject_submission(sentinel=sentinel)
             logger.warning(
                 "Blocking publish submit timed out after %.1fs (%s%s)",
                 timeout if timeout is not None else 0.0,
@@ -355,6 +368,16 @@ class BoundedPublishQueue:
         self._queued_bytes += task.size_bytes
         return True
 
+    def _reject_submission(self, *, sentinel: bool, cancelled: bool = False) -> None:
+        if sentinel:
+            self._sentinel_dropped_total += 1
+        else:
+            self._submitted_total += 1
+            if cancelled:
+                self._cancelled_total += 1
+            else:
+                self._dropped_total += 1
+
     def submit_droppable(self, task: PublishTask) -> bool:
         """Submit with drop-on-full semantics — for body records.
 
@@ -364,7 +387,7 @@ class BoundedPublishQueue:
         ``put_nowait`` races (hard cap). Returns True on accept.
         """
         self._submitted_total += 1
-        if self._queue.qsize() >= self._body_capacity:
+        if self._closed or self._queue.qsize() >= self._body_capacity:
             self._dropped_total += 1
             return False
         if (
@@ -410,6 +433,7 @@ class BoundedPublishQueue:
                     break
                 tasks.append(nxt)
 
+            self._space_available.set()
             try:
                 await self._flush_batch(tasks)
             finally:

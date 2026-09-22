@@ -110,7 +110,7 @@ class CacheService:
             # response with the upstream API key. Log only the class name.
             logger.error("Error decoding cached data: %s", type(e).__name__)
             return None
-        except RedisTimeoutError:
+        except (RedisTimeoutError, TimeoutError):
             raise
         except Exception as e:
             logger.error("Error getting from cache: %s", type(e).__name__)

@@ -421,17 +421,12 @@ async def stop_grpc_server(
 ) -> None:
     """Stop the gRPC server, drain the publish queue, close the AWS client.
 
-    ``server.stop(grace=N)`` stops accepting new streams and waits up to N
-    seconds for active ones to finish. Active ext_proc streams end only when
-    Envoy closes them — under ``observability_mode: true`` there is no
-    application-layer signal we can send — so this is grace-then-cancel, not a
-    coordinated drain.
-
-    Reserve part of the shared deadline for publishing after the stream drain.
-    With any active stream at SIGTERM Envoy holds it open for its own longer
-    drain, so ``server.stop`` consumes its whole budget; without the reserve
-    the queue would get a 0-second flush window and cancel every buffered record
-    even with a healthy sink. These phases share ``grace_seconds``. Running
+    ``server.stop(grace=N)`` waits up to N seconds for active streams.
+    Completed HTTP capture ends after both directions finish; unfinished HTTP
+    and successful WebSocket streams may remain open until the deadline.
+    Reserve part of the shared deadline to flush their queued audit records
+    after cancellation, even when those streams use the full drain budget.
+    These phases share ``grace_seconds``. Running
     signing threads can still delay process exit beyond the coroutine's drain
     budget; their SDK I/O limits constrain ordinary network stalls, not arbitrary
     thread hangs.

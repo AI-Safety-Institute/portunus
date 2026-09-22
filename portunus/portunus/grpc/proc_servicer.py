@@ -265,6 +265,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.REQUEST,
                 timestamp=timestamp,
             )
+            if not request.observability_mode:
+                return _empty_body_response(request_side=True)
         elif request.HasField("request_trailers"):
             await self._on_request_trailers(state, request.request_trailers, timestamp)
             await self._finish_http_body(state, Direction.REQUEST, timestamp)
@@ -283,6 +285,8 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 direction=Direction.RESPONSE,
                 timestamp=timestamp,
             )
+            if not request.observability_mode:
+                return _empty_body_response(request_side=False)
         elif request.HasField("response_trailers"):
             await self._on_response_trailers(
                 state, request.response_trailers, timestamp
@@ -1004,6 +1008,14 @@ def _empty_headers_response(*, request_side: bool) -> proc_pb2.ProcessingRespons
     if request_side:
         return proc_pb2.ProcessingResponse(request_headers=hdr)
     return proc_pb2.ProcessingResponse(response_headers=hdr)
+
+
+def _empty_body_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
+    """Acknowledge a body chunk without altering it in blocking mode."""
+    body = proc_pb2.BodyResponse(response=proc_pb2.CommonResponse())
+    if request_side:
+        return proc_pb2.ProcessingResponse(request_body=body)
+    return proc_pb2.ProcessingResponse(response_body=body)
 
 
 def _empty_trailers_response(*, request_side: bool) -> proc_pb2.ProcessingResponse:
