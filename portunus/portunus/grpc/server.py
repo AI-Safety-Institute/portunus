@@ -298,7 +298,13 @@ async def start_grpc_server(
         # raw chunk by closure, so the record count alone (10k × ~750 KB ≈
         # 6.4 GiB) would blow past the container memory cap.
         max_bytes=config.publish_queue_max_bytes,
-        num_workers=max(4, config.max_concurrent_streams // 64),
+        num_workers=(
+            config.publish_workers
+            if config.publish_workers is not None
+            else max(4, config.max_concurrent_streams // 64)
+        ),
+        max_batch=config.publish_batch_size,
+        coalesce_seconds=config.publish_coalesce_ms / 1000,
         # Workers drain in stream-grouped Firehose PutRecordBatch calls, keeping
         # records/s under the per-stream quota without an unbounded buffer.
         batch_sender=publish_service.put_record_batch,

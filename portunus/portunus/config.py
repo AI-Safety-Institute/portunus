@@ -226,6 +226,25 @@ class GrpcConfig(BaseModel):
         ),
         ge=1,
     )
+    publish_workers: Optional[int] = Field(
+        default=None,
+        description="Publisher workers; unset retains the stream-based worker count",
+        ge=1,
+        le=64,
+    )
+    publish_batch_size: int = Field(
+        default=500,
+        description="Maximum queued records grouped before per-stream publishing",
+        ge=1,
+        le=3000,
+    )
+    publish_coalesce_ms: float = Field(
+        default=0.0,
+        description="Delay in milliseconds between partial publisher batches",
+        ge=0.0,
+        le=100.0,
+        allow_inf_nan=False,
+    )
     drop_sentinel_timeout_seconds: float = Field(
         default=0.25,
         description=(
@@ -512,6 +531,13 @@ def get_config() -> PortunusConfig:
         publish_queue_max_bytes=int(
             os.environ.get("GRPC_PUBLISH_QUEUE_MAX_BYTES", str(256 * 1024 * 1024))
         ),
+        publish_workers=(
+            int(os.environ["GRPC_PUBLISH_WORKERS"])
+            if "GRPC_PUBLISH_WORKERS" in os.environ
+            else None
+        ),
+        publish_batch_size=int(os.environ.get("GRPC_PUBLISH_BATCH_SIZE", "500")),
+        publish_coalesce_ms=float(os.environ.get("GRPC_PUBLISH_COALESCE_MS", "0")),
         drop_sentinel_timeout_seconds=float(
             os.environ.get("GRPC_DROP_SENTINEL_TIMEOUT_SECONDS", "0.25")
         ),
