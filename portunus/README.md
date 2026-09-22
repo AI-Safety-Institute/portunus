@@ -90,3 +90,23 @@ Run tests with pytest:
 ```bash
 uv run pytest
 ```
+
+### Audit overload handling
+
+Set `GRPC_AUDIT_PORT` to a port different from `GRPC_PORT` to run authentication
+and audit on separate gRPC server instances. Both use `GRPC_HOST` and validate
+the proxy identity; auth, signing and health remain on `GRPC_PORT`. Configure
+the proxy to send audit traffic to the matching port. Leaving it unset retains
+the shared listener.
+
+`GRPC_AUDIT_DROP_ON_PRESSURE=true` rejects audit submissions immediately once
+the bounded queue fills. Body byte/count limits and reserved metadata space
+still apply, but metadata and gap markers can also be lost when that reserve
+fills. Loss counters distinguish records from rejected gap markers. The default
+is false, retaining bounded waits for metadata admission.
+
+Firehose record-level failures receive one retry after an asynchronous jittered
+backoff. Repeated body-drop warnings are limited to one per second per servicer;
+loss counters still include every rejected record. Separate server admission
+shares the same Python process and CPU; this is best-effort audit delivery,
+with authentication and signing remaining fail closed.

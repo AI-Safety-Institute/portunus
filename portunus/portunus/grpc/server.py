@@ -75,6 +75,7 @@ class GrpcRuntime:
     health_monitor: Optional[asyncio.Task] = field(default=None)
     # Background CloudWatch EMF reporter — None when disabled (interval 0).
     metrics_reporter: Optional[asyncio.Task] = field(default=None)
+    audit_server: Optional[grpc.aio.Server] = field(default=None)
 
 
 async def _dependency_health_loop(
@@ -274,15 +275,19 @@ async def start_grpc_server(
             "env vars)."
         )
 
-    server = grpc.aio.server(
-        options=[
-            ("grpc.max_concurrent_streams", config.max_concurrent_streams),
-            ("grpc.keepalive_time_ms", 30_000),
-            ("grpc.keepalive_timeout_ms", 10_000),
-            ("grpc.keepalive_permit_without_calls", 1),
-            ("grpc.max_send_message_length", _MAX_GRPC_MSG_BYTES),
-            ("grpc.max_receive_message_length", _MAX_GRPC_MSG_BYTES),
-        ]
+    if config.audit_port == config.port:
+        raise RuntimeError("Authentication and audit listeners need distinct ports")
+    options = [
+        ("grpc.max_concurrent_streams", config.max_concurrent_streams),
+        ("grpc.keepalive_time_ms", 30_000),
+        ("grpc.keepalive_timeout_ms", 10_000),
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.max_send_message_length", _MAX_GRPC_MSG_BYTES),
+        ("grpc.max_receive_message_length", _MAX_GRPC_MSG_BYTES),
+    ]
+    server = grpc.aio.server(options=options)
+    audit_server = (
+        grpc.aio.server(options=options) if config.audit_port is not None else None
     )
 
     auth_servicer = PortunusAuthServicer(
@@ -305,6 +310,7 @@ async def start_grpc_server(
         ),
         max_batch=config.publish_batch_size,
         coalesce_seconds=config.publish_coalesce_ms / 1000,
+        drop_on_pressure=config.audit_drop_on_pressure,
         # Workers drain in stream-grouped Firehose PutRecordBatch calls, keeping
         # records/s under the per-stream quota without an unbounded buffer.
         batch_sender=publish_service.put_record_batch,
@@ -315,7 +321,9 @@ async def start_grpc_server(
         publish_service=publish_service,
         publish_queue=publish_queue,
     )
-    proc_grpc.add_ExternalProcessorServicer_to_server(proc_servicer, server)
+    proc_grpc.add_ExternalProcessorServicer_to_server(
+        proc_servicer, audit_server if audit_server is not None else server
+    )
 
     # Standard gRPC health service — the ECS / ALB probe target.
     health_servicer = health.aio.HealthServicer()
@@ -326,7 +334,11 @@ async def start_grpc_server(
     reflection.enable_server_reflection(
         (
             external_auth_pb2.DESCRIPTOR.services_by_name["Authorization"].full_name,
-            proc_pb2.DESCRIPTOR.services_by_name["ExternalProcessor"].full_name,
+            *(
+                (proc_pb2.DESCRIPTOR.services_by_name["ExternalProcessor"].full_name,)
+                if audit_server is None
+                else ()
+            ),
             health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
             reflection.SERVICE_NAME,
         ),
@@ -334,8 +346,19 @@ async def start_grpc_server(
     )
 
     listen_addr = f"{config.host}:{config.port}"
-    server.add_insecure_port(listen_addr)
-    await server.start()
+    try:
+        server.add_insecure_port(listen_addr)
+        if audit_server is not None:
+            audit_server.add_insecure_port(f"{config.host}:{config.audit_port}")
+            await audit_server.start()
+        await server.start()
+    except BaseException:
+        await asyncio.gather(
+            server.stop(0),
+            *([audit_server.stop(0)] if audit_server is not None else []),
+        )
+        await publish_queue.stop(drain_timeout=0)
+        raise
 
     # Mark liveness SERVING only after the listener is up, so a probe can't see
     # SERVING before the port accepts connections. It stays SERVING until drain
@@ -410,6 +433,7 @@ async def start_grpc_server(
         health_servicer=health_servicer,
         health_monitor=health_monitor,
         metrics_reporter=metrics_reporter,
+        audit_server=audit_server,
     )
 
 
@@ -473,7 +497,12 @@ async def stop_grpc_server(
     reserve = min(max(0.0, flush_reserve_seconds), float(grace_seconds))
     deadline = loop.time() + grace_seconds
 
-    await runtime.server.stop(grace=max(0.0, grace_seconds - reserve))
+    servers = [runtime.server]
+    if runtime.audit_server is not None:
+        servers.append(runtime.audit_server)
+    await asyncio.gather(
+        *(server.stop(grace=max(0.0, grace_seconds - reserve)) for server in servers)
+    )
 
     # The queue gets the remaining grace to flush to Firehose — accepted
     # records should not be dropped while grace remains. ``stop`` reports how
