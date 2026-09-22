@@ -12,6 +12,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   protobufs in place, preserving the existing signing and audit metadata contract.
 - Configured-off tracing skips per-call SDK wrappers; enabled tracing is unchanged.
 
+### Fixed
+- Authentication rejects Redis connection-probe and read timeouts without
+  starting additional identity or secret lookups.
+
 ## [0.10.0] - 2026-09-16
 
 ### Fixed

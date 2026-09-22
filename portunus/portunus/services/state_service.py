@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import aiobotocore.session
 import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError, MaxConnectionsError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
 from portunus.services.xray_service import capture_async
@@ -239,6 +240,8 @@ class StateService:
                     f"{config.redis.host}:{config.redis.port}, "
                     f"ping result: {ping_result}"
                 )
+            except (RedisTimeoutError, TimeoutError):
+                raise
             except Exception as e:
                 # No traceback — aioredis TLS/auth exceptions can include
                 # sensitive bytes.
