@@ -10,6 +10,7 @@ from portunus.exceptions import CredentialsError
 from portunus.models import AuthPayload, AuthResult, AwsCredentials, PrincipalInfo
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
+from portunus.services.state_service import StateService
 
 
 @pytest.fixture
@@ -20,12 +21,10 @@ def auth_service():
     mock_cache_service = MagicMock()
     mock_cache_service.get_cached_auth_result = AsyncMock(return_value=None)
     mock_cache_service.cache_auth_result = AsyncMock(return_value=True)
-    mock_validation_service = MagicMock()
 
     return AuthService(
         secrets_service=mock_secrets_service,
         cache_service=mock_cache_service,
-        validation_service=mock_validation_service,
     )
 
 
@@ -188,11 +187,6 @@ class TestAuthenticateCacheRead:
         auth_service.secrets_service.fetch_secret = AsyncMock(
             return_value='{"api_key": "sk-live"}'
         )
-        auth_service.validation_service.validate_and_extract_api_key.return_value = (
-            "sk-live",
-            None,
-        )
-
         result = await auth_service.authenticate(payload, "req-id")
 
         assert result.api_key == "sk-live"
@@ -207,15 +201,14 @@ class TestAuthenticateCacheRead:
         redis_client.get = AsyncMock(
             side_effect=redis.exceptions.TimeoutError("Timeout reading from socket")
         )
-        state_service = MagicMock()
-        state_service.acquire_redis_connection = AsyncMock(return_value=redis_client)
+        state_service = StateService()
+        state_service.redis_client = redis_client
         secrets_service = MagicMock()
         secrets_service.boto_session = MagicMock()
         secrets_service.fetch_secret = AsyncMock()
         service = AuthService(
             secrets_service=secrets_service,
             cache_service=CacheService(state_service=state_service),
-            validation_service=MagicMock(),
         )
 
         with pytest.raises(TimeoutError):
