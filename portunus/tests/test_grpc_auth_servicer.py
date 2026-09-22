@@ -19,6 +19,7 @@ from envoy.config.core.v3 import base_pb2
 from envoy.service.auth.v3 import attribute_context_pb2, external_auth_pb2
 from envoy.type.v3 import http_status_pb2
 from google.protobuf import struct_pb2
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config as portunus_config
 from portunus.exceptions import (
@@ -1081,3 +1082,38 @@ async def test_divergent_target_host_between_passes_forces_double_sts():
         _signing_ctx(target_host="api.anthropic.com"),
     )
     assert counters == {"sts": 2, "secrets": 2}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pass_name", ["auth", "signing"])
+async def test_cache_read_timeout_denies_each_pass_without_calling_aws(pass_name):
+    class TimedOutRedis:
+        async def get(self, _key):
+            raise RedisTimeoutError("Synthetic cache timeout")
+
+    counters = {"sts": 0, "secrets": 0}
+    state = StateService()
+    state.redis_client = TimedOutRedis()  # type: ignore[assignment]
+    signer = FakeSignRequest()
+    servicer = PortunusAuthServicer(
+        auth_service=AuthService(
+            secrets_service=SecretsService(
+                boto_session=_CountingBotoSession(counters, _SIGNING_SECRET)
+            ),
+            cache_service=CacheService(state_service=state),
+        ),
+        sign_request_fn=signer,  # type: ignore[arg-type]
+    )
+    context = _FakeContext(
+        metadata=[
+            ("x-portunus-proxy-key", _PROXY_KEY),
+            ("x-portunus-pass", pass_name),
+            ("x-portunus-target-host", "example.com"),
+        ]
+    )
+
+    response = await servicer.Check(_check_request(), context)
+
+    assert response.denied_response.status.code == 504
+    assert counters == {"sts": 0, "secrets": 0}
+    assert not signer.calls

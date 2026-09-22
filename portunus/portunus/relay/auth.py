@@ -65,6 +65,7 @@ async def authenticate_ws(
     On failure, closes the WebSocket with an appropriate code:
     - 4001: Missing or invalid authorization
     - 4003: Forbidden (AWS permissions error)
+    - 1013: Try again later (authentication timed out)
 
     Args:
         websocket: The WebSocket connection (not yet accepted).
@@ -105,6 +106,14 @@ async def authenticate_ws(
     except (AuthenticationError, FetchSecretError) as e:
         logger.warning(f"WS {request_id}: Auth forbidden: {e.message}")
         await _close_ws(websocket, code=WsCloseCode.FORBIDDEN, reason="Forbidden")
+        return None
+    except TimeoutError as e:
+        logger.warning(f"WS {request_id}: Auth timed out: {e}")
+        await _close_ws(
+            websocket,
+            code=WsCloseCode.TRY_AGAIN_LATER,
+            reason="Authentication timed out",
+        )
         return None
     except Exception as e:
         logger.error(f"WS {request_id}: Unexpected auth error: {e}")

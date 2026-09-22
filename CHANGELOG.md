@@ -9,6 +9,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Cached authentication avoids a Redis probe before each operation. Cache commands
   retry bounded pool contention without extending the entry's remaining lifetime.
 
+## [0.10.0] - 2026-09-16
+
+### Fixed
+- The backend keeps one Kinesis client per process instead of constructing a
+  new aiobotocore client for every published record. Client construction
+  (a fresh SSL context plus CA-bundle parse, ~30-40 ms of CPU) was about 80%
+  of the backend's CPU per request under load, which capped the OpenAI proxy
+  at roughly 500 requests/s with the backend fleet at its maximum task count.
+  A single worker now handles about 7x the request rate.
+- A cache read that times out during authentication now rejects the request
+  (503 on HTTP, close code 1013 on WebSocket) instead of falling back to the
+  full STS + Secrets Manager path. Under overload the timeout is a symptom of
+  a starved event loop, and the fallback added ~1 s of work per request that
+  Envoy had already abandoned. Other cache errors still fall back as before.
+
 ## [0.9.0] - 2026-09-11
 
 ### Added
@@ -213,7 +228,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.6.0...v0.7.0

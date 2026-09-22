@@ -867,7 +867,7 @@ dev = [
     { name = "redis" },
     { name = "requests" },
     { name = "ruff" },
-    { name = "types-aiobotocore" },
+    { name = "types-aiobotocore", extra = ["kinesis"] },
     { name = "types-aws-xray-sdk" },
     { name = "types-pyyaml" },
     { name = "types-requests" },
@@ -891,7 +891,7 @@ dev = [
     { name = "redis", specifier = ">=5.0.0,<6" },
     { name = "requests", specifier = ">=2.32.3,<3" },
     { name = "ruff", specifier = ">=0.16.2,<1" },
-    { name = "types-aiobotocore", specifier = ">=3.9.0,<4" },
+    { name = "types-aiobotocore", extras = ["kinesis"], specifier = ">=3.9.0,<4" },
     { name = "types-aws-xray-sdk", specifier = ">=2.14.0.20250708,<3" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260724,<7" },
     { name = "types-requests", specifier = ">=2.33.0.20260712,<3" },
@@ -1238,6 +1238,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b9/a8/a4ad647d7b3473bdc1892a0f7e6872affaf509d18f915f07c51f72b055c7/types_aiobotocore-3.9.0.tar.gz", hash = "sha256:00fc52e98c9d65fe6716f246e6e03ce18f0b6727aa580ab5b274fde6844b6142", size = 88503, upload-time = "2026-08-02T03:05:26.377Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/25/0e/d8af0ba644968d6183e04e9ab9c3e1c6b5b10f25f5389ec825abf65c11c7/types_aiobotocore-3.9.0-py3-none-any.whl", hash = "sha256:614862ac387098964805325751f8ab3b74d52e3e6ec7f37b7585fd971fabe476", size = 54999, upload-time = "2026-08-02T03:05:22.581Z" },
+]
+
+[package.optional-dependencies]
+kinesis = [
+    { name = "types-aiobotocore-kinesis" },
+]
+
+[[package]]
+name = "types-aiobotocore-kinesis"
+version = "3.9.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/0c/255ca34b392851fbb75dc444684c4990549c7b73aa0ea76bf73464708d8f/types_aiobotocore_kinesis-3.9.1.tar.gz", hash = "sha256:6c694df216b6a95da57957bd3f15043d4e6cc75927eb98bc18f55a1bbb25d42a", size = 26580, upload-time = "2026-09-08T03:36:31.523Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ee/65/8287082c61763273c3a4e47c32b7cf0e368c7548ff94ca05a1b4d28ddc52/types_aiobotocore_kinesis-3.9.1-py3-none-any.whl", hash = "sha256:4d01684f63ec32b7cd048bb681361781571870b5562a6ade4d56193281490ee1", size = 34647, upload-time = "2026-09-08T03:36:29.384Z" },
 ]
 
 [[package]]
