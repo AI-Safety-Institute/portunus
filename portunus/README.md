@@ -3,6 +3,13 @@
 ## Overview
 This package implements the Portunus service for the API Key Proxy system. It handles API key management, authorization, and request/response logging.
 
+## Runtime
+
+The container uses a glibc-based Python 3.12 image with native protobuf and
+hiredis. The gRPC entrypoint uses uvloop on supported CPython platforms.
+[Native library notices](portunus/third_party_notices/README.md) are included in
+the installed package and container.
+
 ## Architecture
 The service follows a modular architecture with the following components:
 
