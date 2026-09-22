@@ -123,9 +123,14 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             handler = self._auth_pass
 
         headers = _http_headers(request)
-        trace_root, parent_id, sampled = parse_trace_header(
-            headers.get("x-amzn-trace-id", "")
-        )
+        # Authenticated Envoy metadata carries the RPC parent and sampling
+        # decision, which may be absent from the original HTTP trace header.
+        trace_header = headers.get("x-amzn-trace-id", "")
+        for key, value in context.invocation_metadata() or ():
+            if key == "x-amzn-trace-id" and isinstance(value, str):
+                trace_header = value
+                break
+        trace_root, parent_id, sampled = parse_trace_header(trace_header)
         if config.aws.xray_enabled and trace_root:
             # Join the trace Envoy/ALB started so this Check (and the patched
             # STS/SecretsManager/KMS calls under it) appear as a child of the
