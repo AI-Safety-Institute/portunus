@@ -35,6 +35,7 @@ from portunus.exceptions import (
 )
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
+from portunus.services import state_service as state_module
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.secrets_service import SecretsService
@@ -1091,14 +1092,26 @@ async def test_divergent_target_host_between_passes_forces_double_sts():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pass_name", ["auth", "signing"])
-async def test_cache_read_timeout_denies_each_pass_without_calling_aws(pass_name):
+@pytest.mark.parametrize("timeout_stage", ["connect", "read"])
+@pytest.mark.parametrize("error_type", [RedisTimeoutError, TimeoutError])
+async def test_cache_timeout_denies_each_pass_without_calling_aws(
+    monkeypatch, pass_name, timeout_stage, error_type
+):
     class TimedOutRedis:
+        async def ping(self):
+            raise error_type("Synthetic connection timeout")
+
         async def get(self, _key):
-            raise RedisTimeoutError("Synthetic cache timeout")
+            raise error_type("Synthetic cache timeout")
 
     counters = {"sts": 0, "secrets": 0}
     state = StateService()
-    state.redis_client = TimedOutRedis()  # type: ignore[assignment]
+    if timeout_stage == "read":
+        state.redis_client = TimedOutRedis()  # type: ignore[assignment]
+    else:
+        monkeypatch.setattr(
+            state_module.aioredis, "Redis", lambda **kw: TimedOutRedis()
+        )
     signer = FakeSignRequest()
     servicer = PortunusAuthServicer(
         auth_service=AuthService(
@@ -1109,17 +1122,25 @@ async def test_cache_read_timeout_denies_each_pass_without_calling_aws(pass_name
         ),
         sign_request_fn=signer,  # type: ignore[arg-type]
     )
-    context = _FakeContext(
-        metadata=[
-            ("x-portunus-proxy-key", _PROXY_KEY),
-            ("x-portunus-pass", pass_name),
-            ("x-portunus-target-host", "example.com"),
-        ]
-    )
+    server = grpc.aio.server()
+    external_auth_pb2_grpc.add_AuthorizationServicer_to_server(servicer, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            response = await external_auth_pb2_grpc.AuthorizationStub(channel).Check(
+                _check_request(),
+                metadata=[
+                    ("x-portunus-proxy-key", _PROXY_KEY),
+                    ("x-portunus-pass", pass_name),
+                    ("x-portunus-target-host", "example.com"),
+                ],
+                timeout=2,
+            )
+        assert response.denied_response.status.code == 504
+    finally:
+        await server.stop(None)
 
-    response = await servicer.Check(_check_request(), context)
-
-    assert response.denied_response.status.code == 504
     assert counters == {"sts": 0, "secrets": 0}
     assert not signer.calls
 

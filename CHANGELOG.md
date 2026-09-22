@@ -31,6 +31,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   rejected once shutdown starts, and cancelled submits remain accounted for.
 - Blocking gRPC capture acknowledges request and response body chunks; observation
   mode continues to avoid replies.
+- Authentication rejects Redis connection-probe and read timeouts without
+  starting additional identity or secret lookups.
 
 ## [0.10.0] - 2026-09-16
 
