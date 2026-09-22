@@ -170,6 +170,16 @@ class GrpcConfig(BaseModel):
         ge=1,
         le=65535,
     )
+    audit_port: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Separate audit listener; unset retains the shared listener",
+    )
+    audit_drop_on_pressure: bool = Field(
+        default=False,
+        description="Drop audit submissions immediately when their queue is full",
+    )
     max_concurrent_streams: int = Field(
         default=1000,
         description="Per-connection HTTP/2 stream limit",
@@ -470,6 +480,15 @@ def get_config() -> PortunusConfig:
         enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
         host=os.environ.get("GRPC_HOST", "127.0.0.1"),
         port=int(os.environ.get("GRPC_PORT", "9000")),
+        audit_port=(
+            int(os.environ["GRPC_AUDIT_PORT"])
+            if "GRPC_AUDIT_PORT" in os.environ
+            else None
+        ),
+        audit_drop_on_pressure=os.environ.get(
+            "GRPC_AUDIT_DROP_ON_PRESSURE", "false"
+        ).lower()
+        == "true",
         max_concurrent_streams=int(
             os.environ.get("GRPC_MAX_CONCURRENT_STREAMS", "1000")
         ),

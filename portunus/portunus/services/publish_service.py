@@ -7,6 +7,7 @@ them via Firehose ``PutRecordBatch``. The bounded publish queue (see
 
 import base64
 import logging
+import random
 from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
@@ -77,7 +78,8 @@ class PublishService:
         """Ship ``records`` to ``stream_name`` via Firehose ``PutRecordBatch``.
 
         Splits into legal chunks (<=500 / <=4 MiB). On partial failure the
-        failed subset (via ``RequestResponses[].ErrorCode``) is retried once —
+        failed subset (via ``RequestResponses[].ErrorCode``) is retried once
+        after a short jittered backoff —
         audit is fire-and-forget with no other retry. Survivors are logged with
         their error codes (payload-free) so loss is observable. Returns the
         count Firehose did NOT accept. Never raises.
@@ -153,13 +155,17 @@ class PublishService:
 
             if attempt == 1:
                 logger.warning(
-                    "put_record_batch on %s: %d/%d failed (%s); retrying subset",
+                    "put_record_batch on %s: %d/%d failed (%s); "
+                    "retrying subset after backoff",
                     stream_name,
                     len(retry),
                     len(records),
                     last_error_codes,
                 )
                 records = retry
+                # Per-record rejection arrives inside HTTP 200, so SDK
+                # request-level retry backoff does not cover it.
+                await asyncio.sleep(random.uniform(0.5, 1.5))
                 continue
 
             # Second attempt still failed — give up; surface the loss.

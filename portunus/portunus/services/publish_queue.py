@@ -1,6 +1,8 @@
 """Bounded async publish queue with tiered drop policy + opportunistic batching.
 
-``submit_blocking`` (headers/trailers) uses normal asyncio backpressure;
+``submit_blocking`` (headers/trailers) normally uses asyncio backpressure;
+``drop_on_pressure`` rejects immediately when full, preserving bounded work
+when audit delivery is unavailable.
 ``submit_droppable`` (high-volume bodies) is bounded by both ``body_capacity``
 records AND ``max_bytes`` retained payload bytes — each queued body task pins
 its raw chunk by closure, so a count-only cap would allow ~GBs retained.
@@ -76,7 +78,7 @@ class PublishTask:
 
 
 class BoundedPublishQueue:
-    """Bounded asyncio queue with a drop-body / block-other tiering."""
+    """Bounded audit queue with reserved metadata space and optional immediate drops."""
 
     def __init__(
         self,
@@ -88,6 +90,7 @@ class BoundedPublishQueue:
         max_bytes: Optional[int] = None,
         max_batch: int = 500,
         coalesce_seconds: float = 0.0,
+        drop_on_pressure: bool = False,
     ) -> None:
         if maxsize < 1:
             raise ValueError(f"maxsize must be >=1, got {maxsize}")
@@ -106,6 +109,7 @@ class BoundedPublishQueue:
         # subset of the queue, so no memory beyond maxsize.
         self._max_batch = max_batch
         self._coalesce_seconds = coalesce_seconds
+        self._drop_on_pressure = drop_on_pressure
         self._workers: list[asyncio.Task] = []
         self._closed = False
         self._space_available = asyncio.Event()
@@ -331,6 +335,8 @@ class BoundedPublishQueue:
         queue; the timed-out record counts on ``dropped_total`` (or
         ``sentinel_dropped_total`` when ``sentinel=True`` — see the class
         docstring). Returns True when enqueued; a stopping queue rejects submits.
+        With ``drop_on_pressure``, a full queue rejects immediately instead;
+        the same loss counters apply, including the separate sentinel counter.
         """
         if self._closed:
             self._reject_submission(sentinel=sentinel)
@@ -339,6 +345,9 @@ class BoundedPublishQueue:
             try:
                 self._queue.put_nowait(task)
             except asyncio.QueueFull:
+                if self._drop_on_pressure:
+                    self._reject_submission(sentinel=sentinel)
+                    return False
                 # Woken submitters recheck admission before inserting atomically.
                 # An awaiting Queue.put could enqueue after stop released space.
                 async with asyncio.timeout(timeout):

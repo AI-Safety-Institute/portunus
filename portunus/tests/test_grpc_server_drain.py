@@ -93,6 +93,29 @@ def _runtime(*, server: object, queue: object) -> GrpcRuntime:
 
 
 @pytest.mark.asyncio
+async def test_auth_and_audit_drain_concurrently():
+    """Audit must not get a second serial drain window after auth."""
+    auth_stopping, audit_stopping = asyncio.Event(), asyncio.Event()
+
+    class CoordinatedServer:
+        def __init__(self, entered, other):
+            self.entered, self.other = entered, other
+
+        async def stop(self, grace):
+            self.entered.set()
+            await self.other.wait()
+
+    queue = _RecordingQueue()
+    runtime = _runtime(
+        server=CoordinatedServer(auth_stopping, audit_stopping), queue=queue
+    )
+    runtime.audit_server = CoordinatedServer(audit_stopping, auth_stopping)
+    await asyncio.wait_for(stop_grpc_server(runtime, 1), timeout=1)
+    assert auth_stopping.is_set() and audit_stopping.is_set()
+    assert queue.drain_timeout_seen is not None
+
+
+@pytest.mark.asyncio
 async def test_drain_gives_queue_only_the_remaining_grace_not_a_second_full_grace():
     """The queue's drain budget is grace MINUS what server.stop already spent.
 
