@@ -4,6 +4,13 @@ The `portunus/` Python package is the gRPC servicer process that Envoy delegates
 
 For architecture and request flow (ext_authz `Check`, the composite-filter signing pass, ext_proc `Process`), see the [repo-root `CLAUDE.md`](../CLAUDE.md).
 
+## Runtime
+
+The container uses a glibc-based Python 3.12 image with native protobuf and
+hiredis. The gRPC entrypoint uses uvloop on supported CPython platforms.
+[Native library notices](portunus/third_party_notices/README.md) are included in
+the installed package and container.
+
 ## Module map
 
 ```

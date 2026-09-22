@@ -19,6 +19,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 - The backend image uses a glibc-based Python runtime and native protobuf.
   The gRPC server uses uvloop on supported platforms; Redis uses hiredis.
+- gRPC publisher worker count, mixed-batch size and coalescing delay are
+  configurable within bounded ranges; existing defaults remain unchanged.
 - gRPC capture uses direct coroutine reads and writes and omits replies in
   observation mode. Header conversion and audit timestamps do less repeated work
   while preserving redaction and record formats.
