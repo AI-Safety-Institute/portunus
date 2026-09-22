@@ -117,6 +117,27 @@ def test_valid_identity_or_explicit_local_opt_out_starts_proxy(
         proxy.wait_for_ping()
 
 
+@pytest.mark.parametrize(("configured", "expected"), [(None, 1), ("2", 2)])
+def test_proxy_uses_the_configured_worker_count(entrypoint_image, configured, expected):
+    overrides = {} if configured is None else {"ENVOY_CONCURRENCY": configured}
+    with running_proxy(entrypoint_image, overrides) as proxy:
+        proxy.wait_for_ping()
+        response = requests.get(
+            f"http://127.0.0.1:{proxy.admin_port}/server_info", timeout=2
+        )
+        response.raise_for_status()
+        assert response.json()["command_line_options"]["concurrency"] == expected
+
+
+@pytest.mark.parametrize("workers", ["0", "00", "-1", "1.5", "2 --disable-hot-restart"])
+def test_invalid_worker_count_prevents_startup(entrypoint_image, workers):
+    with running_proxy(entrypoint_image, {"ENVOY_CONCURRENCY": workers}) as proxy:
+        result = subprocess.run(
+            ["docker", "wait", proxy.name], capture_output=True, text=True, timeout=8
+        )
+        assert result.stdout.strip() == "1"
+
+
 @pytest.mark.parametrize("request_limit", [None, 2048])
 def test_both_upstreams_publish_configured_request_capacity(
     entrypoint_image, request_limit

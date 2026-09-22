@@ -54,6 +54,7 @@ PORTUNUS_API_KEY=replace-with-random-shared-key
 PORTUNUS_API_KEY_OPTIONAL=false
 
 # Upstream concurrency (applies independently to HTTP and WebSocket clusters)
+ENVOY_CONCURRENCY=1
 TARGET_MAX_CONNECTIONS=10000
 TARGET_MAX_REQUESTS=1024
 TARGET_MAX_PENDING_REQUESTS=1024
@@ -71,6 +72,10 @@ least 16 bytes. The proxy refuses to start with a missing or shorter key.
 Local development can explicitly allow an empty key with
 `PORTUNUS_API_KEY_OPTIONAL=true`, paired with the backend's corresponding
 `GRPC_PROXY_API_KEY_OPTIONAL=true`; this does not permit a short nonempty key.
+
+`ENVOY_CONCURRENCY` sets the number of Envoy worker threads. It defaults to one
+instead of inheriting the host CPU count. Set a positive integer without leading
+zeroes to match the CPU allocated to Envoy; larger values need workload validation.
 
 Request concurrency is independent of connection concurrency, particularly for
 HTTP/2. Both upstream clusters expose remaining request and pending-request

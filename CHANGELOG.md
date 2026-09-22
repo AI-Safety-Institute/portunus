@@ -17,6 +17,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Envoy defaults to one worker instead of the host CPU count. Set
+  `ENVOY_CONCURRENCY` to match its allocated CPU capacity.
 - The backend now runs the gRPC server. Set `GRPC_ENABLED=true`, and configure
   the same shared key of at least 16 bytes in backend `GRPC_PROXY_API_KEY` and
   proxy `PORTUNUS_API_KEY`. An empty key requires both components' explicit

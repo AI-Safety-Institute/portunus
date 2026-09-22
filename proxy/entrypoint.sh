@@ -9,6 +9,15 @@ export WS_TARGET_PORT=${WS_TARGET_PORT:-${TARGET_PORT}}
 export TARGET_MAX_REQUESTS=${TARGET_MAX_REQUESTS:-1024}
 export TARGET_MAX_PENDING_REQUESTS=${TARGET_MAX_PENDING_REQUESTS:-1024}
 
+# Host CPU count can exceed the container's CPU allocation.
+ENVOY_CONCURRENCY=${ENVOY_CONCURRENCY:-1}
+case "$ENVOY_CONCURRENCY" in
+  0*|*[!0-9]*)
+    echo "[entrypoint] FATAL: ENVOY_CONCURRENCY must be a positive integer without leading zeroes" >&2
+    exit 1
+    ;;
+esac
+
 # Pre-shared key proving the proxy's identity to Portunus's gRPC server.
 # Substituted into envoy.yaml as the x-portunus-proxy-key initial_metadata.
 export PORTUNUS_API_KEY=${PORTUNUS_API_KEY:-""}
@@ -180,6 +189,7 @@ if ! envoy --version | grep -q "/${EXPECTED_ENVOY_MINOR}\."; then
 fi
 
 envoy -c /envoy/envoy_subst.yaml \
+  --concurrency "$ENVOY_CONCURRENCY" \
   --log-level "${ENVOY_LOG_LEVEL:-info}" \
   --drain-time-s "$DRAIN_TIME_S" \
   --drain-strategy immediate &
