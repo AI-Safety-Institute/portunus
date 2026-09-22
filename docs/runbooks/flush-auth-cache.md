@@ -1,7 +1,7 @@
 # Flush the Portunus auth cache
 
 Portunus caches successful authorisation results in Redis. After rotating or
-revoking credentials, use this procedure when waiting for `CACHE_DURATION`
+revoking credentials, use this procedure when waiting for cached credentials
 to expire is insufficient.
 
 `CacheService.flush_all()` issues Redis `FLUSHDB`: it deletes every key in
