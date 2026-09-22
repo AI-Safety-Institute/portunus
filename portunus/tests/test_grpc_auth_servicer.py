@@ -10,6 +10,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -33,6 +34,7 @@ from portunus.exceptions import (
     FetchSecretError,
     PayloadError,
 )
+from portunus.grpc import auth_servicer as auth_module
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
 from portunus.services import state_service as state_module
@@ -241,6 +243,51 @@ def _make_servicer(
         sign_request_fn=sign,  # type: ignore[arg-type]
     )
     return servicer, auth, sign
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rpc_sampled", [None, False, True])
+@pytest.mark.parametrize("valid_proxy", [False, True])
+async def test_envoy_trace_decision_precedes_http_header_after_proxy_auth(
+    monkeypatch, rpc_sampled, valid_proxy
+):
+    monkeypatch.setattr(portunus_config.aws, "xray_enabled", True)
+    http_root = "1-00000000-000000000000000000000001"
+    rpc_root = "1-00000000-000000000000000000000002"
+    seen = []
+
+    @asynccontextmanager
+    async def trace_context(trace_root, **kwargs):
+        seen.append((trace_root, kwargs["parent_id"], kwargs["sampled"]))
+        yield
+
+    monkeypatch.setattr(auth_module, "XRayContext", trace_context)
+    metadata = [("x-portunus-proxy-key", _PROXY_KEY if valid_proxy else "invalid")]
+    if rpc_sampled is not None:
+        metadata.append(
+            (
+                "x-amzn-trace-id",
+                f"Root={rpc_root};Parent=0000000000000002;Sampled={int(rpc_sampled)}",
+            )
+        )
+    servicer, auth, _ = _make_servicer()
+    response = await servicer.Check(
+        _check_request(
+            extra_headers={"x-amzn-trace-id": f"Root={http_root};Sampled=1"}
+        ),
+        _FakeContext(metadata=metadata),
+    )
+    if valid_proxy:
+        assert response.HasField("ok_response")
+        assert len(auth.auth_calls) == 1
+        assert seen == (
+            [(http_root, None, True)]
+            if rpc_sampled is None
+            else [(rpc_root, "0000000000000002", rpc_sampled)]
+        )
+    else:
+        assert response.HasField("denied_response")
+        assert not seen and not auth.auth_calls
 
 
 def _decoded_headers(headers) -> dict[str, str]:
