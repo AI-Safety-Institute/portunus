@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 - Cached authentication avoids a Redis probe before each operation. Cache commands
   retry bounded pool contention without extending the entry's remaining lifetime.
+- gRPC authorization normalizes request headers once and builds fresh response
+  protobufs in place, preserving the existing signing and audit metadata contract.
+- Configured-off tracing skips per-call SDK wrappers; enabled tracing is unchanged.
 
 ## [0.10.0] - 2026-09-16
 

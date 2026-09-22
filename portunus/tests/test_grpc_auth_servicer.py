@@ -16,9 +16,14 @@ from typing import Any, Optional
 import grpc
 import pytest
 from envoy.config.core.v3 import base_pb2
-from envoy.service.auth.v3 import attribute_context_pb2, external_auth_pb2
+from envoy.service.auth.v3 import (
+    attribute_context_pb2,
+    external_auth_pb2,
+    external_auth_pb2_grpc,
+)
 from envoy.type.v3 import http_status_pb2
 from google.protobuf import struct_pb2
+from google.protobuf.json_format import MessageToDict
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config as portunus_config
@@ -1117,3 +1122,115 @@ async def test_cache_read_timeout_denies_each_pass_without_calling_aws(pass_name
     assert response.denied_response.status.code == 504
     assert counters == {"sts": 0, "secrets": 0}
     assert not signer.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unsigned", "signing-auth", "signing-response"])
+@pytest.mark.parametrize(
+    "key_header,prefix",
+    [("authorization", "Bearer "), ("X-Api-Key", ""), ("AUTHORIZATION", "Synthetic ")],
+)
+@pytest.mark.parametrize("project", [None, "synthetic-project"])
+async def test_allow_responses_preserve_identity_and_header_policy_over_grpc(
+    monkeypatch, mode, key_header, prefix, project
+):
+    monkeypatch.setattr(portunus_config, "api_key_header", key_header)
+    monkeypatch.setattr(portunus_config, "api_key_prefix", prefix)
+    signing_key = (
+        SigningKey(
+            kms_key_arn="arn:aws:kms:eu-west-2:111111111111:alias/test-key",
+            provider_id="synthetic-provider",
+        )
+        if mode != "unsigned"
+        else None
+    )
+
+    class RequestAuth:
+        async def authenticate(self, payload, request_id, target_host):
+            return AuthResult(
+                api_key=f"synthetic-key-{request_id}",
+                signing_key=signing_key,
+                principal_info=PrincipalInfo(
+                    arn=f"arn:aws:iam::111111111111:role/{request_id}",
+                    account_id="111111111111",
+                    project=project,
+                ),
+            )
+
+    signature_headers = {"Signature": "sig1=:eA==:", "Signature-Input": "sig1=()"}
+    servicer = PortunusAuthServicer(
+        auth_service=RequestAuth(),  # type: ignore[arg-type]
+        sign_request_fn=FakeSignRequest(signature_headers),  # type: ignore[arg-type]
+    )
+    server = grpc.aio.server()
+    external_auth_pb2_grpc.add_AuthorizationServicer_to_server(servicer, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    metadata = [
+        ("x-portunus-proxy-key", _PROXY_KEY),
+        ("x-portunus-target-host", "example.com"),
+        ("x-portunus-pass", "signing" if mode == "signing-response" else "auth"),
+    ]
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = external_auth_pb2_grpc.AuthorizationStub(channel)
+            requests = [
+                _check_request(
+                    payload_header=None,
+                    request_id=request_id,
+                    body=b"synthetic-body",
+                    extra_headers={
+                        key_header: f"{prefix}{_VALID_PAYLOAD}",
+                        "Content-Digest": "forged",
+                        "Signature": "forged",
+                        "Signature-Input": "forged",
+                        "x-portunus-signing-required": "forged",
+                    },
+                )
+                for request_id in ("first", "second")
+            ]
+            responses = await asyncio.gather(
+                *(stub.Check(request, metadata=metadata) for request in requests)
+            )
+    finally:
+        await server.stop(None)
+
+    for request_id, response in zip(("first", "second"), responses, strict=True):
+        assert response.HasField("status") and response.status.code == 0
+        assert response.WhichOneof("http_response") == "ok_response"
+        headers = _decoded_headers(response.ok_response.headers)
+        removed = set(response.ok_response.headers_to_remove)
+        assert all(
+            h.append_action == base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
+            for h in response.ok_response.headers
+        )
+        if mode == "signing-auth":
+            assert headers == {"x-portunus-signing-required": "true"}
+        else:
+            assert headers[key_header.lower()] == f"{prefix}synthetic-key-{request_id}"
+        if mode != "signing-response":
+            assert {"content-digest", "signature", "signature-input"} <= removed
+            identity = MessageToDict(response.dynamic_metadata)
+            assert (
+                identity["principal_info"]
+                == PrincipalInfo(
+                    arn=f"arn:aws:iam::111111111111:role/{request_id}",
+                    account_id="111111111111",
+                    project=project,
+                ).to_dict()
+            )
+            assert identity["secret_arn"].endswith(":secret:test")
+        else:
+            assert not response.HasField("dynamic_metadata")
+            assert headers["signature"] == signature_headers["Signature"]
+            assert headers["signature-input"] == signature_headers["Signature-Input"]
+            assert headers["content-digest"] == (
+                "sha-256=:"
+                + base64.b64encode(hashlib.sha256(b"synthetic-body").digest()).decode()
+                + ":"
+            )
+            assert not {"content-digest", "signature", "signature-input"} & removed
+        assert ("authorization" in removed) == (
+            key_header.lower() != "authorization" and mode != "signing-auth"
+        )
+        assert ("x-portunus-signing-required" in removed) == (mode == "unsigned")
