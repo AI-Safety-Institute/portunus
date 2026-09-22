@@ -3,6 +3,13 @@
 ## Overview
 This package implements the Portunus service for the API Key Proxy system. It handles API key management, authorization, and request/response logging.
 
+## Runtime
+
+The container uses a glibc-based Python 3.12 image with native protobuf and
+hiredis. The gRPC entrypoint uses uvloop on supported CPython platforms.
+[Native library notices](portunus/third_party_notices/README.md) are included in
+the installed package and container.
+
 ## Architecture
 The service follows a modular architecture with the following components:
 
@@ -45,6 +52,27 @@ Key environment variables:
 - `LOG_TTL`: How long to store log data in Redis (seconds)
 - `AWS_ENDPOINT_URL`: Can be used pointed at a localstack instance to avoid hitting AWS
 
+### gRPC publisher tuning
+
+The gRPC publisher accepts these optional settings:
+
+| Environment variable | Default | Allowed range |
+| --- | --- | --- |
+| `GRPC_PUBLISH_WORKERS` | `max(4, GRPC_MAX_CONCURRENT_STREAMS // 64)` | 1–64 when set |
+| `GRPC_PUBLISH_BATCH_SIZE` | 500 records | 1–3000 |
+| `GRPC_PUBLISH_COALESCE_MS` | 0 milliseconds | 0–100, finite |
+
+The batch size groups queued records across destinations. Individual Firehose
+requests still obey the 500-record and 4-MiB limits. Coalescing pauses between
+partial batches, adding up to the configured delay for new arrivals.
+Queue record and payload-byte limits continue to apply.
+
+A historical cumulative synthetic candidate used one worker, 3000 records and
+5 milliseconds. This integrated subset has not been rebenchmarked.
+This profile is opt-in: validate destination fairness, retry behaviour and oldest
+record age with the intended audit sinks before adopting it. Leaving these
+variables unset preserves the existing publisher defaults.
+
 ## Development
 From the repository root, install dependencies:
 ```bash
@@ -62,3 +90,23 @@ Run tests with pytest:
 ```bash
 uv run pytest
 ```
+
+### Audit overload handling
+
+Set `GRPC_AUDIT_PORT` to a port different from `GRPC_PORT` to run authentication
+and audit on separate gRPC server instances. Both use `GRPC_HOST` and validate
+the proxy identity; auth, signing and health remain on `GRPC_PORT`. Configure
+the proxy to send audit traffic to the matching port. Leaving it unset retains
+the shared listener.
+
+`GRPC_AUDIT_DROP_ON_PRESSURE=true` rejects audit submissions immediately once
+the bounded queue fills. Body byte/count limits and reserved metadata space
+still apply, but metadata and gap markers can also be lost when that reserve
+fills. Loss counters distinguish records from rejected gap markers. The default
+is false, retaining bounded waits for metadata admission.
+
+Firehose record-level failures receive one retry after an asynchronous jittered
+backoff. Repeated body-drop warnings are limited to one per second per servicer;
+loss counters still include every rejected record. Separate server admission
+shares the same Python process and CPU; this is best-effort audit delivery,
+with authentication and signing remaining fail closed.
