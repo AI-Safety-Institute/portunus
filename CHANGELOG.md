@@ -6,11 +6,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- gRPC capture uses direct coroutine reads and writes and omits replies in
+  observation mode. Header conversion and audit timestamps do less repeated work
+  while preserving redaction and record formats.
+- The audit queue supports an optional bounded delay between partial batches;
+  it remains disabled by default, and count and payload-byte limits still apply.
+- Firehose publication uses a fixed application user-agent to avoid rebuilding
+  SDK metadata for every batch.
 - Audit serialization avoids an extra copy when adding JSON record delimiters.
 - Complete WebSocket messages avoid a reassembly copy while retaining capture limits
   and fragmented-message handling.
 - Cached authentication avoids a Redis probe before each operation. Cache commands
   retry bounded pool contention without extending the entry's remaining lifetime.
+- gRPC authorization normalizes request headers once and builds fresh response
+  protobufs in place, preserving the existing signing and audit metadata contract.
+- Configured-off tracing skips per-call SDK wrappers; enabled tracing is unchanged.
+
+## [0.10.0] - 2026-09-16
+
+### Fixed
+- The backend keeps one Kinesis client per process instead of constructing a
+  new aiobotocore client for every published record. Client construction
+  (a fresh SSL context plus CA-bundle parse, ~30-40 ms of CPU) was about 80%
+  of the backend's CPU per request under load, which capped the OpenAI proxy
+  at roughly 500 requests/s with the backend fleet at its maximum task count.
+  A single worker now handles about 7x the request rate.
+- A cache read that times out during authentication now rejects the request
+  (503 on HTTP, close code 1013 on WebSocket) instead of falling back to the
+  full STS + Secrets Manager path. Under overload the timeout is a symptom of
+  a starved event loop, and the fallback added ~1 s of work per request that
+  Envoy had already abandoned. Other cache errors still fall back as before.
+
+### Fixed
+- Completed HTTP capture releases its processing stream after both directions
+  finish, including rejected WebSocket upgrades, without waiting for Envoy's
+  deferred close. Successful WebSocket streams retain their existing lifetime.
+- Timed-out publisher shutdown releases remaining queued payloads and shutdown
+  markers while preserving loss accounting.
 
 ## [0.9.0] - 2026-09-11
 
@@ -216,7 +248,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.6.0...v0.7.0

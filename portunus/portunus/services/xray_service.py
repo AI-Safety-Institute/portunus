@@ -39,6 +39,10 @@ def capture_async(
     coroutine methods look like bare ``Coroutine``s at call sites; at runtime
     it decorates with an identity signature, so cast to what it behaves as.
     """
+    # Tracing is fixed at process startup; disabled SDK wrappers still
+    # construct dummy entities for every call.
+    if not config.aws.xray_enabled:
+        return lambda function: function
     return cast(
         Callable[[_AsyncCallable], _AsyncCallable],
         xray_recorder.capture_async(name),

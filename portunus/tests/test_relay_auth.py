@@ -117,6 +117,28 @@ class TestAuthenticateWs:
         mock_websocket.close.assert_called_once_with(code=4003, reason="Forbidden")
 
     @pytest.mark.asyncio
+    async def test_timeout_closes_1013(self, mock_websocket, mock_auth_service):
+        """A timed-out authentication closes with 1013 (try again later)."""
+        mock_websocket.headers = {"authorization": "Bearer some_payload"}
+
+        with patch(
+            "portunus.relay.auth.AuthPayload.from_contents"
+        ) as mock_from_contents:
+            mock_from_contents.return_value = MagicMock()
+            mock_auth_service.authenticate.side_effect = TimeoutError(
+                "Cache read timed out during authentication"
+            )
+
+            result = await authenticate_ws(
+                mock_websocket, mock_auth_service, "test-req-id"
+            )
+
+        assert result is None
+        mock_websocket.close.assert_called_once_with(
+            code=1013, reason="Authentication timed out"
+        )
+
+    @pytest.mark.asyncio
     async def test_successful_auth_returns_result(
         self, mock_websocket, mock_auth_service
     ):
