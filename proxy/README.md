@@ -14,6 +14,23 @@ proxy/
 
 There is no Lua filter and no proxy-utils library: all auth and audit logic lives in the Portunus gRPC servicers.
 
+### Audit overload isolation
+
+For separate authentication and audit admission, set `GRPC_AUDIT_PORT` on
+Portunus to a different port from `GRPC_PORT`, and set
+`PORTUNUS_AUDIT_GRPC_PORT` on Envoy to that same audit port. Portunus creates
+two server instances; both retain the configured bind address and proxy-key
+check. Authentication, signing, and health stay on the original port.
+Leaving these settings unset preserves the shared-server configuration.
+
+Set `GRPC_AUDIT_DROP_ON_PRESSURE=true` on Portunus to reject audit submissions
+immediately when the bounded queue is full. Body limits and reserved metadata
+space still apply, but once the queue fills, metadata and loss markers can
+also be lost. Original losses and rejected loss markers have separate counters.
+This favours forwarding availability during an audit outage; it does not make
+audit delivery durable. Authentication and signing still fail closed. The two
+servers share Python CPU, so this isolates admission rather than all resources.
+
 ## Filter chain
 
 1. **Common HTTP filters** — request-id, X-Ray tracing.
@@ -112,3 +129,16 @@ a cert-load error.
 cd proxy
 docker build -t portunus-proxy .
 ```
+
+### X-Ray sampling
+
+`XRAY_SAMPLING_RATE` sets the default X-Ray request sampling probability from
+`0` to `1` (default `1.0`). For example, `0.01` samples approximately 1% of
+otherwise eligible requests. The fixed reservoir remains zero, and existing
+health-check exclusions are preserved. Invalid values prevent startup.
+
+Incoming trace IDs and sampling decisions are retained. Consequently a caller's
+`Sampled=1` can override this default: it is not a hard export-rate limit or a
+way to disable tracing completely. Python follows Envoy's sampling decision
+through authenticated gRPC metadata. Each selected request can emit several
+segments, so size the export budget using segment volume as well as request rate.

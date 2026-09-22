@@ -1,5 +1,6 @@
 """Exercise proxy startup and shutdown through the built container entrypoint."""
 
+import json
 import os
 import socket
 import subprocess
@@ -12,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
+import yaml
 
 pytestmark = pytest.mark.slow
 
@@ -215,3 +217,56 @@ def test_shutdown_remains_bounded_when_admin_stops_responding(entrypoint_image):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize("audit_port", [None, "19001"])
+def test_audit_listener_can_be_routed_separately(entrypoint_image, audit_port):
+    overrides = {"PORTUNUS_GRPC_PORT": "19000"}
+    if audit_port is not None:
+        overrides["PORTUNUS_AUDIT_GRPC_PORT"] = audit_port
+    with running_proxy(entrypoint_image, overrides) as proxy:
+        proxy.wait_for_ping()
+        rendered = subprocess.run(
+            ["docker", "exec", proxy.name, "cat", "/envoy/envoy_subst.yaml"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        clusters = yaml.safe_load(rendered.stdout)["static_resources"]["clusters"]
+        ports = {
+            cluster["name"]: cluster["load_assignment"]["endpoints"][0]["lb_endpoints"][
+                0
+            ]["endpoint"]["address"]["socket_address"]["port_value"]
+            for cluster in clusters
+            if cluster["name"] in ("portunus_grpc_cluster", "portunus_extproc_cluster")
+        }
+        assert ports["portunus_grpc_cluster"] == 19000
+        assert ports["portunus_extproc_cluster"] == int(audit_port or "19000")
+
+
+@pytest.mark.parametrize("rate", [None, "0", "0.01", "1"])
+def test_proxy_applies_configured_xray_sampling_rate(entrypoint_image, rate):
+    overrides = {} if rate is None else {"XRAY_SAMPLING_RATE": rate}
+    with running_proxy(entrypoint_image, overrides) as proxy:
+        proxy.wait_for_ping()
+        rendered = subprocess.run(
+            ["docker", "exec", proxy.name, "cat", "/envoy/xray_subst.json"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        manifest = json.loads(rendered.stdout)
+        assert manifest["default"] == {
+            "fixed_target": 0,
+            "rate": 1.0 if rate is None else float(rate),
+        }
+        assert manifest["rules"][0]["rate"] == 0
+
+
+@pytest.mark.parametrize("rate", ["-1", "1.01", "NaN", '0.1,"fixed_target":999'])
+def test_invalid_sampling_rate_prevents_startup(entrypoint_image, rate):
+    with running_proxy(entrypoint_image, {"XRAY_SAMPLING_RATE": rate}) as proxy:
+        result = subprocess.run(
+            ["docker", "wait", proxy.name], capture_output=True, text=True, timeout=8
+        )
+        assert result.stdout.strip() == "1"

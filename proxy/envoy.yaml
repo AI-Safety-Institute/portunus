@@ -28,7 +28,7 @@ static_resources:
               typed_config:
                 "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
                 sampling_rule_manifest:
-                  filename: /envoy/xray.json
+                  filename: /envoy/xray_subst.json
                 daemon_endpoint:
                   address: ${AWS_XRAY_DAEMON_ADDRESS}
                   port_value: 2000
@@ -451,8 +451,8 @@ static_resources:
               socket_address:
                 address: ${PORTUNUS_HOST}
                 port_value: ${PORTUNUS_GRPC_PORT}
-  # ext_proc (audit/observability) cluster. Same Portunus endpoint as
-  # portunus_grpc_cluster but SEPARATE so the fail-open audit path has its own
+  # ext_proc (audit/observability) cluster. PORTUNUS_AUDIT_GRPC_PORT can route
+  # to a separate server instance; this cluster also gives audit its own
   # circuit-breaker budget. Under a wedged Firehose sink, blocked publish
   # submits hold ext_proc streams open (WS up to the 3300s max_stream_duration);
   # that accumulation saturates THIS breaker (dropping audit, tolerated by
@@ -489,7 +489,7 @@ static_resources:
             address:
               socket_address:
                 address: ${PORTUNUS_HOST}
-                port_value: ${PORTUNUS_GRPC_PORT}
+                port_value: ${PORTUNUS_AUDIT_GRPC_PORT}
   # Health-observation cluster: same Portunus endpoint, used ONLY by the
   # /healthz health_check filter — no request traffic is routed to it. Kept
   # separate so its ACTIVE gRPC check can't perturb data-path clusters

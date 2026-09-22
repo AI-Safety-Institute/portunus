@@ -5,6 +5,7 @@ them via Firehose ``PutRecordBatch``. The bounded publish queue (see
 :mod:`publish_queue`) drives batching, so memory stays bounded by the queue cap.
 """
 
+import asyncio
 import base64
 import logging
 import random

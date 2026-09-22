@@ -4,6 +4,7 @@
 # can't do indirect defaults (${X:-${Y}}).
 export WS_TARGET_HOST=${WS_TARGET_HOST:-${TARGET_HOST}}
 export WS_TARGET_PORT=${WS_TARGET_PORT:-${TARGET_PORT}}
+export PORTUNUS_AUDIT_GRPC_PORT=${PORTUNUS_AUDIT_GRPC_PORT:-${PORTUNUS_GRPC_PORT}}
 
 # HTTP/2 multiplexes requests over connections; preserve separate limits.
 export TARGET_MAX_REQUESTS=${TARGET_MAX_REQUESTS:-1024}
@@ -91,6 +92,14 @@ typed_config:
 EOF
   )
 fi
+
+# Keep the sampling manifest numeric and preserve its health-check exclusions.
+export XRAY_SAMPLING_RATE=${XRAY_SAMPLING_RATE:-1.0}
+if ! awk -v rate="$XRAY_SAMPLING_RATE" 'BEGIN { exit !(rate ~ /^(0(\.[0-9]+)?|1(\.0+)?)$/) }'; then
+  echo "[entrypoint] FATAL: XRAY_SAMPLING_RATE must be a decimal between 0 and 1" >&2
+  exit 1
+fi
+yq -o=json '.default.rate = env(XRAY_SAMPLING_RATE)' /envoy/xray.json > /envoy/xray_subst.json || exit 1
 
 # Apply environment variable substitution to the Envoy config.
 envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
