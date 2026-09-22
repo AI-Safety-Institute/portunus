@@ -1,0 +1,757 @@
+Leading copyright and license comments from uvloop 0.22.1 pinned source distribution.
+
+Source files:
+vendor/libuv/include/uv/aix.h
+vendor/libuv/include/uv/bsd.h
+vendor/libuv/include/uv/darwin.h
+vendor/libuv/include/uv/errno.h
+vendor/libuv/include/uv/linux.h
+vendor/libuv/include/uv/sunos.h
+vendor/libuv/include/uv/threadpool.h
+vendor/libuv/include/uv/unix.h
+vendor/libuv/include/uv/version.h
+vendor/libuv/include/uv/win.h
+vendor/libuv/include/uv.h
+vendor/libuv/src/fs-poll.c
+vendor/libuv/src/threadpool.c
+vendor/libuv/src/unix/aix.c
+vendor/libuv/src/unix/dl.c
+vendor/libuv/src/unix/fs.c
+vendor/libuv/src/unix/internal.h
+vendor/libuv/src/unix/loop-watcher.c
+vendor/libuv/src/unix/loop.c
+vendor/libuv/src/unix/pipe.c
+vendor/libuv/src/unix/poll.c
+vendor/libuv/src/unix/process.c
+vendor/libuv/src/unix/stream.c
+vendor/libuv/src/unix/tcp.c
+vendor/libuv/src/unix/thread.c
+vendor/libuv/src/unix/tty.c
+vendor/libuv/src/unix/udp.c
+vendor/libuv/src/uv-common.c
+vendor/libuv/src/uv-common.h
+vendor/libuv/src/version.c
+vendor/libuv/src/win/async.c
+vendor/libuv/src/win/atomicops-inl.h
+vendor/libuv/src/win/core.c
+vendor/libuv/src/win/dl.c
+vendor/libuv/src/win/error.c
+vendor/libuv/src/win/fs-event.c
+vendor/libuv/src/win/fs.c
+vendor/libuv/src/win/getaddrinfo.c
+vendor/libuv/src/win/handle-inl.h
+vendor/libuv/src/win/handle.c
+vendor/libuv/src/win/internal.h
+vendor/libuv/src/win/loop-watcher.c
+vendor/libuv/src/win/pipe.c
+vendor/libuv/src/win/poll.c
+vendor/libuv/src/win/process-stdio.c
+vendor/libuv/src/win/process.c
+vendor/libuv/src/win/req-inl.h
+vendor/libuv/src/win/stream-inl.h
+vendor/libuv/src/win/stream.c
+vendor/libuv/src/win/tcp.c
+vendor/libuv/src/win/thread.c
+vendor/libuv/src/win/tty.c
+vendor/libuv/src/win/udp.c
+vendor/libuv/src/win/util.c
+vendor/libuv/src/win/winapi.c
+vendor/libuv/src/win/winapi.h
+vendor/libuv/src/win/winsock.c
+vendor/libuv/src/win/winsock.h
+vendor/libuv/test/benchmark-async-pummel.c
+vendor/libuv/test/benchmark-async.c
+vendor/libuv/test/benchmark-fs-stat.c
+vendor/libuv/test/benchmark-getaddrinfo.c
+vendor/libuv/test/benchmark-list.h
+vendor/libuv/test/benchmark-loop-count.c
+vendor/libuv/test/benchmark-million-async.c
+vendor/libuv/test/benchmark-million-timers.c
+vendor/libuv/test/benchmark-multi-accept.c
+vendor/libuv/test/benchmark-ping-pongs.c
+vendor/libuv/test/benchmark-pound.c
+vendor/libuv/test/benchmark-pump.c
+vendor/libuv/test/benchmark-sizes.c
+vendor/libuv/test/benchmark-spawn.c
+vendor/libuv/test/benchmark-tcp-write-batch.c
+vendor/libuv/test/benchmark-thread.c
+vendor/libuv/test/benchmark-udp-pummel.c
+vendor/libuv/test/blackhole-server.c
+vendor/libuv/test/echo-server.c
+vendor/libuv/test/run-benchmarks.c
+vendor/libuv/test/run-tests.c
+vendor/libuv/test/runner-unix.c
+vendor/libuv/test/runner-unix.h
+vendor/libuv/test/runner-win.c
+vendor/libuv/test/runner-win.h
+vendor/libuv/test/runner.c
+vendor/libuv/test/runner.h
+vendor/libuv/test/task.h
+vendor/libuv/test/test-active.c
+vendor/libuv/test/test-async-null-cb.c
+vendor/libuv/test/test-async.c
+vendor/libuv/test/test-barrier.c
+vendor/libuv/test/test-callback-stack.c
+vendor/libuv/test/test-close-fd.c
+vendor/libuv/test/test-close-order.c
+vendor/libuv/test/test-condvar.c
+vendor/libuv/test/test-connection-fail.c
+vendor/libuv/test/test-cwd-and-chdir.c
+vendor/libuv/test/test-default-loop-close.c
+vendor/libuv/test/test-delayed-accept.c
+vendor/libuv/test/test-dlerror.c
+vendor/libuv/test/test-emfile.c
+vendor/libuv/test/test-error.c
+vendor/libuv/test/test-fail-always.c
+vendor/libuv/test/test-fs-event.c
+vendor/libuv/test/test-fs-poll.c
+vendor/libuv/test/test-fs.c
+vendor/libuv/test/test-get-currentexe.c
+vendor/libuv/test/test-get-loadavg.c
+vendor/libuv/test/test-get-memory.c
+vendor/libuv/test/test-getaddrinfo.c
+vendor/libuv/test/test-getsockname.c
+vendor/libuv/test/test-handle-fileno.c
+vendor/libuv/test/test-hrtime.c
+vendor/libuv/test/test-idle.c
+vendor/libuv/test/test-ip4-addr.c
+vendor/libuv/test/test-ip6-addr.c
+vendor/libuv/test/test-ipc-send-recv.c
+vendor/libuv/test/test-ipc.c
+vendor/libuv/test/test-list.h
+vendor/libuv/test/test-loop-alive.c
+vendor/libuv/test/test-loop-close.c
+vendor/libuv/test/test-loop-handles.c
+vendor/libuv/test/test-loop-stop.c
+vendor/libuv/test/test-loop-time.c
+vendor/libuv/test/test-multiple-listen.c
+vendor/libuv/test/test-mutexes.c
+vendor/libuv/test/test-osx-select.c
+vendor/libuv/test/test-pass-always.c
+vendor/libuv/test/test-ping-pong.c
+vendor/libuv/test/test-pipe-bind-error.c
+vendor/libuv/test/test-pipe-close-stdout-read-stdin.c
+vendor/libuv/test/test-pipe-connect-error.c
+vendor/libuv/test/test-pipe-getsockname.c
+vendor/libuv/test/test-pipe-sendmsg.c
+vendor/libuv/test/test-pipe-server-close.c
+vendor/libuv/test/test-platform-output.c
+vendor/libuv/test/test-poll-close.c
+vendor/libuv/test/test-poll-closesocket.c
+vendor/libuv/test/test-poll.c
+vendor/libuv/test/test-process-title.c
+vendor/libuv/test/test-ref.c
+vendor/libuv/test/test-run-nowait.c
+vendor/libuv/test/test-run-once.c
+vendor/libuv/test/test-semaphore.c
+vendor/libuv/test/test-shutdown-close.c
+vendor/libuv/test/test-shutdown-eof.c
+vendor/libuv/test/test-shutdown-twice.c
+vendor/libuv/test/test-signal-multiple-loops.c
+vendor/libuv/test/test-signal.c
+vendor/libuv/test/test-socket-buffer-size.c
+vendor/libuv/test/test-spawn.c
+vendor/libuv/test/test-stdio-over-pipes.c
+vendor/libuv/test/test-tcp-bind-error.c
+vendor/libuv/test/test-tcp-bind6-error.c
+vendor/libuv/test/test-tcp-close-accept.c
+vendor/libuv/test/test-tcp-close-while-connecting.c
+vendor/libuv/test/test-tcp-close.c
+vendor/libuv/test/test-tcp-connect-error-after-write.c
+vendor/libuv/test/test-tcp-connect-error.c
+vendor/libuv/test/test-tcp-connect-timeout.c
+vendor/libuv/test/test-tcp-connect6-error.c
+vendor/libuv/test/test-tcp-flags.c
+vendor/libuv/test/test-tcp-open.c
+vendor/libuv/test/test-tcp-read-stop.c
+vendor/libuv/test/test-tcp-shutdown-after-write.c
+vendor/libuv/test/test-tcp-try-write.c
+vendor/libuv/test/test-tcp-unexpected-read.c
+vendor/libuv/test/test-tcp-write-after-connect.c
+vendor/libuv/test/test-tcp-write-fail.c
+vendor/libuv/test/test-tcp-write-queue-order.c
+vendor/libuv/test/test-tcp-write-to-half-open-connection.c
+vendor/libuv/test/test-tcp-writealot.c
+vendor/libuv/test/test-thread-equal.c
+vendor/libuv/test/test-thread.c
+vendor/libuv/test/test-threadpool-cancel.c
+vendor/libuv/test/test-threadpool.c
+vendor/libuv/test/test-timer-again.c
+vendor/libuv/test/test-timer-from-check.c
+vendor/libuv/test/test-timer.c
+vendor/libuv/test/test-tty.c
+vendor/libuv/test/test-udp-bind.c
+vendor/libuv/test/test-udp-dgram-too-big.c
+vendor/libuv/test/test-udp-ipv6.c
+vendor/libuv/test/test-udp-multicast-interface.c
+vendor/libuv/test/test-udp-multicast-interface6.c
+vendor/libuv/test/test-udp-multicast-join.c
+vendor/libuv/test/test-udp-multicast-join6.c
+vendor/libuv/test/test-udp-multicast-ttl.c
+vendor/libuv/test/test-udp-open.c
+vendor/libuv/test/test-udp-options.c
+vendor/libuv/test/test-udp-send-and-recv.c
+vendor/libuv/test/test-udp-send-immediate.c
+vendor/libuv/test/test-udp-send-unreachable.c
+vendor/libuv/test/test-udp-try-send.c
+vendor/libuv/test/test-walk-handles.c
+vendor/libuv/test/test-watcher-cross-stop.c
+
+/* Copyright Joyent, Inc. and other Node contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/include/uv/os390.h
+vendor/libuv/include/uv/posix.h
+vendor/libuv/src/strscpy.c
+vendor/libuv/src/strscpy.h
+vendor/libuv/src/strtok.c
+vendor/libuv/src/strtok.h
+vendor/libuv/src/thread-common.c
+vendor/libuv/src/unix/aix-common.c
+vendor/libuv/src/unix/bsd-ifaddrs.c
+vendor/libuv/src/unix/bsd-proctitle.c
+vendor/libuv/src/unix/cygwin.c
+vendor/libuv/src/unix/darwin-stub.h
+vendor/libuv/src/unix/haiku.c
+vendor/libuv/src/unix/hurd.c
+vendor/libuv/src/unix/ibmi.c
+vendor/libuv/src/unix/no-fsevents.c
+vendor/libuv/src/unix/no-proctitle.c
+vendor/libuv/src/unix/os390-proctitle.c
+vendor/libuv/src/unix/os390-syscalls.c
+vendor/libuv/src/unix/os390-syscalls.h
+vendor/libuv/src/unix/os390.c
+vendor/libuv/src/unix/posix-hrtime.c
+vendor/libuv/src/unix/posix-poll.c
+vendor/libuv/src/unix/procfs-exepath.c
+vendor/libuv/src/unix/sysinfo-loadavg.c
+vendor/libuv/src/unix/sysinfo-memory.c
+vendor/libuv/src/uv-data-getter-setters.c
+vendor/libuv/src/win/detect-wakeup.c
+vendor/libuv/src/win/fs-fd-hash-inl.h
+vendor/libuv/test/benchmark-ping-udp.c
+vendor/libuv/test/test-eintr-handling.c
+vendor/libuv/test/test-embed.c
+vendor/libuv/test/test-fork.c
+vendor/libuv/test/test-fs-copyfile.c
+vendor/libuv/test/test-fs-fd-hash.c
+vendor/libuv/test/test-fs-open-flags.c
+vendor/libuv/test/test-fs-readdir.c
+vendor/libuv/test/test-getters-setters.c
+vendor/libuv/test/test-gettimeofday.c
+vendor/libuv/test/test-homedir.c
+vendor/libuv/test/test-ipc-heavy-traffic-deadlock-bug.c
+vendor/libuv/test/test-metrics.c
+vendor/libuv/test/test-poll-multiple-handles.c
+vendor/libuv/test/test-poll-oob.c
+vendor/libuv/test/test-tcp-close-reset.c
+vendor/libuv/test/test-tcp-read-stop-start.c
+vendor/libuv/test/test-tcp-write-in-a-row.c
+vendor/libuv/test/test-thread-affinity.c
+vendor/libuv/test/test-tmpdir.c
+vendor/libuv/test/test-tty-duplicate-key.c
+vendor/libuv/test/test-tty-escape-sequence-processing.c
+vendor/libuv/test/test-uname.c
+
+/* Copyright libuv project contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/include/uv/tree.h
+
+/*-
+ * Copyright 2002 Niels Provos <provos@citi.umich.edu>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+Source files:
+vendor/libuv/src/heap-inl.h
+vendor/libuv/src/queue.h
+
+/* Copyright (c) 2013, Ben Noordhuis <info@bnoordhuis.nl>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/src/idna.c
+vendor/libuv/src/idna.h
+
+/* Copyright libuv contributors. All rights reserved.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/src/inet.c
+
+/*
+ * Copyright (c) 2004 by Internet Systems Consortium, Inc. ("ISC")
+ * Copyright (c) 1996-1999 by Internet Software Consortium.
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND ISC DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS.  IN NO EVENT SHALL ISC BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+ * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/src/random.c
+vendor/libuv/src/unix/random-devurandom.c
+vendor/libuv/src/unix/random-getentropy.c
+vendor/libuv/src/unix/random-getrandom.c
+vendor/libuv/src/unix/random-sysctl-linux.c
+vendor/libuv/test/benchmark-queue-work.c
+vendor/libuv/test/test-env-vars.c
+vendor/libuv/test/test-get-passwd.c
+vendor/libuv/test/test-gethostname.c
+vendor/libuv/test/test-process-priority.c
+vendor/libuv/test/test-random.c
+vendor/libuv/test/test-tcp-try-write-error.c
+vendor/libuv/test/test-test-macros.c
+vendor/libuv/test/test-thread-priority.c
+vendor/libuv/test/test-udp-mmsg.c
+
+/* Copyright libuv contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/src/timer.c
+vendor/libuv/src/unix/async.c
+vendor/libuv/src/unix/core.c
+vendor/libuv/src/unix/darwin-proctitle.c
+vendor/libuv/src/unix/darwin.c
+vendor/libuv/src/unix/freebsd.c
+vendor/libuv/src/unix/fsevents.c
+vendor/libuv/src/unix/getaddrinfo.c
+vendor/libuv/src/unix/kqueue.c
+vendor/libuv/src/unix/linux.c
+vendor/libuv/src/unix/netbsd.c
+vendor/libuv/src/unix/openbsd.c
+vendor/libuv/src/unix/proctitle.c
+vendor/libuv/src/unix/signal.c
+vendor/libuv/src/unix/sunos.c
+vendor/libuv/src/win/signal.c
+
+/* Copyright Joyent, Inc. and other Node contributors. All rights reserved.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/src/unix/getnameinfo.c
+vendor/libuv/src/win/getnameinfo.c
+vendor/libuv/test/test-getnameinfo.c
+
+/* Copyright Joyent, Inc. and other Node contributors. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"), to
+* deal in the Software without restriction, including without limitation the
+* rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+* sell copies of the Software, and to permit persons to whom the Software is
+* furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+* IN THE SOFTWARE.
+*/
+
+Source files:
+vendor/libuv/src/unix/qnx.c
+
+/* Copyright libuv contributors. All rights reserved.
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to
+  * deal in the Software without restriction, including without limitation the
+  * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+  * sell copies of the Software, and to permit persons to whom the Software is
+  * furnished to do so, subject to the following conditions:
+  *
+  * The above copyright notice and this permission notice shall be included in
+  * all copies or substantial portions of the Software.
+  *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+  * IN THE SOFTWARE.
+  */
+
+Source files:
+vendor/libuv/src/win/snprintf.c
+vendor/libuv/test/test-not-readable-nor-writable-on-read-error.c
+vendor/libuv/test/test-not-writable-after-shutdown.c
+vendor/libuv/test/test-readable-on-eof.c
+
+/* Copyright the libuv project contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-connect-unspecified.c
+vendor/libuv/test/test-pipe-set-fchmod.c
+vendor/libuv/test/test-process-title-threadsafe.c
+vendor/libuv/test/test-signal-pending-on-close.c
+vendor/libuv/test/test-strscpy.c
+vendor/libuv/test/test-strtok.c
+
+/* Copyright libuv project contributors. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"), to
+* deal in the Software without restriction, including without limitation the
+* rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+* sell copies of the Software, and to permit persons to whom the Software is
+* furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+* IN THE SOFTWARE.
+*/
+
+Source files:
+vendor/libuv/test/test-idna.c
+vendor/libuv/test/test-ip-name.c
+vendor/libuv/test/test-queue-foreach-delete.c
+vendor/libuv/test/test-udp-recv-in-a-row.c
+vendor/libuv/test/test-udp-send-hang-loop.c
+
+/* Copyright The libuv project and contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-loop-configure.c
+
+/* Copyright (c) 2014, Ben Noordhuis <info@bnoordhuis.nl>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-pipe-connect-multiple.c
+vendor/libuv/test/test-pipe-connect-prepare.c
+vendor/libuv/test/test-pipe-pending-instances.c
+vendor/libuv/test/test-tcp-create-socket-early.c
+vendor/libuv/test/test-udp-create-socket-early.c
+
+/* Copyright (c) 2015 Saúl Ibarra Corretgé <saghul@gmail.com>.
+ * All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-pipe-set-non-blocking.c
+
+/* Copyright (c) 2015, Ben Noordhuis <info@bnoordhuis.nl>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-poll-close-doesnt-corrupt-stack.c
+
+/* Copyright Bert Belder, and other libuv contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-shutdown-simultaneous.c
+vendor/libuv/test/test-tcp-alloc-cb-fail.c
+vendor/libuv/test/test-tcp-close-after-read-timeout.c
+vendor/libuv/test/test-tcp-rst.c
+vendor/libuv/test/test-udp-connect.c
+vendor/libuv/test/test-udp-connect6.c
+vendor/libuv/test/test-udp-sendmmsg-error.c
+
+/* Copyright libuv project and contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-tcp-oob.c
+
+/* Copyright Fedor Indutny. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+Source files:
+vendor/libuv/test/test-udp-alloc-cb-fail.c
+
+/* Copyright libuv project and other Node contributors. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
