@@ -154,7 +154,7 @@ async def test_check_binds_request_id_contextvar(monkeypatch):
     servicer = _make_auth_servicer()
     seen: dict[str, str | None] = {}
 
-    async def fake_auth_pass(request, context, request_id):
+    async def fake_auth_pass(request, context, request_id, headers):
         seen["ctxvar"] = request_id_var.get()
         return external_auth_pb2.CheckResponse()
 
@@ -193,7 +193,7 @@ async def test_check_opens_xray_segment_from_envoy_trace_header(monkeypatch):
     monkeypatch.setattr(auth_servicer_mod, "XRayContext", FakeXRayContext)
     servicer = _make_auth_servicer()
 
-    async def fake_auth_pass(request, context, request_id):
+    async def fake_auth_pass(request, context, request_id, headers):
         return external_auth_pb2.CheckResponse()
 
     monkeypatch.setattr(servicer, "_auth_pass", fake_auth_pass)
@@ -223,7 +223,7 @@ async def test_check_sets_trace_id_var_even_with_xray_disabled(monkeypatch):
     servicer = _make_auth_servicer()
     seen: dict[str, str | None] = {}
 
-    async def fake_auth_pass(request, context, request_id):
+    async def fake_auth_pass(request, context, request_id, headers):
         seen["trace"] = trace_id_var.get()
         return external_auth_pb2.CheckResponse()
 
