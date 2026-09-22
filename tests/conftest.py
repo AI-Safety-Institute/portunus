@@ -23,8 +23,7 @@ os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 # Set default region for tests (config validation requires it)
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
-# AISI dev VMs set these to wire ``inspect_ai`` into ``aisitools.*`` hooks
-# that aren't packaged here, so ``ia.eval`` aborts with ``PrerequisiteError``.
+# Host-configured Inspect hooks can reference integrations not installed here.
 # Strip them at collection time to keep the suite hermetic.
 for _hook_env in (
     "INSPECT_TELEMETRY",
