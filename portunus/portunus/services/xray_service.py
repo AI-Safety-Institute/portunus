@@ -5,9 +5,10 @@ This module provides a service for AWS X-Ray distributed tracing functionality,
 including trace context extraction, segment management, and logging integration.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable, Coroutine
-from contextvars import ContextVar, Token
+from contextvars import Context, ContextVar, Token
 from typing import Any, Optional, Tuple, TypeVar, cast
 
 from aws_xray_sdk.core import patch_all, xray_recorder
@@ -28,6 +29,26 @@ request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 _AsyncCallable = TypeVar(
     "_AsyncCallable", bound=Callable[..., Coroutine[Any, Any, Any]]
 )
+_TaskResult = TypeVar("_TaskResult")
+
+
+def _xray_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    coro: Coroutine[Any, Any, _TaskResult],
+    *,
+    context: Context | None = None,
+) -> asyncio.Task[_TaskResult]:
+    task = asyncio.Task(coro, loop=loop, context=context)
+    parent = asyncio.current_task(loop=loop)
+    trace_context = getattr(parent, "context", None)
+    if trace_context is not None:
+        # X-Ray's task-local entity stack is separate from Python contextvars.
+        # Copy the stack so overlapping child spans remain siblings.
+        child_context = trace_context.copy()
+        if "entities" in child_context:
+            child_context["entities"] = child_context["entities"].copy()
+        setattr(task, "context", child_context)
+    return task
 
 
 def capture_async(
@@ -211,12 +232,16 @@ class XRayService:
         # Patch all supported libraries for X-Ray tracing
         patch_all()
 
+        loop = asyncio.get_event_loop()
+        context = AsyncContext(loop=loop, use_task_factory=False)
+        loop.set_task_factory(_xray_task_factory)
+
         # Configure X-Ray recorder. context_missing=IGNORE_ERROR: patched AWS
         # clients also run outside any segment (publish-queue workers, startup,
         # drain) — those calls must not log an error per call.
         xray_recorder.configure(
             service="portunus",
-            context=AsyncContext(),
+            context=context,
             daemon_address=config.aws.xray_daemon_address,
             sampling=True,
             context_missing="IGNORE_ERROR",
