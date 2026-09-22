@@ -6,11 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Changed
+- gRPC capture uses direct coroutine reads and writes and omits replies in
+  observation mode. Header conversion and audit timestamps do less repeated work
+  while preserving redaction and record formats.
+- The audit queue supports an optional bounded delay between partial batches;
+  it remains disabled by default, and count and payload-byte limits still apply.
+- Firehose publication uses a fixed application user-agent to avoid rebuilding
+  SDK metadata for every batch.
 - Audit serialization avoids an extra copy when adding JSON record delimiters.
 - Complete WebSocket messages avoid a reassembly copy while retaining capture limits
   and fragmented-message handling.
 - Cached authentication avoids a Redis probe before each operation. Cache commands
   retry bounded pool contention without extending the entry's remaining lifetime.
+
+### Fixed
+- Completed HTTP capture releases its processing stream after both directions
+  finish, including rejected WebSocket upgrades, without waiting for Envoy's
+  deferred close. Successful WebSocket streams retain their existing lifetime.
+- Timed-out publisher shutdown releases remaining queued payloads and shutdown
+  markers while preserving loss accounting.
 
 ## [0.9.0] - 2026-09-11
 

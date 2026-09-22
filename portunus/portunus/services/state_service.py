@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import aiobotocore.session
 import redis.asyncio as aioredis
+from aiobotocore.config import AioConfig
 from redis.exceptions import ConnectionError, MaxConnectionsError
 
 from portunus.config import config
@@ -316,7 +317,9 @@ class StateService:
             async with self._aws_client_lock:
                 if self._firehose_client is None:
                     self._firehose_client = await stack.enter_async_context(
-                        self.boto_session.create_client("firehose")
+                        self.boto_session.create_client(
+                            "firehose", config=AioConfig(user_agent="portunus-audit")
+                        )
                     )
         return self._firehose_client
 
