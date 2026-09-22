@@ -9,9 +9,11 @@ from portunus.exceptions import AuthenticationError
 from portunus.models import (
     GCP_CLOUD_PLATFORM_SCOPE,
     OPENAI_API_AUDIENCE,
+    OPENROUTER_API_AUDIENCE,
     AnthropicWifSecret,
     GcpWifSecret,
     OpenAiWifSecret,
+    OpenRouterWifSecret,
     SecretsManagerAuthPayload,
 )
 from portunus.services.secret_validation_service import (
@@ -35,6 +37,12 @@ OPENAI_SECRET = {
     "federation_role_arn": ROLE_ARN,
     "identity_provider_id": "idp_example",
     "service_account_id": "svc_acct_example",
+}
+OPENROUTER_SECRET = {
+    "type": "openrouter_wif",
+    "host": "openrouter.ai",
+    "federation_role_arn": ROLE_ARN,
+    "federation_policy_id": "fedpol_example",
 }
 GCP_SECRET = {
     "type": "gcp_wif",
@@ -182,6 +190,55 @@ class TestParseSecret:
     )
     def test_openai_wif_missing_or_invalid_fields_raise(self, changes: dict):
         data = {k: v for k, v in {**OPENAI_SECRET, **changes}.items() if v is not None}
+
+        with pytest.raises(AuthenticationError):
+            parse_secret(json.dumps(data))
+
+    def test_openrouter_wif_secret(self):
+        secret = parse_secret(json.dumps(OPENROUTER_SECRET))
+
+        assert isinstance(secret, OpenRouterWifSecret)
+        assert secret.host == "openrouter.ai"
+        assert secret.federation_role_arn == ROLE_ARN
+        assert secret.federation_policy_id == "fedpol_example"
+        assert secret.audience == OPENROUTER_API_AUDIENCE
+        assert OPENROUTER_API_AUDIENCE == "https://openrouter.ai/api/v1"
+
+    def test_openrouter_wif_audience_override(self):
+        raw = json.dumps({**OPENROUTER_SECRET, "audience": "https://api.example.com"})
+
+        secret = parse_secret(raw)
+
+        assert isinstance(secret, OpenRouterWifSecret)
+        assert secret.audience == "https://api.example.com"
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"identity_provider_id": "idp_example"},
+            {"scope": "inference"},
+            {"unknown": 1},
+        ],
+    )
+    def test_openrouter_wif_rejects_unknown_fields(self, extra: dict):
+        with pytest.raises(AuthenticationError, match="invalid fields"):
+            parse_secret(json.dumps({**OPENROUTER_SECRET, **extra}))
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"federation_policy_id": None},
+            {"federation_policy_id": ""},
+            {"host": None},
+            {"host": ""},
+            {"federation_role_arn": None},
+            {"audience": ""},
+        ],
+    )
+    def test_openrouter_wif_missing_or_invalid_fields_raise(self, changes: dict):
+        data = {
+            k: v for k, v in {**OPENROUTER_SECRET, **changes}.items() if v is not None
+        }
 
         with pytest.raises(AuthenticationError):
             parse_secret(json.dumps(data))

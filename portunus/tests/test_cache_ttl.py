@@ -14,6 +14,7 @@ from portunus.services.cache_service import (
     CacheService,
     effective_cache_ttl,
 )
+from portunus.services.federation_service import OPENROUTER_IDENTITY_TOKEN_SECONDS
 from portunus.services.state_service import StateService
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -35,6 +36,15 @@ class TestEffectiveCacheTtl:
         )
 
         assert ttl == 3600 - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
+
+    def test_a_15_minute_token_is_cached_for_14_minutes(self):
+        ttl = effective_cache_ttl(
+            cache_duration=86400,
+            token_expires_at=NOW + timedelta(seconds=OPENROUTER_IDENTITY_TOKEN_SECONDS),
+            now=NOW,
+        )
+
+        assert ttl == 900 - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS == 840
 
     def test_token_inside_the_safety_margin_is_not_cached(self):
         ttl = effective_cache_ttl(

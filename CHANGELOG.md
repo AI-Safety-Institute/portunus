@@ -36,7 +36,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   one minute before the token expires; concurrent misses for one payload share
   a mint per process.
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or a provider's
-  token endpoint (Anthropic's, OpenAI's, or Google STS and IAM Credentials)
+  token endpoint (Anthropic's, OpenAI's, OpenRouter's, or Google STS and IAM
+  Credentials)
   cannot be reached or answers 5xx/429, or when minting exceeds its 6 s
   deadline.
 - The `openai_wif` secret type mints OpenAI access tokens. The federation
@@ -49,6 +50,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   15 minutes, which Anthropic doubles); the access token is valid for about
   30 minutes. The federation role's policy must allow `sts:DurationSeconds`
   up to 1800.
+- The `openrouter_wif` secret type mints OpenRouter access tokens. The
+  federation session's STS web identity token, signed with RS256 for the
+  secret's `audience` (default `https://openrouter.ai/api/v1`), is exchanged
+  at `https://openrouter.ai/api/v1/oauth/token` (RFC 8693 token exchange,
+  form-encoded) under the secret's `federation_policy_id`. OpenRouter issues
+  the access token for at most 15 minutes and never beyond the STS token's
+  expiry, so Portunus requests a 15-minute STS token; the access token is
+  cached for about 14 minutes.
 - The `gcp_wif` secret type mints Google service-account access
   tokens. Portunus signs an AWS `GetCallerIdentity` request with the
   federation session's credentials, exchanges it at Google STS for a

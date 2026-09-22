@@ -12,10 +12,10 @@ Minting has two independent parts:
    against AWS.
 2. Exchange: trade the proof for a provider bearer token. Each provider has an
    adapter with the same ``exchange(proof, secret)`` shape.
-   :class:`AnthropicTokenExchange` and :class:`OpenAiTokenExchange` post the
-   JWT to the provider's token endpoint; :class:`GcpTokenExchange` trades the
-   signed request at Google STS and impersonates a service account with the
-   result.
+   :class:`AnthropicTokenExchange`, :class:`OpenAiTokenExchange` and
+   :class:`OpenRouterTokenExchange` post the JWT to the provider's token
+   endpoint; :class:`GcpTokenExchange` trades the signed request at Google STS
+   and impersonates a service account with the result.
 
 :class:`TokenMintService` pairs each secret type with its proof and adapter.
 """
@@ -50,6 +50,7 @@ from portunus.models import (
     GcpWifSecret,
     MintSecretBase,
     OpenAiWifSecret,
+    OpenRouterWifSecret,
     PrincipalInfo,
 )
 from portunus.services.xray_service import capture_async
@@ -74,6 +75,13 @@ IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "RS256"
 # OpenAI: "Use ES384 unless your environment requires RS256 compatibility."
 OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "ES384"
 OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
+# OpenRouter verifies ES256 or RS256 subject tokens; of the algorithms STS
+# signs with, only RS256 qualifies.
+OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "RS256"
+# OpenRouter tokens live at most 15 minutes and never outlive the identity
+# token, so a longer identity token buys nothing.
+OPENROUTER_IDENTITY_TOKEN_SECONDS = 900
+OPENROUTER_TOKEN_URL = "https://openrouter.ai/api/v1/oauth/token"
 AWS_SUBJECT_TOKEN_TYPE = "urn:ietf:params:aws:token-type:aws4_request"
 # Google replays the signed request here; it must be the regional endpoint.
 AWS_GET_CALLER_IDENTITY_URL = (
@@ -648,6 +656,35 @@ class OpenAiTokenExchange(_HttpTokenExchange):
         return token.minted_token(requested_at)
 
 
+class OpenRouterTokenExchange(_HttpTokenExchange):
+    """Exchange adapter for OpenRouter's RFC 8693 token exchange endpoint."""
+
+    @capture_async(name="openrouter_exchange")
+    async def exchange(self, proof: str, secret: OpenRouterWifSecret) -> MintedToken:
+        """POST the STS web identity token to ``OPENROUTER_TOKEN_URL`` as a form.
+
+        Raises:
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response.
+            AuthenticationError: Any other non-200 response, or a response
+                without ``access_token`` and ``expires_in``.
+        """
+        step = "Token exchange with OpenRouter"
+        requested_at = datetime.now(timezone.utc)
+        body = await self._post_json(
+            step,
+            OPENROUTER_TOKEN_URL,
+            data={
+                "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
+                "subject_token_type": JWT_TOKEN_TYPE,
+                "subject_token": proof,
+                "federation_policy_id": secret.federation_policy_id,
+            },
+        )
+        token = _parse_response(OAuthTokenResponse, body, step)
+        return token.minted_token(requested_at)
+
+
 class GcpTokenExchange(_HttpTokenExchange):
     """Exchange adapter for Google workload identity federation.
 
@@ -739,6 +776,7 @@ class TokenMintService:
         anthropic: Optional[AnthropicTokenExchange] = None,
         gcp: Optional[GcpTokenExchange] = None,
         openai: Optional[OpenAiTokenExchange] = None,
+        openrouter: Optional[OpenRouterTokenExchange] = None,
         federation_config: Optional[FederationConfig] = None,
         boto_session: Optional[AioSession] = None,
     ) -> None:
@@ -749,11 +787,15 @@ class TokenMintService:
         self.anthropic = anthropic or AnthropicTokenExchange()
         self.gcp = gcp or GcpTokenExchange()
         self.openai = openai or OpenAiTokenExchange()
+        self.openrouter = openrouter or OpenRouterTokenExchange()
         # Each route is typed for its own secret class, which the dict cannot
         # express; mint() looks a route up by the secret's exact type.
         self._routes: dict[type[MintSecretBase], _MintRoute[Any]] = {
             AnthropicWifSecret: _MintRoute(self._web_identity_proof, self.anthropic),
             OpenAiWifSecret: _MintRoute(self._openai_identity_proof, self.openai),
+            OpenRouterWifSecret: _MintRoute(
+                self._openrouter_identity_proof, self.openrouter
+            ),
             GcpWifSecret: _MintRoute(self._signed_caller_identity_proof, self.gcp),
         }
 
@@ -775,6 +817,17 @@ class TokenMintService:
             secret.audience,
             OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
             OPENAI_IDENTITY_TOKEN_SECONDS,
+        )
+        return token.token
+
+    async def _openrouter_identity_proof(
+        self, identity: FederationIdentity, secret: OpenRouterWifSecret
+    ) -> str:
+        token = await self.sts.web_identity_token(
+            identity,
+            secret.audience,
+            OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM,
+            OPENROUTER_IDENTITY_TOKEN_SECONDS,
         )
         return token.token
 
