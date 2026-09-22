@@ -188,6 +188,7 @@ def test_http2_request_limit(proxy_image, tmp_path, request_limit):
             "API_KEY_PREFIX": "Bearer ",
             "AWS_XRAY_DAEMON_ADDRESS": "127.0.0.1",
             "ENVOY_LOG_LEVEL": "warn",
+            "ENVOY_CONCURRENCY": "1",
         }
         if request_limit is not None:
             env["TARGET_MAX_REQUESTS"] = str(request_limit)
@@ -201,13 +202,6 @@ def test_http2_request_limit(proxy_image, tmp_path, request_limit):
                 "-v",
                 f"{config_file}:/envoy/envoy.yaml:ro",
                 proxy_image,
-                "/bin/sh",
-                "-c",
-                # One worker makes boundary assertions deterministic. The real
-                # entrypoint still supplies every environment default/render.
-                "ENVOY_BIN=$(command -v envoy); "
-                'envoy() { "$ENVOY_BIN" "$@" --concurrency 1; }; '
-                ". /envoy/entrypoint.sh",
             ]
         )
         subprocess.run(command, check=True, capture_output=True)
