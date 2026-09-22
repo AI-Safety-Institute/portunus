@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional
 
@@ -86,11 +87,14 @@ class BoundedPublishQueue:
         body_capacity: Optional[int] = None,
         max_bytes: Optional[int] = None,
         max_batch: int = 500,
+        coalesce_seconds: float = 0.0,
     ) -> None:
         if maxsize < 1:
             raise ValueError(f"maxsize must be >=1, got {maxsize}")
         if max_batch < 1:
             raise ValueError(f"max_batch must be >=1, got {max_batch}")
+        if not math.isfinite(coalesce_seconds) or not 0 <= coalesce_seconds <= 0.1:
+            raise ValueError("coalesce_seconds must be finite and between 0 and 0.1")
         if max_bytes is not None and max_bytes < 1:
             raise ValueError(f"max_bytes must be >=1, got {max_bytes}")
         self._queue: asyncio.Queue[Optional[PublishTask]] = asyncio.Queue(
@@ -101,6 +105,7 @@ class BoundedPublishQueue:
         # Per-worker cap on already-queued items drained into one batch; a
         # subset of the queue, so no memory beyond maxsize.
         self._max_batch = max_batch
+        self._coalesce_seconds = coalesce_seconds
         self._workers: list[asyncio.Task] = []
         # Byte budget for retained payloads (queued + in-flight); None disables.
         self._max_bytes = max_bytes
@@ -260,6 +265,18 @@ class BoundedPublishQueue:
             await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
+        # Workers are quiescent; release queued payloads and shutdown sentinels.
+        # Reconciliation below counts the records discarded here.
+        while True:
+            try:
+                remaining = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if remaining is not None:
+                self._queued_bytes -= remaining.size_bytes
+            self._queue.task_done()
+        remaining = None
+
         # Reconcile: any accepted record not on a terminal counter was lost
         # (still queued, in an unseen in-flight batch, or submitted post-exit).
         # A negative residue is a double-count bug making every figure
@@ -313,11 +330,14 @@ class BoundedPublishQueue:
         docstring). Returns True when enqueued.
         """
         try:
-            if timeout is None:
-                await self._queue.put(task)
-            else:
-                async with asyncio.timeout(timeout):
+            try:
+                self._queue.put_nowait(task)
+            except asyncio.QueueFull:
+                if timeout is None:
                     await self._queue.put(task)
+                else:
+                    async with asyncio.timeout(timeout):
+                        await self._queue.put(task)
         except TimeoutError:
             if sentinel:
                 self._sentinel_dropped_total += 1
@@ -406,6 +426,11 @@ class BoundedPublishQueue:
 
             if stop:
                 return
+
+            # New arrivals stay within the queue's count and byte bounds.
+            # Full batches bypass this optional delay between flushes.
+            if self._coalesce_seconds and self._queue.qsize() < self._max_batch:
+                await asyncio.sleep(self._coalesce_seconds)
 
     async def _flush_batch(self, tasks: list[PublishTask]) -> None:
         """Build, group by stream, and ship a batch of tasks.
