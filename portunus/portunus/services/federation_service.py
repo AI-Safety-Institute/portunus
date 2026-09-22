@@ -28,6 +28,7 @@ import httpx
 from aiobotocore.config import AioConfig
 from aiobotocore.session import AioSession, get_session
 from botocore.exceptions import BotoCoreError, ClientError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from portunus.config import FederationConfig, config
 from portunus.exceptions import (
@@ -453,50 +454,43 @@ class _HttpTokenExchange:
         return body
 
 
-def _required_token(body: dict[str, object], key: str, step: str) -> str:
-    """The non-empty string at ``body[key]``.
+class OAuthTokenResponse(BaseModel):
+    """The fields of an OAuth 2.0 token response that minting uses.
 
-    Raises:
-        AuthenticationError: The value is missing, empty or not a string.
+    Providers add others (``token_type``, ``scope``, ``expires_at``), which
+    are ignored.
     """
-    token = body.get(key)
-    if not isinstance(token, str) or not token:
-        raise AuthenticationError(f"{step} returned an empty token")
-    return token
+
+    model_config = ConfigDict(extra="ignore")
+
+    access_token: str = Field(min_length=1)
+    expires_in: int = Field(gt=0)
+
+    def minted_token(self, requested_at: datetime) -> MintedToken:
+        """The token, expiring ``expires_in`` seconds after ``requested_at``.
+
+        ``requested_at`` is when the request was sent, so the expiry is never
+        later than the provider's.
+        """
+        return MintedToken(
+            token=self.access_token,
+            expires_at=requested_at + timedelta(seconds=self.expires_in),
+        )
 
 
-def _expires_in(value: object) -> int:
-    """Parse an OAuth ``expires_in`` JSON value (seconds).
+def _parse_response[M: BaseModel](model: type[M], body: object, step: str) -> M:
+    """Validate a 200 response body as ``model``.
 
-    Raises:
-        ValueError: Not a number or numeric string.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise ValueError("expires_in is not a number")
-    return int(value)
-
-
-def _oauth_token(
-    body: dict[str, object], step: str, requested_at: datetime
-) -> MintedToken:
-    """The ``access_token`` and ``expires_in`` of an OAuth token response.
-
-    ``requested_at`` is when the request was sent, so the expiry computed from
-    ``expires_in`` is never later than the provider's.
+    The body may hold a token, so it is not logged.
 
     Raises:
-        AuthenticationError: ``access_token`` is missing or empty, or
-            ``expires_in`` is not a number.
+        AuthenticationError: The body does not fit ``model``.
     """
     try:
-        expires_in = _expires_in(body.get("expires_in"))
-    except ValueError as e:
+        return model.model_validate(body)
+    except ValidationError as e:
         logger.error(f"{step} returned a malformed body")
         raise AuthenticationError(f"{step} returned a malformed response") from e
-    return MintedToken(
-        token=_required_token(body, "access_token", step),
-        expires_at=requested_at + timedelta(seconds=expires_in),
-    )
 
 
 class AnthropicTokenExchange(_HttpTokenExchange):
@@ -526,7 +520,8 @@ class AnthropicTokenExchange(_HttpTokenExchange):
                 "workspace_id": secret.workspace_id,
             },
         )
-        return _oauth_token(body, step, requested_at)
+        token = _parse_response(OAuthTokenResponse, body, step)
+        return token.minted_token(requested_at)
 
 
 class OpenAiTokenExchange(_HttpTokenExchange):
@@ -555,7 +550,8 @@ class OpenAiTokenExchange(_HttpTokenExchange):
                 "service_account_id": secret.service_account_id,
             },
         )
-        return _oauth_token(body, step, requested_at)
+        token = _parse_response(OAuthTokenResponse, body, step)
+        return token.minted_token(requested_at)
 
 
 class _TokenExchange[S: MintSecretBase](Protocol):
