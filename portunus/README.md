@@ -67,7 +67,8 @@ requests still obey the 500-record and 4-MiB limits. Coalescing pauses between
 partial batches, adding up to the configured delay for new arrivals.
 Queue record and payload-byte limits continue to apply.
 
-One worker, 3000 records and 5 milliseconds passed synthetic throughput tests.
+A historical cumulative synthetic candidate used one worker, 3000 records and
+5 milliseconds. This integrated subset has not been rebenchmarked.
 This profile is opt-in: validate destination fairness, retry behaviour and oldest
 record age with the intended audit sinks before adopting it. Leaving these
 variables unset preserves the existing publisher defaults.
