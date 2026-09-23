@@ -207,6 +207,8 @@ A secret referenced by a payload is one of:
 
 JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key). JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
 
+[docs/federation-examples.md](docs/federation-examples.md) works through every minted-token type with one set of example values: a CloudFormation template for the federation role, each provider's configuration, what Portunus sends, and a failure table.
+
 #### `anthropic_wif`
 
 ```json
