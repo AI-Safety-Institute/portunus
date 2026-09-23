@@ -261,12 +261,12 @@ On the OpenAI side, all deployment concerns: the federation role's account must 
   "type": "openrouter_wif",
   "host": "openrouter.ai",
   "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example",
-  "federation_policy_id": "fedpol_example",
+  "federation_policy_id": "00000000-0000-4000-8000-000000000000",
   "audience": "https://openrouter.ai/api/v1"
 }
 ```
 
-`audience` (default shown) is optional and must equal the audience configured on the OpenRouter federation policy `federation_policy_id`. Steps 1–3 are as for `anthropic_wif`, with the STS token signed with RS256 (OpenRouter accepts RS256 or ES256, and STS signs RS256 or ES384); then Portunus:
+`audience` (default shown) is optional and must equal the audience configured on the OpenRouter federation policy `federation_policy_id` (the policy's UUID). Steps 1–3 are as for `anthropic_wif`, with the STS token signed with RS256 (OpenRouter accepts RS256 or ES256, and STS signs RS256 or ES384); then Portunus:
 
 4. Exchanges the token at `https://openrouter.ai/api/v1/oauth/token` (RFC 8693 token exchange; form-encoded body with `grant_type` `urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token_type` `urn:ietf:params:oauth:token-type:jwt`, `subject_token` and `federation_policy_id`) and returns `access_token` with `output_header: "authorization"` and `output_prefix: "Bearer "`. Expiry comes from `expires_in`.
 
