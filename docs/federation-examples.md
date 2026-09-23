@@ -33,7 +33,7 @@ portunus encode-credentials SECRET_ARN [--policy FILE_OR_JSON] [--federation-rol
 
 `portunus` is the package's console script (`uv run portunus …` in this repo). It calls `GetCallerIdentity`, derives the caller's role ARN from the session ARN, and calls `AssumeRole` on that same role with `RoleSessionName` `portunus`, `DurationSeconds` 43200 and a session policy of two statements: `secretsmanager:GetSecretValue` on `SECRET_ARN`, and `sts:AssumeRole` on `arn:aws:iam::<caller account>:role/portunus-fed/*` (Sid `PortunusFederationAssumeRole`). `--policy` replaces the whole session policy; `--federation-role-path` changes the path in the default one; `--session-name` replaces the `RoleSessionName`. The caller role's trust policy must admit its own sessions and its `MaxSessionDuration` must be at least 12 h. The payload is `base64(JSON)` with `credentials` (`access_key_id`, `secret_access_key`, `session_token`), `expiration` and `secret_arn`.
 
-The identity token's tags for such a payload: `portunus:principal` is the caller's role name, `portunus:session` is `portunus`, `portunus:user` is the caller's STS source identity when its session carries one, else the role name, and `portunus:project` is `<project>` for a role named `UserProfile_<name>_<project>`, else empty.
+The identity token's tags for such a payload: `portunus:principal` is the caller's role name, `portunus:session` is the session name, `portunus` by default, `portunus:user` is the caller's STS source identity when its session carries one, else the role name, and `portunus:project` is `<project>` for a role named `UserProfile_<name>_<project>`, else empty.
 
 ## The AWS side
 
