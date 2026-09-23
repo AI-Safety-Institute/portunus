@@ -272,7 +272,7 @@ On the OpenAI side, all deployment concerns: the federation role's account must 
 
 OpenRouter issues the access token for at most 15 minutes and never beyond the STS token's expiry, so Portunus requests a 15-minute STS token here; the access token lives about 15 minutes and is cached for about 14. As for `anthropic_wif`, an unreachable endpoint, a 5xx/429 answer or a missed 6 s deadline returns 503.
 
-On the OpenRouter side, all deployment concerns: workload identity federation is available to enterprise organisations only. The federation policy's issuer is the federation role's account's STS issuer URL, its subject is the token's `sub`, the federation role's IAM ARN (`federation_role_arn`), and its audience is `audience`. The API key the policy acts as receives the usage. The access token carries that `sub` together with `federation_policy_id` and `federation_issuer_id`. The federation role's identity policy must allow `sts:GetWebIdentityToken` for `audience`.
+On the OpenRouter side, all deployment concerns: workload identity federation is available on OpenRouter's Business and Enterprise plans. The federation policy's issuer is the federation role's account's STS issuer URL, its subject is the token's `sub`, the federation role's IAM ARN (`federation_role_arn`), and its audience is `audience`. The API key the policy acts as receives the usage. The access token carries that `sub` together with `federation_policy_id` and `federation_issuer_id`. The federation role's identity policy must allow `sts:GetWebIdentityToken` for `audience`.
 
 #### `gcp_wif`
 
