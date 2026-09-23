@@ -238,13 +238,13 @@ Every exchange uses a freshly issued STS token.
   "type": "openai_wif",
   "host": "api.openai.com",
   "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example",
-  "identity_provider_id": "idp_example",
-  "service_account_id": "svc_acct_example",
+  "identity_provider_id": "idp_01EXAMPLE",
+  "service_account_id": "svc_acct_01EXAMPLE",
   "audience": "https://api.openai.com/v1"
 }
 ```
 
-`audience` (default shown) is optional and must equal the audience configured on the OpenAI workload identity provider `identity_provider_id`; `service_account_id` is the OpenAI service account the token acts as. Both ids are `[A-Za-z0-9_-]+`. Steps 1–3 are as for `anthropic_wif`, except that the STS token is signed with ES384 rather than RS256 (OpenAI's documented preference); then Portunus:
+`audience` (default shown) is optional and must equal the audience configured on the OpenAI workload identity provider `identity_provider_id`; `service_account_id` is the OpenAI service account the token acts as. Service accounts created in the dashboard may show a `user-…` id rather than `svc_acct_…`; either is accepted. Both ids are `[A-Za-z0-9_-]+`. Steps 1–3 are as for `anthropic_wif`, except that the STS token is signed with ES384 rather than RS256 (OpenAI's documented preference); then Portunus:
 
 4. Exchanges the token at `https://auth.openai.com/oauth/token` (RFC 8693 token exchange; JSON body with `grant_type` `urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token_type` `urn:ietf:params:oauth:token-type:jwt`, `subject_token`, `identity_provider_id` and `service_account_id`) and returns `access_token` with `output_header: "authorization"` and `output_prefix: "Bearer "`. Expiry comes from `expires_in`.
 
