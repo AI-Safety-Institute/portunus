@@ -42,6 +42,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the federation role path in the caller's account,
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
   overrides the path).
+- `portunus encode-credentials --session-name` sets the `RoleSessionName` the
+  CLI assumes the caller's own role with (default `portunus`), for roles whose
+  trust policy gates self-assumption on `sts:RoleSessionName`. Names outside
+  STS's `[\w+=,.@-]{2,64}` are rejected before any call.
 - `/authorise` responses may carry `output_header` and `output_prefix`, letting
   the backend choose which upstream header receives the credential and with
   what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
