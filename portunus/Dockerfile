@@ -1,5 +1,7 @@
 FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS builder
 
+# uv pinned by version + digest — :latest is a moving tag and the build
+# toolchain is inside the trust boundary.
 COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
@@ -16,6 +18,21 @@ RUN .venv/bin/python -c "from google.protobuf.internal import api_implementation
 
 FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS runtime
 
+# The health probe is pinned by architecture-specific checksums.
+# Update both checksums when changing the release version.
+ARG GRPC_HEALTH_PROBE_VERSION=v0.4.36
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) GHP_SHA256=1335e83e90eafc602303ca2e2501a11b5e26e69891007e4175362674669630c1 ;; \
+      arm64) GHP_SHA256=6534343a86abb0494bb90747482e8091700628992e256137336daedc5585d3b0 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
+      "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${TARGETARCH}" \
+      /usr/local/bin/grpc_health_probe && \
+    echo "${GHP_SHA256}  /usr/local/bin/grpc_health_probe" | sha256sum -c - && \
+    chmod 0755 /usr/local/bin/grpc_health_probe
+
 RUN mkdir -p /app && chown -R 1000:1000 /app
 USER 1000:1000
 
@@ -25,12 +42,19 @@ ENV VIRTUAL_ENV=/app/.venv \
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 COPY portunus ./portunus
-COPY logconf.yaml .
-ENV LISTEN_PORT=8080
+# gRPC listen port the server binds and the health probe targets.
+ENV GRPC_PORT=9000
 ENV LOG_LEVEL=info
-# One uvicorn worker uses at most one core; deployments on multi-vCPU hosts
-# should set this to the vCPU count to use the full allocation.
-ENV UVICORN_WORKERS=1
-EXPOSE 8080
+# Unbuffered stdout/stderr so logs reach the awslogs driver in real time
+# rather than being held by Python's pipe buffering until a flush.
+ENV PYTHONUNBUFFERED=1
+EXPOSE 9000
 
-CMD uvicorn portunus.app:portunus --proxy-headers --host 0.0.0.0 --port ${LISTEN_PORT} --workers ${UVICORN_WORKERS} --log-level ${LOG_LEVEL} --log-config logconf.yaml --loop asyncio --no-access-log
+# grpc_health_probe exits 0 on overall SERVING; the server flips to
+# NOT_SERVING at drain start, so draining tasks fail the probe promptly.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD grpc_health_probe -addr=127.0.0.1:${GRPC_PORT} || exit 1
+
+# Deps installed with --no-install-project + source COPYed, so console scripts
+# aren't generated — invoke the server as a module.
+CMD ["python", "-m", "portunus.grpc.server"]
