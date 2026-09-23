@@ -216,7 +216,7 @@ curl -sS https://anthropic.proxy.example.org/v1/messages \
 }
 ```
 
-Both ids must match `^[A-Za-z0-9_-]+$`; `audience` defaults to `https://api.openai.com/v1`.
+Both ids must match `^[A-Za-z0-9_-]+$`; `audience` defaults to `https://api.openai.com/v1`. Service accounts created in the dashboard may show a `user-…` id rather than `svc_acct_…`; either is accepted.
 
 ### Provider configuration
 
