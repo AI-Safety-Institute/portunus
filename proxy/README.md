@@ -123,6 +123,34 @@ permissions/ownership accordingly — e.g. Kubernetes `securityContext.fsGroup: 
 or `--chown` on a bind mount. If the key is unreadable, Envoy fails to start with
 a cert-load error.
 
+## Access-log timings
+
+The JSON access log on stdout includes the following fields. Timings are elapsed
+wall-clock milliseconds:
+
+| Field | Meaning |
+| --- | --- |
+| `duration` | Request start to completion, including response transfer. |
+| `upstream_pool_wait_ms` | Time waiting for the upstream connection pool, including connection establishment when needed. |
+| `request_sent_ms` | Request start to the last request byte sent upstream. |
+| `first_response_ms` | Request start to the first upstream response byte. |
+| `upstream_attempts` | Number of upstream attempts, including retries (a count, not a duration). |
+| `openai_processing_ms` | The upstream's optional `openai-processing-ms` response header, recorded as supplied. |
+
+For completed requests with one upstream attempt, subtract `request_sent_ms`
+from `first_response_ms` to measure the wait after sending the request. This
+includes network and upstream processing time; it is not proxy CPU time.
+Analyse retried requests separately: the upstream timing fields can refer to
+different attempts. Streaming response transfer is included in `duration`, not
+`first_response_ms`; these fields do not measure individual tokens or WS messages.
+
+Envoy emits its timings and attempt count as JSON numbers; the provider header
+is a string. Missing timings or headers are `null`, including on requests that
+never reach the upstream or end before the relevant event. Treat unavailable or
+nonnumeric timing values as missing, not zero. The provider header is supporting
+evidence, not an independently measured duration. Access-log timings do not
+depend on X-Ray sampling or audit delivery.
+
 ## Building
 
 ```bash
