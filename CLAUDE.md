@@ -124,6 +124,7 @@ Logging captures full request/response bodies, headers, and trailers verbatim â€
 - `/proxy/lua.lua` - Lua script for request/response interception and modification
 - `/proxy/envoy.yaml` - Envoy proxy configuration
 - `/proxy/entrypoint.sh` - Script for TLS and environment variable configuration
+- `/docs/federation-examples.md` - Worked examples for the `*_wif` secret types: the federation role as CloudFormation, each provider's configuration, what Portunus sends, and a failure table
 
 ## Testing Commands
 ```bash
