@@ -20,8 +20,8 @@ This repo implements a secure API key proxy system with two main components:
 ### Authentication Flow
 1. Client makes request with a special authorization header: `Authorization: Bearer <base64-encoded-payload>`
    - The payload contains AWS credentials and a secret ARN
-   - Format: `API_KEY_PREFIX + base64(json({"credentials": {...}, "secret_arn": "..."}))`
-   - This can be generated using `api_key_override()` in `util.py` which takes a secret ARN in format `aws-secretsmanager://<secret-arn>` and returns the encoded payload
+   - Format: `API_KEY_PREFIX + base64(json({"credentials": {...}, "expiration": "...", "secret_arn": "..."}))`
+   - Generate one with the `portunus encode-credentials <secret-arn> [--policy <file-or-json>]` CLI (`cli.py`), which assumes the caller's role with a scoped-down session policy and encodes the temporary credentials, or programmatically with `encode_payload(credentials, secret_arn)` in `services/payload_service.py`
 2. Envoy proxy intercepts the request via Lua script (`lua.lua`)
    - Extracts the `Authorization` header
    - Removes the Bearer prefix from the payload

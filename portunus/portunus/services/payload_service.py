@@ -15,8 +15,8 @@ def encode_payload(credentials: dict, secret_arn: str) -> str:
     This is the inverse of ``decode_payload``.
 
     Args:
-        credentials: Dictionary with AWS credential keys (AccessKeyId,
-            SecretAccessKey, SessionToken, and optionally Expiration).
+        credentials: Dictionary with AWS credential keys AccessKeyId,
+            SecretAccessKey, SessionToken and Expiration (all required).
         secret_arn: The ARN of the secret to retrieve.
 
     Returns:

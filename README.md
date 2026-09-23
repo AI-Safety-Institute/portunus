@@ -173,7 +173,7 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `RATE_LIMIT_INTERVAL_SECONDS` | Rate limit time window (seconds) | - |
 | `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Max requests per interval | - |
 | `USE_TLS` / `USE_TLS_TARGET` / `USE_TLS_PROVIDER` / `USE_TLS_LISTENER` | TLS configuration | - |
-| `CACHE_DURATION` | Authorization cache TTL | - |
+| `CACHE_DURATION` | Authorization cache TTL (seconds) | `86400` |
 | `CACHE_INACTIVE` | Remove cache entries if unused for this period | - |
 | `REDIS_HOST` | Redis hostname | `localhost` |
 | `REDIS_PORT` | Redis port | `6379` |
