@@ -5,7 +5,7 @@ For a secret of type `anthropic_wif`, `openai_wif`, `openrouter_wif` or `gcp_wif
 | Value | Example |
 |---|---|
 | AWS account | `123456789012` |
-| Federation role | `arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant` |
+| Federation role | `arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team` |
 | Caller roles | `arn:aws:iam::123456789012:role/example-callers/*` |
 | STS interface endpoint | `vpce-0123456789abcdef0` |
 | STS issuer URL | `https://<uuid>.tokens.sts.global.api.aws`, shown under IAM → Account settings once outbound identity federation is enabled |
@@ -37,7 +37,7 @@ The identity token's tags for such a payload: `portunus:principal` is the caller
 
 ## The AWS side
 
-One role per grant, under `/portunus-fed/<team>/`. Three documents matter: the trust policy (which callers may assume it, and only through the STS endpoint Portunus uses), the inline policy (issue identity tokens for one audience, for at most 1800 s, tagged with the four keys) and a permissions boundary (a ceiling of those two STS actions). Callers need an identity policy allowing `sts:AssumeRole` on the prefix.
+One role per grant, under `/portunus-fed/<team>/`, named `portunus-fed-<grant>@<type>.<slug>` (role names are unique per account, so the scope is repeated in the name; the prefix lets the deployer's role-management policy match the role by name, see below). Three documents matter: the trust policy (which callers may assume it, and only through the STS endpoint Portunus uses), the inline policy (issue identity tokens for one audience, for at most 1800 s, tagged with the four keys) and a permissions boundary (a ceiling of those two STS actions). Callers need an identity policy allowing `sts:AssumeRole` on the prefix.
 
 ```yaml
 AWSTemplateFormatVersion: '2010-09-09'
@@ -46,7 +46,7 @@ Description: Portunus federation role for one grant.
 Parameters:
   RoleName:
     Type: String
-    Default: example-grant
+    Default: portunus-fed-example-grant@teams.example-team
   CallerRoleArnPattern:
     Type: String
     Default: arn:aws:iam::123456789012:role/example-callers/*
@@ -124,7 +124,7 @@ Outputs:
     Value: !GetAtt FederationRole.Arn
 ```
 
-Substitute the deployment's `FEDERATION_*_TAG_KEY` values for the four tag keys. Drop the `aws:SourceVpce` condition if Portunus reaches STS over the public regional endpoint.
+Substitute the deployment's `FEDERATION_*_TAG_KEY` values for the four tag keys. Drop the `aws:SourceVpce` condition if Portunus reaches STS over the public regional endpoint. Whatever deploys the template needs its role-management permissions (`iam:GetRole`, `iam:DeleteRole`, `iam:PutRolePolicy`, …) on a name pattern as well as the path, `arn:aws:iam::123456789012:role/portunus-fed/*` and `arn:aws:iam::123456789012:role/portunus-fed-*`: IAM authorises by-name calls on a role that does not exist yet (the pre-create `GetRole`, a rollback `DeleteRole`) against `role/<name>` with no path.
 
 ### Caller identity policy
 
@@ -160,7 +160,7 @@ Attach to each caller role. The CLI's default session policy carries the same st
 {
   "type": "anthropic_wif",
   "host": "api.anthropic.com",
-  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team",
   "federation_rule_id": "fdrl_01J8ZQ2M9K3N4P5R6S7T8V9W0X",
   "organization_id": "3f1c9d2e-7b4a-4c6d-9e8f-0a1b2c3d4e5f",
   "service_account_id": "svac_01J8ZQ2M9K3N4P5R6S7T8V9W0Y",
@@ -177,7 +177,7 @@ Claude Console → Settings → Workload identity. The Connect workload wizard c
 
 - Federation issuer (`fdis_…`): issuer URL = the account's STS issuer URL, JWKS `discovery`.
 - Service account (`svac_…`): a member of workspace `wrkspc_…`.
-- Federation rule (`fdrl_…`): `match.subject_prefix` = `arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant` (exact; a trailing `*` makes it a prefix match), `match.audience` = `https://api.anthropic.com`, target = the service account, `token_lifetime_seconds` 60–86400 (API default 3600, wizard default 600). The exchange names the rule by id; Anthropic does not search rules. Per-caller conditions go in `condition` (CEL, one variable `claims`), e.g. `claims["https://sts.amazonaws.com/"]["request_tags"]["portunus:project"] == "example-project"`.
+- Federation rule (`fdrl_…`): `match.subject_prefix` = `arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team` (exact; a trailing `*` makes it a prefix match), `match.audience` = `https://api.anthropic.com`, target = the service account, `token_lifetime_seconds` 60–86400 (API default 3600, wizard default 600). The exchange names the rule by id; Anthropic does not search rules. Per-caller conditions go in `condition` (CEL, one variable `claims`), e.g. `claims["https://sts.amazonaws.com/"]["request_tags"]["portunus:project"] == "example-project"`.
 
 ### What Portunus sends
 
@@ -209,7 +209,7 @@ curl -sS https://anthropic.proxy.example.org/v1/messages \
 {
   "type": "openai_wif",
   "host": "api.openai.com",
-  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team",
   "identity_provider_id": "idp_0123456789abcdef",
   "service_account_id": "user-Ab12Cd34Ef56Gh78Ij90Kl",
   "audience": "https://api.openai.com/v1"
@@ -223,7 +223,7 @@ Both ids must match `^[A-Za-z0-9_-]+$`; `audience` defaults to `https://api.open
 platform.openai.com → Organization Settings → Security → Workload Identity Provider:
 
 - Provider (`idp_…`): OIDC Issuer URL = the STS issuer URL (trailing slash ignored), Audience = `https://api.openai.com/v1`, JWKS by discovery.
-- Mapping under the provider: key `sub`, value `arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant`, target service account = `service_account_id`. Matching is exact except one trailing `*` after a non-empty prefix. A token is issued only if exactly one enabled mapping matches every configured attribute. Derived attributes come from CEL transformations over `assertion`, e.g. `assertion["https://sts.amazonaws.com/"]["request_tags"]["portunus:user"]`.
+- Mapping under the provider: key `sub`, value `arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team`, target service account = `service_account_id`. Matching is exact except one trailing `*` after a non-empty prefix. A token is issued only if exactly one enabled mapping matches every configured attribute. Derived attributes come from CEL transformations over `assertion`, e.g. `assertion["https://sts.amazonaws.com/"]["request_tags"]["portunus:user"]`.
 - OpenAI checks the JWT header (`kid`, `alg`) and claims `iss`, `aud`, `sub`, `exp`, `iat`.
 
 ### What Portunus sends
@@ -254,7 +254,7 @@ curl -sS https://openai.proxy.example.org/v1/responses \
 {
   "type": "openrouter_wif",
   "host": "openrouter.ai",
-  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team",
   "federation_policy_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
   "audience": "https://openrouter.ai/api/v1"
 }
@@ -267,7 +267,7 @@ curl -sS https://openai.proxy.example.org/v1/responses \
 openrouter.ai → Settings → Workload identity (Business and Enterprise plans):
 
 - Issuer: Issuer URL = the STS issuer URL (must equal `iss` exactly; `https://` only), JWKS from `<issuer>/.well-known/openid-configuration`.
-- Policy: Issuer; Subject = `arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant` (exact match on `sub`); Audience = `https://openrouter.ai/api/v1` (required, exact); Acts as API key = a workspace API key owned by the organisation, which receives the usage. A policy needs Subject or Condition. Prefix matching exists only through the CEL Condition, e.g. `subject.startsWith("arn:aws:iam::123456789012:role/portunus-fed/example-team/")` (variables `subject`, `audience`, `scopes`, `token_type`; no `matches()`). The policy's id is shown under its name.
+- Policy: Issuer; Subject = `arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team` (exact match on `sub`); Audience = `https://openrouter.ai/api/v1` (required, exact); Acts as API key = a workspace API key owned by the organisation, which receives the usage. A policy needs Subject or Condition. Prefix matching exists only through the CEL Condition, e.g. `subject.startsWith("arn:aws:iam::123456789012:role/portunus-fed/example-team/")` (variables `subject`, `audience`, `scopes`, `token_type`; no `matches()`). The policy's id is shown under its name.
 - Subject tokens must be RS256 or ES256 and carry `iss`, `sub`, `aud`, `exp`.
 
 ### What Portunus sends
@@ -298,7 +298,7 @@ curl -sS https://openrouter.proxy.example.org/api/v1/chat/completions \
 {
   "type": "gcp_wif",
   "host": "aiplatform.googleapis.com",
-  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/example-grant",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/example-team/portunus-fed-example-grant@teams.example-team",
   "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-aws",
   "service_account": "example-sa@example-project.iam.gserviceaccount.com",
   "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
@@ -310,7 +310,7 @@ curl -sS https://openrouter.proxy.example.org/api/v1/chat/completions \
 
 ### Provider configuration
 
-Google sees the assumed-role ARN `arn:aws:sts::123456789012:assumed-role/example-grant/<caller role name>`: no IAM path, and the session segment is the caller's role name. Map `google.subject` to the role name and keep the caller in an attribute:
+Google sees the assumed-role ARN `arn:aws:sts::123456789012:assumed-role/portunus-fed-example-grant@teams.example-team/<caller role name>`: no IAM path, and the session segment is the caller's role name. Map `google.subject` to the role name and keep the caller in an attribute:
 
 ```bash
 gcloud iam workload-identity-pools create example-pool --location=global
@@ -319,11 +319,11 @@ gcloud iam workload-identity-pools providers create-aws example-aws \
   --location=global --workload-identity-pool=example-pool \
   --account-id=123456789012 \
   --attribute-mapping="google.subject=assertion.arn.extract('assumed-role/{role}/'),attribute.caller=assertion.arn.extract('assumed-role/{role_and_session}').extract('/{session}')" \
-  --attribute-condition="assertion.arn.startsWith('arn:aws:sts::123456789012:assumed-role/example-grant/')"
+  --attribute-condition="assertion.arn.startsWith('arn:aws:sts::123456789012:assumed-role/portunus-fed-example-grant@teams.example-team/')"
 
 gcloud iam service-accounts add-iam-policy-binding example-sa@example-project.iam.gserviceaccount.com \
   --role=roles/iam.workloadIdentityUser \
-  --member="principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/subject/example-grant"
+  --member="principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/subject/portunus-fed-example-grant@teams.example-team"
 ```
 
 The member uses the project number. The service account also needs the roles the upstream API requires (`roles/aiplatform.user` for Vertex AI). No request tags reach Google on this path; the caller appears only in `attribute.caller`.
