@@ -632,15 +632,17 @@ GCP_SERVICE_ACCOUNT_PATTERN = r"^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$"
 class GcpWifSecret(MintSecretBase):
     """Mint a Google service-account access token via workload identity federation.
 
-    The federation session's credentials sign an AWS ``GetCallerIdentity``
-    request, which Google STS exchanges for a federated token for
-    ``audience``; that token then impersonates ``service_account`` through the
-    IAM Credentials ``generateAccessToken`` API.
+    The federation session requests an STS web identity token for
+    ``audience``, which Google STS exchanges for a federated token; that token
+    then impersonates ``service_account`` through the IAM Credentials
+    ``generateAccessToken`` API.
 
     Attributes:
         audience: Full resource name of the workload identity pool provider,
             ``//iam.googleapis.com/projects/<number>/locations/global/``
-            ``workloadIdentityPools/<pool>/providers/<provider>``.
+            ``workloadIdentityPools/<pool>/providers/<provider>``. The
+            provider is an OIDC provider trusting the AWS account's STS token
+            issuer, and this is the token's audience.
         service_account: Email of the service account to impersonate.
         scopes: OAuth scopes requested for the access token.
         token_lifetime_seconds: Requested access token lifetime, 600-3600 s.

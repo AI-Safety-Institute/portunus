@@ -50,12 +50,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   30 minutes. The federation role's policy must allow `sts:DurationSeconds`
   up to 1800.
 - The `gcp_wif` secret type mints Google service-account access
-  tokens. Portunus signs an AWS `GetCallerIdentity` request with the
-  federation session's credentials, exchanges it at Google STS for a
-  federated token (workload identity federation), and impersonates the named
+  tokens. The federation session's STS web identity token, signed with RS256
+  for the secret's `audience` (a workload identity pool provider resource
+  name), is exchanged at Google STS (RFC 8693 token exchange, the JWT as an
+  OIDC subject token) for a federated token, which impersonates the named
   service account for the secret's `scopes` and `token_lifetime_seconds`.
-  Requires `AWS_DEFAULT_REGION`. Adds a runtime dependency on `google-auth`
-  (request signing).
+  The pool provider is an OIDC provider trusting the AWS account's STS token
+  issuer.
 - The CLI's default session policy allows `sts:AssumeRole` on every role under
   the federation role path in the caller's account,
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
