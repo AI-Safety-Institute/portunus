@@ -44,6 +44,7 @@ from portunus.services.xray_service import capture_async
 logger = logging.getLogger("api.access")
 
 JWT_BEARER_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+ANTHROPIC_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
 # The identity token only has to outlive the exchange call. The session must
 # outlive the token by more than the call latency: GetWebIdentityToken
 # rejects a DurationSeconds longer than the session's remaining lifetime
@@ -375,7 +376,7 @@ class AnthropicTokenExchange:
 
     @capture_async()
     async def exchange(self, assertion: str, secret: AnthropicWifSecret) -> MintedToken:
-        """POST the JWT to ``https://<host>/v1/oauth/token``.
+        """POST the JWT to ``ANTHROPIC_TOKEN_URL``.
 
         Raises:
             UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
@@ -383,11 +384,10 @@ class AnthropicTokenExchange:
             AuthenticationError: Any other non-200 response, or a response
                 without ``access_token`` and ``expires_in``.
         """
-        url = f"https://{secret.host}/v1/oauth/token"
         requested_at = datetime.now(timezone.utc)
         try:
             response = await self.http_client.post(
-                url,
+                ANTHROPIC_TOKEN_URL,
                 json={
                     "grant_type": JWT_BEARER_GRANT_TYPE,
                     "assertion": assertion,
@@ -398,22 +398,15 @@ class AnthropicTokenExchange:
                 },
             )
         except httpx.HTTPError as e:
-            logger.error(
-                f"Token exchange with {secret.host} failed: {type(e).__name__}: {e}"
-            )
-            raise UpstreamServiceError(
-                f"Token exchange with {secret.host} is unavailable"
-            ) from e
+            logger.error(f"Anthropic token exchange failed: {type(e).__name__}: {e}")
+            raise UpstreamServiceError("Anthropic token exchange is unavailable") from e
 
         if response.status_code != 200:
             logger.error(
-                f"Token exchange with {secret.host} returned HTTP "
-                f"{response.status_code}: {response.text[:500]}"
+                f"Anthropic token exchange returned HTTP {response.status_code}: "
+                f"{response.text[:500]}"
             )
-            message = (
-                f"Token exchange with {secret.host} returned "
-                f"HTTP {response.status_code}"
-            )
+            message = f"Anthropic token exchange returned HTTP {response.status_code}"
             if response.status_code >= 500 or response.status_code == 429:
                 raise UpstreamServiceError(message)
             raise AuthenticationError(message)
@@ -423,13 +416,13 @@ class AnthropicTokenExchange:
             token = body["access_token"]
             expires_in = int(body["expires_in"])
         except (ValueError, KeyError, TypeError) as e:
-            logger.error(f"Token exchange with {secret.host} returned a malformed body")
+            logger.error("Anthropic token exchange returned a malformed body")
             raise AuthenticationError(
-                f"Token exchange with {secret.host} returned a malformed response"
+                "Anthropic token exchange returned a malformed response"
             ) from e
         if not isinstance(token, str) or not token:
             raise AuthenticationError(
-                f"Token exchange with {secret.host} returned an empty token"
+                "Anthropic token exchange returned an empty token"
             )
         return MintedToken(
             token=token, expires_at=requested_at + timedelta(seconds=expires_in)
