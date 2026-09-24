@@ -205,7 +205,7 @@ A secret referenced by a payload is one of:
 | Stored key with target check | `{"secret": "sk-...", "host": "api.example.com"}` | Used only when the proxy's target matches `host` |
 | Minted token | `{"type": "anthropic_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
 
-JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key). JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
+JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key); a typeless object with a `federation_role_arn` is a mint secret missing its `type` and is rejected rather than used as a key. JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
 
 #### `anthropic_wif`
 
