@@ -200,6 +200,8 @@ class FederationConfig(BaseModel):
         principal_tag_key: Session tag key carrying the caller's IAM role name
         session_tag_key: Session tag key carrying the caller's role session name
         project_tag_key: Session tag key carrying the caller's project
+        attribution_key: HMAC key that pseudonymises tag values for secrets
+            with ``attribution: pseudonymous``. None when no secret uses it.
     """
 
     allowed_account_ids: list[str] = Field(
@@ -229,6 +231,10 @@ class FederationConfig(BaseModel):
     project_tag_key: str = Field(
         default="portunus:project",
         description="Session tag key for the caller's project",
+    )
+    attribution_key: Optional[str] = Field(
+        default=None,
+        description="HMAC key for pseudonymous attribution of identity tokens",
     )
 
     @field_validator("allowed_account_ids")
@@ -391,6 +397,8 @@ def get_config() -> PortunusConfig:
         project_tag_key=os.environ.get(
             "FEDERATION_PROJECT_TAG_KEY", "portunus:project"
         ),
+        # An empty key would be a usable but worthless HMAC key.
+        attribution_key=os.environ.get("FEDERATION_ATTRIBUTION_KEY") or None,
     )
 
     return PortunusConfig(

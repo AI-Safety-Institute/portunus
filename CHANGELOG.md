@@ -80,6 +80,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `API_KEY_PREFIX`. The WebSocket relay honours the same fields (default
   `Authorization: Bearer`). Cached authorization results carry both fields.
   (#136)
+- Mint secrets accept `attribution`: `full` (the default) sends the identity
+  token's four request tags as they are; `pseudonymous` replaces each tag
+  value with the first 16 hex characters of HMAC-SHA256 over
+  `<tag key>:<value>` under the new `FEDERATION_ATTRIBUTION_KEY` env var;
+  `none` sends no tags. A `pseudonymous` secret on a deployment without the
+  key fails every mint with 500 until the key is set. The token's `sub` is
+  the federation role ARN in every mode.
 
 ### Changed
 - Cached authorization results are keyed by the payload and the proxy's

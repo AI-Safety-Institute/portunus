@@ -12,6 +12,7 @@ from portunus.models import (
     OPENROUTER_API_AUDIENCE,
     AnthropicWifSecret,
     GcpWifSecret,
+    MintSecretBase,
     OpenAiWifSecret,
     OpenRouterWifSecret,
     SecretsManagerAuthPayload,
@@ -373,3 +374,38 @@ class TestValidateSecretForMintTypes:
     def test_unknown_target_is_rejected(self):
         with pytest.raises(AuthenticationError, match="target host unknown"):
             self.service.validate_secret(json.dumps(WIF_SECRET), None)
+
+
+class TestAttribution:
+    def test_defaults_to_full(self):
+        secret = parse_secret(json.dumps(WIF_SECRET))
+
+        assert isinstance(secret, AnthropicWifSecret)
+        assert secret.attribution == "full"
+
+    @pytest.mark.parametrize("attribution", ["full", "pseudonymous", "none"])
+    def test_accepts_each_value(self, attribution: str):
+        raw = json.dumps({**WIF_SECRET, "attribution": attribution})
+
+        secret = parse_secret(raw)
+
+        assert isinstance(secret, AnthropicWifSecret)
+        assert secret.attribution == attribution
+
+    @pytest.mark.parametrize(
+        "data", [WIF_SECRET, OPENAI_SECRET, OPENROUTER_SECRET, GCP_SECRET]
+    )
+    def test_every_mint_type_accepts_it(self, data: dict):
+        secret = parse_secret(json.dumps({**data, "attribution": "none"}))
+
+        assert isinstance(secret, MintSecretBase)
+        assert secret.attribution == "none"
+
+    @pytest.mark.parametrize(
+        "attribution", ["anonymous", "Full", "", None, True, ["full"]]
+    )
+    def test_rejects_other_values(self, attribution: object):
+        raw = json.dumps({**WIF_SECRET, "attribution": attribution})
+
+        with pytest.raises(AuthenticationError, match="invalid fields"):
+            parse_secret(raw)

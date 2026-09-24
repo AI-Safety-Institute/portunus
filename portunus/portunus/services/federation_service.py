@@ -7,7 +7,8 @@ Minting has two independent parts:
    credentials, assume the secret's federation role, then have that session
    request an STS web identity token. The result is a signed JWT whose subject
    is the federation role and whose tags carry the user, the caller's role
-   name, its session name and the project.
+   name, its session name and the project, as they are, pseudonymised or not
+   at all, per the secret's ``attribution``.
 2. Exchange: trade the JWT for a provider bearer token. Each provider has an
    adapter with the same ``exchange(proof, secret)`` shape.
    :class:`AnthropicTokenExchange`, :class:`OpenAiTokenExchange` and
@@ -19,6 +20,8 @@ Minting has two independent parts:
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import re
 import urllib.parse
@@ -42,6 +45,7 @@ from portunus.exceptions import (
 )
 from portunus.models import (
     AnthropicWifSecret,
+    Attribution,
     AwsCredentials,
     GcpWifSecret,
     MintSecretBase,
@@ -102,6 +106,7 @@ _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
 # and source identities may also contain ",", so a valid one is not always a
 # valid tag value.
 _SESSION_TAG_VALUE = re.compile(r"^[\w .:/=+\-@]*$")
+PSEUDONYM_HEX_LENGTH = 16
 # /authorise has a 9 s budget (app.py), and the caller's identity check and
 # secret fetch run before minting starts. The per-call limits below add up to
 # more than that, so mint() also has an overall deadline.
@@ -248,6 +253,67 @@ def caller_project(principal: PrincipalInfo) -> str:
     return project
 
 
+def pseudonym(key: str, tag_key: str, value: str) -> str:
+    """A keyed pseudonym for one tag value; an empty value stays empty.
+
+    The first ``PSEUDONYM_HEX_LENGTH`` hex characters of HMAC-SHA256 over
+    ``<tag_key>:<value>`` under ``key``. The tag key is part of the input so
+    one value carried under two tags gets two unrelated pseudonyms.
+    """
+    if not value:
+        return ""
+    digest = hmac.new(key.encode(), f"{tag_key}:{value}".encode(), hashlib.sha256)
+    return digest.hexdigest()[:PSEUDONYM_HEX_LENGTH]
+
+
+def require_attribution_key(federation_config: FederationConfig) -> str:
+    """The key ``pseudonymous`` attribution pseudonymises with.
+
+    Raises:
+        ConfigurationError: ``FEDERATION_ATTRIBUTION_KEY`` is not set. Real
+            values are never sent in its place.
+    """
+    key = federation_config.attribution_key
+    if not key:
+        logger.error(
+            "Secret requests pseudonymous attribution but "
+            "FEDERATION_ATTRIBUTION_KEY is not set"
+        )
+        raise ConfigurationError(
+            "Pseudonymous attribution requires FEDERATION_ATTRIBUTION_KEY"
+        )
+    return key
+
+
+def identity_token_tags(
+    identity: FederationIdentity,
+    federation_config: FederationConfig,
+    attribution: Attribution,
+) -> Optional[list[dict[str, str]]]:
+    """The ``Tags`` for GetWebIdentityToken, or None to send none.
+
+    ``full`` carries the identity's user, principal, session and project under
+    the configured tag keys; ``pseudonymous`` carries a :func:`pseudonym` of
+    each, with an empty project staying empty; ``none`` returns None.
+
+    Raises:
+        ConfigurationError: ``pseudonymous`` without
+            ``FEDERATION_ATTRIBUTION_KEY``.
+    """
+    if attribution == "none":
+        return None
+    tags = [
+        (federation_config.user_tag_key, identity.user),
+        (federation_config.principal_tag_key, identity.principal),
+        (federation_config.session_tag_key, identity.session),
+        (federation_config.project_tag_key, identity.project),
+    ]
+    if attribution == "pseudonymous":
+        key = require_attribution_key(federation_config)
+        tags = [(tag_key, pseudonym(key, tag_key, value)) for tag_key, value in tags]
+    return [{"Key": tag_key, "Value": value} for tag_key, value in tags]
+
+
 def _client_error_code(error: ClientError) -> str:
     return str(error.response.get("Error", {}).get("Code", ""))
 
@@ -348,6 +414,8 @@ class StsFederationService:
         audience: str,
         signing_algorithm: SigningAlgorithm = IDENTITY_TOKEN_SIGNING_ALGORITHM,
         duration_seconds: int = IDENTITY_TOKEN_SECONDS,
+        *,
+        attribution: Attribution = "full",
     ) -> WebIdentityToken:
         """Issue a fresh STS-signed JWT for ``audience`` from the federation session.
 
@@ -356,9 +424,13 @@ class StsFederationService:
         is whichever the provider prefers. ``duration_seconds`` is the token's
         lifetime, which bounds the provider token's; STS accepts 60 to 3600 s
         and the value must fall inside the federation session's remaining life.
+        ``attribution`` decides what the token's request tags carry; see
+        :func:`identity_token_tags`.
 
         Raises:
             ValueError: ``duration_seconds`` is outside STS's 60..3600 s range.
+            ConfigurationError: ``pseudonymous`` attribution without
+                ``FEDERATION_ATTRIBUTION_KEY``.
             AuthenticationError: STS refused to issue the token.
             UpstreamServiceError: STS could not be reached.
         """
@@ -366,15 +438,14 @@ class StsFederationService:
             raise ValueError(
                 f"duration_seconds must be between 60 and 3600, got {duration_seconds}"
             )
-        tags = [
-            {"Key": self.federation_config.user_tag_key, "Value": identity.user},
-            {
-                "Key": self.federation_config.principal_tag_key,
-                "Value": identity.principal,
-            },
-            {"Key": self.federation_config.session_tag_key, "Value": identity.session},
-            {"Key": self.federation_config.project_tag_key, "Value": identity.project},
-        ]
+        request: dict[str, Any] = {
+            "Audience": [audience],
+            "SigningAlgorithm": signing_algorithm,
+            "DurationSeconds": duration_seconds,
+        }
+        tags = identity_token_tags(identity, self.federation_config, attribution)
+        if tags is not None:
+            request["Tags"] = tags
         try:
             async with self.boto_session.create_client(
                 "sts",
@@ -384,12 +455,7 @@ class StsFederationService:
                 endpoint_url=self.endpoint_url(),
                 config=_STS_CLIENT_CONFIG,
             ) as sts:
-                response = await sts.get_web_identity_token(
-                    Audience=[audience],
-                    SigningAlgorithm=signing_algorithm,
-                    DurationSeconds=duration_seconds,
-                    Tags=tags,
-                )
+                response = await sts.get_web_identity_token(**request)
         except ClientError as e:
             code = _client_error_code(e)
             logger.error(f"GetWebIdentityToken failed ({code}): {e}")
@@ -754,7 +820,10 @@ class TokenMintService:
     async def _web_identity_proof(
         self, identity: FederationIdentity, secret: AnthropicWifSecret | GcpWifSecret
     ) -> str:
-        return (await self.sts.web_identity_token(identity, secret.audience)).token
+        token = await self.sts.web_identity_token(
+            identity, secret.audience, attribution=secret.attribution
+        )
+        return token.token
 
     async def _openai_identity_proof(
         self, identity: FederationIdentity, secret: OpenAiWifSecret
@@ -764,6 +833,7 @@ class TokenMintService:
             secret.audience,
             OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
             OPENAI_IDENTITY_TOKEN_SECONDS,
+            attribution=secret.attribution,
         )
         return token.token
 
@@ -775,6 +845,7 @@ class TokenMintService:
             secret.audience,
             OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM,
             OPENROUTER_IDENTITY_TOKEN_SECONDS,
+            attribution=secret.attribution,
         )
         return token.token
 
@@ -790,6 +861,8 @@ class TokenMintService:
         Raises:
             AuthenticationError: Role not allowed, no route for the secret
                 type, STS refused, or the exchange failed.
+            ConfigurationError: The secret's ``attribution`` is
+                ``pseudonymous`` and ``FEDERATION_ATTRIBUTION_KEY`` is not set.
             CredentialsError: Caller credentials expired, not an assumed role,
                 or an identity field unusable as a session tag.
             UpstreamServiceError: STS or the provider was unavailable, or
@@ -805,6 +878,9 @@ class TokenMintService:
             raise AuthenticationError(
                 f"No token exchange for secret type {type(secret).__name__}"
             )
+        # identity_token_tags() would also raise, but only after AssumeRole.
+        if secret.attribution == "pseudonymous":
+            require_attribution_key(self.federation_config)
         try:
             async with asyncio.timeout(MINT_DEADLINE_SECONDS):
                 identity = await self.sts.assume_federation_role(

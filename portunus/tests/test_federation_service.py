@@ -1,8 +1,11 @@
 """Tests for minting short-lived upstream tokens via federation roles."""
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
+import re
 import threading
 import urllib.parse
 from collections.abc import Callable
@@ -54,6 +57,7 @@ from portunus.services.federation_service import (
     OPENROUTER_IDENTITY_TOKEN_SECONDS,
     OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM,
     OPENROUTER_TOKEN_URL,
+    PSEUDONYM_HEX_LENGTH,
     TOKEN_EXCHANGE_GRANT_TYPE,
     AnthropicTokenExchange,
     FederationIdentity,
@@ -69,6 +73,8 @@ from portunus.services.federation_service import (
     caller_role_name,
     caller_session,
     caller_user,
+    identity_token_tags,
+    pseudonym,
     validate_federation_role_arn,
 )
 
@@ -96,6 +102,13 @@ STS_ENDPOINT = "https://sts.eu-west-2.amazonaws.com"
 FEDERATION_CONFIG = FederationConfig(
     allowed_account_ids=[ACCOUNT], sts_endpoint_url=STS_ENDPOINT
 )
+ATTRIBUTION_KEY = "example-attribution-key-0123456789abcdef"
+PSEUDONYMOUS_CONFIG = FederationConfig(
+    allowed_account_ids=[ACCOUNT],
+    sts_endpoint_url=STS_ENDPOINT,
+    attribution_key=ATTRIBUTION_KEY,
+)
+HEX16 = re.compile(r"^[0-9a-f]{16}$")
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 GCP_AUDIENCE = (
     "//iam.googleapis.com/projects/123456789/locations/global/"
@@ -311,6 +324,142 @@ class TestCallerIdentityFields:
     def test_source_identity_with_a_comma_cannot_be_a_session_tag(self):
         with pytest.raises(CredentialsError, match="session tag"):
             caller_user(CALLER_ROLE, "some,one")
+
+
+class TestPseudonym:
+    def test_is_sixteen_hex_characters(self):
+        value = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
+
+        assert PSEUDONYM_HEX_LENGTH == 16
+        assert HEX16.fullmatch(value)
+
+    def test_is_hmac_sha256_over_the_tag_key_and_value(self):
+        expected = hmac.new(
+            ATTRIBUTION_KEY.encode(),
+            f"portunus:user:{SOURCE_IDENTITY}".encode(),
+            hashlib.sha256,
+        ).hexdigest()[:16]
+
+        assert pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY) == expected
+
+    def test_is_deterministic(self):
+        first = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
+        second = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
+
+        assert first == second
+
+    def test_depends_on_the_key(self):
+        under_key = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
+        under_other = pseudonym(
+            "another-key-0123456789abcdef0123", "portunus:user", SOURCE_IDENTITY
+        )
+
+        assert under_key != under_other
+
+    def test_depends_on_the_tag_key(self):
+        as_user = pseudonym(ATTRIBUTION_KEY, "portunus:user", "example")
+        as_project = pseudonym(ATTRIBUTION_KEY, "portunus:project", "example")
+
+        assert as_user != as_project
+
+    def test_depends_on_the_value(self):
+        one = pseudonym(ATTRIBUTION_KEY, "portunus:user", "one")
+        other = pseudonym(ATTRIBUTION_KEY, "portunus:user", "other")
+
+        assert one != other
+
+    def test_empty_value_stays_empty(self):
+        assert pseudonym(ATTRIBUTION_KEY, "portunus:project", "") == ""
+
+
+class TestIdentityTokenTags:
+    def test_full_sends_the_values_as_they_are(self):
+        identity = replace(_identity(), user=SOURCE_IDENTITY)
+
+        tags = identity_token_tags(identity, FEDERATION_CONFIG, "full")
+
+        assert tags == [
+            {"Key": "portunus:user", "Value": SOURCE_IDENTITY},
+            {"Key": "portunus:principal", "Value": CALLER_ROLE},
+            {"Key": "portunus:session", "Value": "session"},
+            {"Key": "portunus:project", "Value": "example"},
+        ]
+
+    def test_full_needs_no_key(self):
+        tags = identity_token_tags(_identity(), FEDERATION_CONFIG, "full")
+
+        assert tags is not None
+        assert len(tags) == 4
+
+    def test_none_sends_no_tags(self):
+        assert identity_token_tags(_identity(), FEDERATION_CONFIG, "none") is None
+        assert identity_token_tags(_identity(), PSEUDONYMOUS_CONFIG, "none") is None
+
+    def test_pseudonymous_replaces_every_value(self):
+        identity = replace(_identity(), user=SOURCE_IDENTITY)
+
+        tags = identity_token_tags(identity, PSEUDONYMOUS_CONFIG, "pseudonymous")
+
+        assert tags == [
+            {
+                "Key": "portunus:user",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY),
+            },
+            {
+                "Key": "portunus:principal",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:principal", CALLER_ROLE),
+            },
+            {
+                "Key": "portunus:session",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:session", "session"),
+            },
+            {
+                "Key": "portunus:project",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:project", "example"),
+            },
+        ]
+        values = {tag["Value"] for tag in tags}
+        assert all(HEX16.fullmatch(value) for value in values)
+        assert values.isdisjoint({SOURCE_IDENTITY, CALLER_ROLE, "session", "example"})
+
+    def test_pseudonymous_keeps_an_empty_project_empty(self):
+        identity = replace(_identity(), project="")
+
+        tags = identity_token_tags(identity, PSEUDONYMOUS_CONFIG, "pseudonymous")
+
+        assert tags is not None
+        assert tags[3] == {"Key": "portunus:project", "Value": ""}
+
+    def test_pseudonyms_are_separated_by_the_configured_tag_key(self):
+        federation_config = PSEUDONYMOUS_CONFIG.model_copy(
+            update={"user_tag_key": "example:user"}
+        )
+        identity = replace(_identity(), user=SOURCE_IDENTITY)
+
+        tags = identity_token_tags(identity, federation_config, "pseudonymous")
+
+        assert tags is not None
+        assert tags[0] == {
+            "Key": "example:user",
+            "Value": pseudonym(ATTRIBUTION_KEY, "example:user", SOURCE_IDENTITY),
+        }
+        assert tags[0]["Value"] != pseudonym(
+            ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY
+        )
+
+    def test_pseudonymous_without_a_key_is_a_configuration_error(self, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
+
+        with pytest.raises(ConfigurationError, match="FEDERATION_ATTRIBUTION_KEY"):
+            identity_token_tags(_identity(), FEDERATION_CONFIG, "pseudonymous")
+
+        assert "FEDERATION_ATTRIBUTION_KEY is not set" in caplog.text
+
+    def test_pseudonymous_with_an_empty_key_is_a_configuration_error(self):
+        federation_config = FEDERATION_CONFIG.model_copy(update={"attribution_key": ""})
+
+        with pytest.raises(ConfigurationError, match="FEDERATION_ATTRIBUTION_KEY"):
+            identity_token_tags(_identity(), federation_config, "pseudonymous")
 
 
 def _sts_session(
@@ -546,6 +695,57 @@ class TestStsFederationService:
         (client,) = clients
         kwargs = client.get_web_identity_token.await_args.kwargs
         assert kwargs["DurationSeconds"] == 1800
+
+    @pytest.mark.asyncio
+    async def test_web_identity_token_sends_no_tags_for_none_attribution(self):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        await service.web_identity_token(
+            _identity(), "https://api.example.com", attribution="none"
+        )
+
+        (client,) = clients
+        client.get_web_identity_token.assert_awaited_once_with(
+            Audience=["https://api.example.com"],
+            SigningAlgorithm="RS256",
+            DurationSeconds=IDENTITY_TOKEN_SECONDS,
+        )
+
+    @pytest.mark.asyncio
+    async def test_web_identity_token_sends_pseudonyms_for_pseudonymous_attribution(
+        self,
+    ):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, PSEUDONYMOUS_CONFIG)
+        identity = replace(_identity(), user=SOURCE_IDENTITY)
+
+        await service.web_identity_token(
+            identity, "https://api.example.com", attribution="pseudonymous"
+        )
+
+        (client,) = clients
+        tags = client.get_web_identity_token.await_args.kwargs["Tags"]
+        assert tags == identity_token_tags(
+            identity, PSEUDONYMOUS_CONFIG, "pseudonymous"
+        )
+        values = {tag["Value"] for tag in tags}
+        assert all(HEX16.fullmatch(value) for value in values)
+        assert values.isdisjoint({SOURCE_IDENTITY, CALLER_ROLE, "session", "example"})
+
+    @pytest.mark.asyncio
+    async def test_web_identity_token_pseudonymous_without_a_key_fails_before_sts(
+        self,
+    ):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        with pytest.raises(ConfigurationError, match="FEDERATION_ATTRIBUTION_KEY"):
+            await service.web_identity_token(
+                _identity(), "https://api.example.com", attribution="pseudonymous"
+            )
+
+        assert clients == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("duration_seconds", [59, 3601])
@@ -1265,7 +1465,7 @@ class TestGcpTokenExchange:
 
 class TestTokenMintService:
     def _service(
-        self,
+        self, federation_config: FederationConfig = FEDERATION_CONFIG
     ) -> tuple[TokenMintService, MagicMock, MagicMock, MagicMock, MagicMock, MagicMock]:
         sts = MagicMock()
         sts.assume_federation_role = AsyncMock(return_value=_identity())
@@ -1307,7 +1507,7 @@ class TestTokenMintService:
                 gcp=gcp,
                 openai=openai,
                 openrouter=openrouter,
-                federation_config=FEDERATION_CONFIG,
+                federation_config=federation_config,
             ),
             sts,
             anthropic,
@@ -1352,7 +1552,7 @@ class TestTokenMintService:
             CALLER_CREDENTIALS, CALLER, ROLE_ARN
         )
         sts.web_identity_token.assert_awaited_once_with(
-            _identity(), "https://api.anthropic.com"
+            _identity(), "https://api.anthropic.com", attribution="full"
         )
         anthropic.exchange.assert_awaited_once_with("jwt-1", secret)
         assert minted.token == "token-for-jwt-1"
@@ -1386,7 +1586,9 @@ class TestTokenMintService:
             CALLER_CREDENTIALS, CALLER, ROLE_ARN
         )
         # The defaults: RS256 and IDENTITY_TOKEN_SECONDS, as for anthropic_wif.
-        sts.web_identity_token.assert_awaited_once_with(_identity(), GCP_AUDIENCE)
+        sts.web_identity_token.assert_awaited_once_with(
+            _identity(), GCP_AUDIENCE, attribution="full"
+        )
         gcp.exchange.assert_awaited_once_with("jwt-1", secret)
         anthropic.exchange.assert_not_awaited()
         assert minted.token == "ya29.example"
@@ -1408,6 +1610,7 @@ class TestTokenMintService:
             OPENAI_API_AUDIENCE,
             OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
             OPENAI_IDENTITY_TOKEN_SECONDS,
+            attribution="full",
         )
         assert OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM == "ES384"
         assert OPENAI_IDENTITY_TOKEN_SECONDS == 1800
@@ -1426,7 +1629,7 @@ class TestTokenMintService:
         )
 
         sts.web_identity_token.assert_awaited_once_with(
-            _identity(), "https://example.com", "ES384", 1800
+            _identity(), "https://example.com", "ES384", 1800, attribution="full"
         )
 
     @pytest.mark.asyncio
@@ -1446,6 +1649,7 @@ class TestTokenMintService:
             OPENROUTER_API_AUDIENCE,
             OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM,
             OPENROUTER_IDENTITY_TOKEN_SECONDS,
+            attribution="full",
         )
         assert OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM == "RS256"
         assert OPENROUTER_IDENTITY_TOKEN_SECONDS == 900
@@ -1466,7 +1670,7 @@ class TestTokenMintService:
         )
 
         sts.web_identity_token.assert_awaited_once_with(
-            _identity(), "https://example.com", "RS256", 900
+            _identity(), "https://example.com", "RS256", 900, attribution="full"
         )
 
     @pytest.mark.asyncio
@@ -1693,3 +1897,116 @@ class TestTokenMintService:
         gcp.exchange.assert_not_awaited()
         openai.exchange.assert_not_awaited()
         openrouter.exchange.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "make_secret", [_secret, _openai_secret, _openrouter_secret, _gcp_secret]
+    )
+    async def test_mint_passes_the_secrets_attribution_to_the_identity_proof(
+        self, make_secret: Callable[..., MintSecretBase]
+    ):
+        service, sts, _, _, _, _ = self._service()
+
+        await service.mint(CALLER_CREDENTIALS, CALLER, make_secret(attribution="none"))
+
+        assert sts.web_identity_token.await_args.kwargs["attribution"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_pseudonymous_mint_without_a_key_fails_before_any_aws_call(
+        self, caplog
+    ):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        service, sts, anthropic, gcp, openai, openrouter = self._service()
+
+        with pytest.raises(ConfigurationError, match="FEDERATION_ATTRIBUTION_KEY"):
+            await service.mint(
+                CALLER_CREDENTIALS, CALLER, _secret(attribution="pseudonymous")
+            )
+
+        sts.assume_federation_role.assert_not_awaited()
+        sts.web_identity_token.assert_not_awaited()
+        anthropic.exchange.assert_not_awaited()
+        gcp.exchange.assert_not_awaited()
+        openai.exchange.assert_not_awaited()
+        openrouter.exchange.assert_not_awaited()
+        assert "FEDERATION_ATTRIBUTION_KEY is not set" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_pseudonymous_mint_with_a_key_proceeds(self):
+        service, sts, anthropic, _, _, _ = self._service(PSEUDONYMOUS_CONFIG)
+        secret = _secret(attribution="pseudonymous")
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
+
+        sts.web_identity_token.assert_awaited_once_with(
+            _identity(), "https://api.anthropic.com", attribution="pseudonymous"
+        )
+        anthropic.exchange.assert_awaited_once_with("jwt-1", secret)
+        assert minted.token == "token-for-jwt-1"
+
+    @pytest.mark.asyncio
+    async def test_mint_with_no_attribution_sends_no_tags(self):
+        session, clients = _sts_session(
+            assume_role=ASSUME_ROLE_RESPONSE,
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        anthropic, _ = _exchange(_token_response)
+        service = TokenMintService(
+            sts=StsFederationService(session, FEDERATION_CONFIG),
+            anthropic=anthropic,
+            federation_config=FEDERATION_CONFIG,
+        )
+
+        minted = await service.mint(
+            CALLER_CREDENTIALS, CALLER, _secret(attribution="none")
+        )
+
+        _, web_identity = clients
+        web_identity.get_web_identity_token.assert_awaited_once_with(
+            Audience=["https://api.anthropic.com"],
+            SigningAlgorithm="RS256",
+            DurationSeconds=IDENTITY_TOKEN_SECONDS,
+        )
+        assert minted.token == "sk-ant-oat01-example"
+
+    @pytest.mark.asyncio
+    async def test_pseudonymous_mint_sends_pseudonyms_and_never_the_values(self):
+        session, clients = _sts_session(
+            assume_role={**ASSUME_ROLE_RESPONSE, "SourceIdentity": SOURCE_IDENTITY},
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        anthropic, _ = _exchange(_token_response)
+        service = TokenMintService(
+            sts=StsFederationService(session, PSEUDONYMOUS_CONFIG),
+            anthropic=anthropic,
+            federation_config=PSEUDONYMOUS_CONFIG,
+        )
+
+        minted = await service.mint(
+            CALLER_CREDENTIALS, CALLER, _secret(attribution="pseudonymous")
+        )
+
+        _, web_identity = clients
+        tags = web_identity.get_web_identity_token.await_args.kwargs["Tags"]
+        assert tags == [
+            {
+                "Key": "portunus:user",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY),
+            },
+            {
+                "Key": "portunus:principal",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:principal", CALLER_ROLE),
+            },
+            {
+                "Key": "portunus:session",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:session", "session"),
+            },
+            {
+                "Key": "portunus:project",
+                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:project", "example"),
+            },
+        ]
+        values = {tag["Value"] for tag in tags}
+        assert all(HEX16.fullmatch(value) for value in values)
+        assert values.isdisjoint({SOURCE_IDENTITY, CALLER_ROLE, "session", "example"})
+        assert minted.token == "sk-ant-oat01-example"
