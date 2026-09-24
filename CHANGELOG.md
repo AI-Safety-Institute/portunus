@@ -5,14 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Removed
-- RFC 9421 request signing (the `signing_key` field on JSON secrets, the
-  `Content-Digest`, `Signature` and `Signature-Input` upstream headers, and the
-  `signable_request` / `signature*` fields on `/authorise`). Anthropic has
-  deprecated the check and confirmed it can be turned off. Secrets that still
-  carry a `signing_key` field keep working; the field is ignored. The `portunus`
-  CLI's default session policy no longer grants `kms:Sign`, and LocalStack no
-  longer starts KMS.
+## [0.11.0] - 2026-09-24
 
 ### Added
 - Secrets may describe a token to mint instead of holding a key. The
@@ -117,6 +110,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   output headers, whether or not they were forwarded; previously only
   `API_KEY_HEADER` was excluded. The WebSocket relay applies the same
   forwarding and logging rules. (#136)
+
+### Removed
+- RFC 9421 request signing (the `signing_key` field on JSON secrets, the
+  `Content-Digest`, `Signature` and `Signature-Input` upstream headers, and the
+  `signable_request` / `signature*` fields on `/authorise`). Anthropic has
+  deprecated the check and confirmed it can be turned off. Secrets that still
+  carry a `signing_key` field keep working; the field is ignored. The `portunus`
+  CLI's default session policy no longer grants `kms:Sign`, and LocalStack no
+  longer starts KMS.
 
 ### Fixed
 - A JSON secret that failed schema validation was logged with the pydantic
@@ -347,7 +349,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.7.0...v0.8.0
