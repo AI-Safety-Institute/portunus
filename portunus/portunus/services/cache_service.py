@@ -67,28 +67,35 @@ class CacheService:
         self.state_service = state_service or StateService()
         self.cache_duration = config.redis.cache_duration
 
-    def generate_cache_key(self, payload: str) -> str:
+    def generate_cache_key(self, payload: str, target_host: Optional[str]) -> str:
         """
-        Generate a secure cache key from a payload.
+        Generate a secure cache key from a payload and its target host.
 
-        Creates a SHA-256 hash of the payload to use as a Redis key,
-        ensuring keys are of consistent length and don't contain
-        sensitive information.
+        Creates a SHA-256 hash over the payload and the target host to use
+        as a Redis key, so keys are of consistent length, don't contain
+        sensitive information, and a result authorised for one proxy's
+        upstream is never a hit for a proxy with a different one.
 
         Args:
             payload: The payload to use for the cache key.
+            target_host: The proxy's target host, or None when it sent none.
 
         Returns:
-            A hash of the payload to use as a cache key.
+            A hash of the payload and target host to use as a cache key.
         """
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            f"{payload}\n{target_host or ''}".encode("utf-8")
+        ).hexdigest()
 
-    async def get_cached_auth_result(self, payload: str) -> Optional[AuthResult]:
+    async def get_cached_auth_result(
+        self, payload: str, target_host: Optional[str]
+    ) -> Optional[AuthResult]:
         """
         Get an authentication result from the cache.
 
         Args:
             payload: The payload used as a lookup key.
+            target_host: The proxy's target host the payload was authorised for.
 
         Returns:
             AuthResult if found, None otherwise. Entries written before
@@ -105,7 +112,7 @@ class CacheService:
             return None
 
         try:
-            cache_key = self.generate_cache_key(payload)
+            cache_key = self.generate_cache_key(payload, target_host)
             cached_data = await client.get(cache_key)
 
             if cached_data:
@@ -142,6 +149,7 @@ class CacheService:
     async def cache_auth_response(
         self,
         payload: str,
+        target_host: Optional[str],
         api_key: str,
         principal_info: PrincipalInfo,
         ttl_seconds: Optional[int] = None,
@@ -154,6 +162,7 @@ class CacheService:
 
         Args:
             payload: The payload to use as a cache key.
+            target_host: The proxy's target host the payload was authorised for.
             api_key: The API key to cache.
             principal_info: Principal information to cache and log.
             ttl_seconds: Optional TTL override
@@ -173,7 +182,7 @@ class CacheService:
             return False
 
         try:
-            cache_key = self.generate_cache_key(payload)
+            cache_key = self.generate_cache_key(payload, target_host)
             effective_ttl = (
                 ttl_seconds if ttl_seconds is not None else self.cache_duration
             )
@@ -215,6 +224,7 @@ class CacheService:
     async def cache_auth_result(
         self,
         payload: str,
+        target_host: Optional[str],
         auth_result: AuthResult,
         ttl_seconds: Optional[int] = None,
     ) -> bool:
@@ -223,6 +233,7 @@ class CacheService:
 
         Args:
             payload: The payload to use as a cache key.
+            target_host: The proxy's target host the payload was authorised for.
             auth_result: The authentication result to cache.
             ttl_seconds: Optional TTL override based on credential expiration.
 
@@ -231,6 +242,7 @@ class CacheService:
         """
         return await self.cache_auth_response(
             payload,
+            target_host,
             auth_result.api_key,
             auth_result.principal_info,
             ttl_seconds,
@@ -243,6 +255,7 @@ class CacheService:
     async def cache_api_key(
         self,
         payload: str,
+        target_host: Optional[str],
         api_key: str,
         principal_info: PrincipalInfo,
     ) -> bool:
@@ -251,21 +264,27 @@ class CacheService:
 
         Args:
             payload: The payload to use as a cache key.
+            target_host: The proxy's target host the payload was authorised for.
             api_key: The API key to cache.
             principal_info: Principal information to cache and log.
 
         Returns:
             True if successfully cached, False otherwise.
         """
-        return await self.cache_auth_response(payload, api_key, principal_info)
+        return await self.cache_auth_response(
+            payload, target_host, api_key, principal_info
+        )
 
     @capture_async()
-    async def invalidate_cache_entry(self, payload: str) -> bool:
+    async def invalidate_cache_entry(
+        self, payload: str, target_host: Optional[str]
+    ) -> bool:
         """
         Invalidate a cache entry.
 
         Args:
             payload: The payload whose cache entry should be invalidated.
+            target_host: The proxy's target host the payload was authorised for.
 
         Returns:
             True if successfully invalidated or entry didn't exist, False on error.
@@ -276,7 +295,7 @@ class CacheService:
             return False
 
         try:
-            cache_key = self.generate_cache_key(payload)
+            cache_key = self.generate_cache_key(payload, target_host)
             await client.delete(cache_key)
             logger.info(f"Invalidated cache key {cache_key[:8]}...")
             return True

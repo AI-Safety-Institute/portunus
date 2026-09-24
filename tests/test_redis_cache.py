@@ -22,6 +22,7 @@ from portunus.services.state_service import StateService
 _test_redis_client = None
 _state_service = StateService()
 _cache_service = CacheService(_state_service)
+TARGET_HOST = "api.example.com"
 
 
 @pytest.fixture(autouse=True)
@@ -109,14 +110,17 @@ async def test_generate_cache_key():
     """Test cache key generation."""
     # Test with a simple string
     payload = "test-payload"
-    expected_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    generated_key = _cache_service.generate_cache_key(payload)
+    expected_key = hashlib.sha256(f"{payload}\n{TARGET_HOST}".encode()).hexdigest()
+    generated_key = _cache_service.generate_cache_key(payload, TARGET_HOST)
     assert generated_key == expected_key, "Cache key generation failed"
+    assert _cache_service.generate_cache_key(payload, "api.other.example") != (
+        generated_key
+    ), "Cache key must depend on the target host"
 
     # Test with a JSON-like string
     payload = '{"credentials": {"access_key": "AKIA123", "secret_key": "SECRET"}, "secret_arn": "arn:aws:..."}'  # noqa: E501
-    expected_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    generated_key = _cache_service.generate_cache_key(payload)
+    expected_key = hashlib.sha256(f"{payload}\n{TARGET_HOST}".encode()).hexdigest()
+    generated_key = _cache_service.generate_cache_key(payload, TARGET_HOST)
     assert generated_key == expected_key, (
         "Cache key generation failed for complex payload"
     )
@@ -160,13 +164,15 @@ async def test_cache_api_key(docker_setup, monkeypatch, request):
     request.addfinalizer(cleanup)
 
     # Cache the API key
-    result = await _cache_service.cache_api_key(payload, api_key, principal_info)
+    result = await _cache_service.cache_api_key(
+        payload, TARGET_HOST, api_key, principal_info
+    )
     assert result is True, "Failed to cache API key"
 
     # Get a fresh Redis client for verification
     async with await get_test_redis_client() as client:
         # Verify it was stored in Redis
-        cache_key = _cache_service.generate_cache_key(payload)
+        cache_key = _cache_service.generate_cache_key(payload, TARGET_HOST)
         cached_value = await client.get(cache_key)
 
         # Parse the JSON response
@@ -208,10 +214,12 @@ async def test_cache_and_retrieve_auth_result(docker_setup, request):
 
     request.addfinalizer(cleanup)
 
-    result = await _cache_service.cache_auth_response(payload, api_key, principal_info)
+    result = await _cache_service.cache_auth_response(
+        payload, TARGET_HOST, api_key, principal_info
+    )
     assert result is True, "Failed to cache auth response"
 
-    cached_response = await _cache_service.get_cached_auth_result(payload)
+    cached_response = await _cache_service.get_cached_auth_result(payload, TARGET_HOST)
 
     assert cached_response is not None, "Failed to retrieve cached auth response"
     assert cached_response.api_key == api_key, "Retrieved API key doesn't match"
@@ -253,10 +261,11 @@ async def test_cache_entry_with_legacy_signing_key_loads(docker_setup, request):
     }
     async with await get_test_redis_client() as client:
         await client.set(
-            _cache_service.generate_cache_key(payload), json.dumps(legacy_entry)
+            _cache_service.generate_cache_key(payload, TARGET_HOST),
+            json.dumps(legacy_entry),
         )
 
-    cached_response = await _cache_service.get_cached_auth_result(payload)
+    cached_response = await _cache_service.get_cached_auth_result(payload, TARGET_HOST)
 
     assert cached_response is not None, "Failed to retrieve cached auth response"
     assert cached_response.api_key == api_key, "Retrieved API key doesn't match"
@@ -275,8 +284,8 @@ async def test_cache_api_key_redis_error():
 
     # For local-only testing, use direct function assertions instead of Redis
     # This verifies the key generation logic which is the most important part
-    cache_key = _cache_service.generate_cache_key(payload)
-    expected_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    cache_key = _cache_service.generate_cache_key(payload, TARGET_HOST)
+    expected_key = hashlib.sha256(f"{payload}\n{TARGET_HOST}".encode()).hexdigest()
     assert cache_key == expected_key, "Cache key generation failed in error test"
 
     # Success! If we've made it here, the test has passed

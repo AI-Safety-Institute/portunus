@@ -82,8 +82,10 @@ class TestExpiresAtRoundTrips:
     async def test_expires_at_survives_the_cache(self, fake_redis):
         cache = _cache_backed_by(fake_redis)
 
-        assert await cache.cache_auth_result("payload", _minted_result(), 60)
-        cached = await cache.get_cached_auth_result("payload")
+        assert await cache.cache_auth_result(
+            "payload", "api.example.com", _minted_result(), 60
+        )
+        cached = await cache.get_cached_auth_result("payload", "api.example.com")
 
         assert cached is not None
         assert cached.expires_at == NOW + timedelta(hours=1)
@@ -95,9 +97,11 @@ class TestExpiresAtRoundTrips:
             "api_key": "sk-legacy",
             "principal_info": _minted_result().principal_info.to_dict(),
         }
-        await fake_redis.set(cache.generate_cache_key("payload"), json.dumps(legacy))
+        await fake_redis.set(
+            cache.generate_cache_key("payload", "api.example.com"), json.dumps(legacy)
+        )
 
-        cached = await cache.get_cached_auth_result("payload")
+        cached = await cache.get_cached_auth_result("payload", "api.example.com")
 
         assert cached is not None
         assert cached.expires_at is None

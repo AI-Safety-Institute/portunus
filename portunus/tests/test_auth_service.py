@@ -358,10 +358,12 @@ class TestAuthenticateWithMintSecrets:
 
         await service.authenticate(payload, "req", "api.example.com")
 
-        ttl = await fake_redis.ttl(cache.generate_cache_key(payload.raw))
+        ttl = await fake_redis.ttl(
+            cache.generate_cache_key(payload.raw, "api.example.com")
+        )
         assert 3600 - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS - 5 < ttl
         assert ttl <= 3600 - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
-        cached = await cache.get_cached_auth_result(payload.raw)
+        cached = await cache.get_cached_auth_result(payload.raw, "api.example.com")
         assert cached is not None
         assert cached.api_key == "sk-ant-oat01-example"
         assert cached.output_header == "authorization"
@@ -378,7 +380,9 @@ class TestAuthenticateWithMintSecrets:
         assert result.api_key == "sk-static"
         assert result.output_header is None
         mint.assert_not_awaited()
-        ttl = await fake_redis.ttl(cache.generate_cache_key(payload.raw))
+        ttl = await fake_redis.ttl(
+            cache.generate_cache_key(payload.raw, "api.example.com")
+        )
         assert cache.cache_duration - 5 < ttl <= cache.cache_duration
 
     @pytest.mark.asyncio
@@ -417,6 +421,56 @@ class TestAuthenticateWithMintSecrets:
         assert mint.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_token_cached_for_one_target_is_not_served_for_another(
+        self, fake_redis
+    ):
+        """Same payload, different proxy: the host check must run, not a cache hit."""
+        cache = _cache_backed_by(fake_redis)
+        service = _service_for(WIF_SECRET, cache, AsyncMock(return_value=_minted()))
+        payload = _payload()
+
+        await service.authenticate(payload, "a", "api.example.com")
+
+        with pytest.raises(AuthenticationError, match="not valid for target host"):
+            await service.authenticate(payload, "b", "api.other.example")
+        assert (
+            await cache.get_cached_auth_result(payload.raw, "api.other.example") is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_stored_key_cached_for_one_target_is_a_miss_for_another(
+        self, fake_redis
+    ):
+        cache = _cache_backed_by(fake_redis)
+        service = _service_for("sk-static", cache, AsyncMock())
+        payload = _payload()
+
+        await service.authenticate(payload, "req", "api.example.com")
+
+        assert (
+            await cache.get_cached_auth_result(payload.raw, "api.example.com")
+            is not None
+        )
+        assert (
+            await cache.get_cached_auth_result(payload.raw, "api.other.example") is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_mint_lock_is_per_payload_and_target(self, fake_redis):
+        service = _service_for(WIF_SECRET, _cache_backed_by(fake_redis), AsyncMock())
+        payload = _payload()
+
+        example = service._mint_lock(payload, "api.example.com")
+        other = service._mint_lock(payload, "api.other.example")
+
+        assert example is not other
+        assert service._mint_lock(payload, "api.example.com") is example
+        assert (
+            service._mint_lock(_payload(timedelta(hours=2)), "api.example.com")
+            is not example
+        )
+
+    @pytest.mark.asyncio
     async def test_host_mismatch_is_rejected_before_minting(self, fake_redis):
         mint = AsyncMock(return_value=_minted())
         service = _service_for(WIF_SECRET, _cache_backed_by(fake_redis), mint)
@@ -436,7 +490,9 @@ class TestAuthenticateWithMintSecrets:
         with pytest.raises(AuthenticationError, match="Token exchange failed"):
             await service.authenticate(payload, "req", "api.example.com")
 
-        assert await cache.get_cached_auth_result(payload.raw) is None
+        assert (
+            await cache.get_cached_auth_result(payload.raw, "api.example.com") is None
+        )
 
     @pytest.mark.asyncio
     async def test_expired_credentials_during_mint_surface_as_credentials_error(
