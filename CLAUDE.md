@@ -60,6 +60,7 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 | `API_KEY_PREFIX` | Prefix on the value | default `Bearer ` |
 | `PORTUNUS_HEADER_PREFIX` | Prefix for response headers (`x-{prefix}-error`, `x-{prefix}-ping`; `x-portunus-debug-id` is fixed) | default `portunus` |
 | `GRPC_ENABLED` / `GRPC_PORT` | Enable / port for the ext_authz + ext_proc server | must be enabled for this image; default off |
+| `GRPC_AUDIT_PORT` / `GRPC_ROLE` | Separate ext_proc listener; which servicers this process hosts (`all` / `auth` / `audit`) | run one `auth` and one `audit` process to keep audit load off the auth event loop; see `proxy/README.md` |
 | `GRPC_HOST` | Interface the gRPC server binds to | loopback by default; set `0.0.0.0` if Envoy and Portunus are in separate netns |
 | `GRPC_PROXY_API_KEY` | Pre-shared key for the Envoy → Portunus gRPC channel (Envoy presents it as `x-portunus-proxy-key` initial_metadata; proxy side sets the same value via `PORTUNUS_API_KEY`) | identity check on both servicers |
 | `CACHE_DURATION` | Auth-cache TTL | seconds |

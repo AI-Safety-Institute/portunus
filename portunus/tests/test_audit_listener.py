@@ -85,3 +85,173 @@ async def test_separate_listeners_keep_services_and_channel_auth_separate(
             assert error.value.code() == grpc.StatusCode.PERMISSION_DENIED
     finally:
         await stop_grpc_server(runtime, 1)
+
+
+_ALL_STREAMS = FirehoseConfig(
+    **{
+        name + "_stream_name": name
+        for name in (
+            "metadata",
+            "request_headers",
+            "request_body",
+            "request_trailers",
+            "response_headers",
+            "response_body",
+            "response_trailers",
+        )
+    }
+)
+
+
+class _Publisher:
+    put_record_batch = staticmethod(discard_batch)
+
+
+async def _unary_messages():
+    yield external_processor_pb2.ProcessingRequest()
+
+
+async def _readiness(channel) -> int:
+    health = health_pb2_grpc.HealthStub(channel)
+    result = await health.Check(
+        health_pb2.HealthCheckRequest(service="readiness"), timeout=2
+    )
+    return result.status
+
+
+@pytest.mark.asyncio
+async def test_auth_role_serves_only_ext_authz_and_needs_no_firehose(
+    unused_tcp_port_factory, monkeypatch
+):
+    port = unused_tcp_port_factory()
+    key = "synthetic-test-channel-key"
+    monkeypatch.setattr(config.grpc, "proxy_api_key", key)
+
+    runtime = await start_grpc_server(
+        config=GrpcConfig(
+            enabled=True,
+            role="auth",
+            port=port,
+            audit_port=unused_tcp_port_factory(),
+            proxy_api_key=key,
+            publish_workers=1,
+            health_check_interval_seconds=0,
+            metrics_interval_seconds=0,
+        ),
+        firehose=FirehoseConfig(),
+        auth_service=object(),
+        publish_service=_Publisher(),
+    )
+    assert runtime is not None
+    assert runtime.audit_server is None
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            assert await _readiness(channel) == health_pb2.HealthCheckResponse.SERVING
+            auth = external_auth_pb2_grpc.AuthorizationStub(channel)
+            response = await auth.Check(external_auth_pb2.CheckRequest(), timeout=2)
+            assert response.HasField("denied_response")
+            audit = external_processor_pb2_grpc.ExternalProcessorStub(channel)
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await audit.Process(_unary_messages(), timeout=2).read()
+            assert error.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    finally:
+        await stop_grpc_server(runtime, 1)
+
+
+@pytest.mark.asyncio
+async def test_audit_role_serves_only_ext_proc_on_audit_port_without_redis_monitor(
+    unused_tcp_port_factory, monkeypatch
+):
+    port, audit_port = unused_tcp_port_factory(), unused_tcp_port_factory()
+    key = "synthetic-test-channel-key"
+    monkeypatch.setattr(config.grpc, "proxy_api_key", key)
+
+    class _DownRedis:
+        async def health_check(self) -> bool:
+            return False
+
+    class _PublisherWithState(_Publisher):
+        state_service = _DownRedis()
+
+    runtime = await start_grpc_server(
+        config=GrpcConfig(
+            enabled=True,
+            role="audit",
+            port=port,
+            audit_port=audit_port,
+            proxy_api_key=key,
+            publish_workers=1,
+            health_check_interval_seconds=0.01,
+            health_check_failure_threshold=1,
+            metrics_interval_seconds=0,
+        ),
+        firehose=_ALL_STREAMS,
+        auth_service=object(),
+        publish_service=_PublisherWithState(),
+    )
+    assert runtime is not None
+    # Audit never authenticates, so a Redis outage must not pull it.
+    assert runtime.health_monitor is None
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{audit_port}") as channel:
+            assert await _readiness(channel) == health_pb2.HealthCheckResponse.SERVING
+            auth = external_auth_pb2_grpc.AuthorizationStub(channel)
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await auth.Check(external_auth_pb2.CheckRequest(), timeout=2)
+            assert error.value.code() == grpc.StatusCode.UNIMPLEMENTED
+            audit = external_processor_pb2_grpc.ExternalProcessorStub(channel)
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await audit.Process(_unary_messages(), timeout=2).read()
+            assert error.value.code() == grpc.StatusCode.PERMISSION_DENIED
+
+        # Nothing listens on the auth port: that is the other process's.
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            with pytest.raises(grpc.aio.AioRpcError) as error:
+                await _readiness(channel)
+            assert error.value.code() == grpc.StatusCode.UNAVAILABLE
+    finally:
+        await stop_grpc_server(runtime, 1)
+
+
+@pytest.mark.asyncio
+async def test_audit_role_still_requires_firehose_config():
+    with pytest.raises(RuntimeError, match="Firehose"):
+        await start_grpc_server(
+            config=GrpcConfig(
+                enabled=True,
+                role="audit",
+                proxy_api_key="synthetic-test-channel-key",
+            ),
+            firehose=FirehoseConfig(),
+            auth_service=object(),
+            publish_service=_Publisher(),
+        )
+
+
+def test_split_roles_emit_disjoint_metrics():
+    from portunus.grpc.server import _collect_metrics, _counter_snapshot
+
+    class _Queue:
+        submitted_total = published_total = dropped_total = 0
+        build_failed_total = delivery_failed_total = 0
+        skipped_unconfigured_total = sentinel_dropped_total = 0
+        queued_bytes = 0
+
+        def qsize(self) -> int:
+            return 0
+
+    class _Proc:
+        active_stream_count = 0
+
+    class _Auth:
+        check_allowed_total = check_denied_total = 0
+
+    queue, proc, auth = _Queue(), _Proc(), _Auth()
+    last = _counter_snapshot(queue, auth)  # type: ignore[arg-type]
+    everything, _ = _collect_metrics(queue, proc, auth, last)  # type: ignore[arg-type]
+    auth_only, _ = _collect_metrics(queue, proc, auth, last, "auth")  # type: ignore[arg-type]
+    audit_only, _ = _collect_metrics(queue, proc, auth, last, "audit")  # type: ignore[arg-type]
+
+    assert set(auth_only) == {"CheckAllowed", "CheckDenied"}
+    assert set(auth_only).isdisjoint(audit_only)
+    assert set(auth_only) | set(audit_only) == set(everything)

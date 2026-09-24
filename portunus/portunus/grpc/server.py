@@ -185,11 +185,18 @@ def _counter_snapshot(
     }
 
 
+# Metrics only an ext_authz process produces; an ext_proc-only process owns the
+# rest. A split deployment emits each metric from exactly one process so idle
+# zero gauges from the other role don't drag CloudWatch averages down.
+_AUTH_METRICS = frozenset({"CheckAllowed", "CheckDenied"})
+
+
 def _collect_metrics(
     publish_queue: BoundedPublishQueue,
     proc_servicer: PortunusProcessServicer,
     auth_servicer: PortunusAuthServicer,
     last: dict[str, int],
+    role: str = "all",
 ) -> tuple[dict[str, int], dict[str, int]]:
     """One reporter tick: per-interval counter deltas + point-in-time gauges.
 
@@ -202,6 +209,10 @@ def _collect_metrics(
     metrics["PublishQueueDepth"] = publish_queue.qsize()
     metrics["PublishQueueBytes"] = publish_queue.queued_bytes
     metrics["ActiveExtProcStreams"] = proc_servicer.active_stream_count
+    if role == "auth":
+        metrics = {k: v for k, v in metrics.items() if k in _AUTH_METRICS}
+    elif role == "audit":
+        metrics = {k: v for k, v in metrics.items() if k not in _AUTH_METRICS}
     return metrics, current
 
 
@@ -211,6 +222,7 @@ async def _metrics_reporter_loop(
     auth_servicer: PortunusAuthServicer,
     *,
     interval_seconds: float,
+    role: str = "all",
 ) -> None:
     """Emit CloudWatch EMF metrics every ``interval_seconds``.
 
@@ -222,7 +234,7 @@ async def _metrics_reporter_loop(
         await asyncio.sleep(interval_seconds)
         try:
             metrics, last = _collect_metrics(
-                publish_queue, proc_servicer, auth_servicer, last
+                publish_queue, proc_servicer, auth_servicer, last, role
             )
             emit_metrics(metrics, units={"PublishQueueBytes": "Bytes"})
         except asyncio.CancelledError:
@@ -284,7 +296,10 @@ async def start_grpc_server(
     # short-circuits to ``None`` (warning only) when its stream is unset, so a
     # task with ``FIREHOSE_*`` unset would serve while silently dropping all
     # audit records. Refuse to serve instead — there is no opt-out.
-    missing_streams = firehose.missing_required_streams()
+    # An auth-only process never publishes, so it needs no Firehose config.
+    missing_streams = (
+        firehose.missing_required_streams() if config.role != "auth" else []
+    )
     if missing_streams:
         raise RuntimeError(
             "Refusing to start the gRPC server: Firehose audit publishing is "
@@ -295,8 +310,17 @@ async def start_grpc_server(
             "env vars)."
         )
 
-    if config.audit_port == config.port:
+    serves_auth = config.role in ("all", "auth")
+    serves_audit = config.role in ("all", "audit")
+    if config.role == "all" and config.audit_port == config.port:
         raise RuntimeError("Authentication and audit listeners need distinct ports")
+    # An audit-only process listens where Envoy's ext_proc cluster points: the
+    # audit port when one is configured, else the single gRPC port.
+    listen_port = (
+        config.audit_port
+        if config.role == "audit" and config.audit_port is not None
+        else config.port
+    )
     options = [
         ("grpc.max_concurrent_streams", config.max_concurrent_streams),
         ("grpc.keepalive_time_ms", 30_000),
@@ -307,14 +331,19 @@ async def start_grpc_server(
     ]
     server = grpc.aio.server(options=options)
     audit_server = (
-        grpc.aio.server(options=options) if config.audit_port is not None else None
+        grpc.aio.server(options=options)
+        if config.role == "all" and config.audit_port is not None
+        else None
     )
 
     auth_servicer = PortunusAuthServicer(
         auth_service=auth_service,
         sign_request_fn=sign_request,
     )
-    external_auth_pb2_grpc.add_AuthorizationServicer_to_server(auth_servicer, server)
+    if serves_auth:
+        external_auth_pb2_grpc.add_AuthorizationServicer_to_server(
+            auth_servicer, server
+        )
 
     publish_queue = BoundedPublishQueue(
         maxsize=config.publish_queue_maxsize,
@@ -341,9 +370,10 @@ async def start_grpc_server(
         publish_service=publish_service,
         publish_queue=publish_queue,
     )
-    proc_grpc.add_ExternalProcessorServicer_to_server(
-        proc_servicer, audit_server if audit_server is not None else server
-    )
+    if serves_audit:
+        proc_grpc.add_ExternalProcessorServicer_to_server(
+            proc_servicer, audit_server if audit_server is not None else server
+        )
 
     # Standard gRPC health service — the ECS / ALB probe target.
     health_servicer = health.aio.HealthServicer()
@@ -353,10 +383,18 @@ async def start_grpc_server(
     # .proto copy.
     reflection.enable_server_reflection(
         (
-            external_auth_pb2.DESCRIPTOR.services_by_name["Authorization"].full_name,
+            *(
+                (
+                    external_auth_pb2.DESCRIPTOR.services_by_name[
+                        "Authorization"
+                    ].full_name,
+                )
+                if serves_auth
+                else ()
+            ),
             *(
                 (proc_pb2.DESCRIPTOR.services_by_name["ExternalProcessor"].full_name,)
-                if audit_server is None
+                if serves_audit and audit_server is None
                 else ()
             ),
             health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
@@ -365,7 +403,7 @@ async def start_grpc_server(
         server,
     )
 
-    listen_addr = f"{config.host}:{config.port}"
+    listen_addr = f"{config.host}:{listen_port}"
     try:
         server.add_insecure_port(listen_addr)
         if audit_server is not None:
@@ -396,7 +434,8 @@ async def start_grpc_server(
     health_monitor: Optional[asyncio.Task] = None
     dependency = getattr(publish_service, "state_service", None)
     if (
-        config.health_check_interval_seconds > 0
+        serves_auth
+        and config.health_check_interval_seconds > 0
         and dependency is not None
         and hasattr(dependency, "health_check")
     ):
@@ -419,10 +458,12 @@ async def start_grpc_server(
     else:
         # No monitor to drive readiness — report SERVING unconditionally so a
         # monitor-disabled deployment (tests, local dev) still passes the
-        # /healthz-gated probes.
+        # /healthz-gated probes. An audit-only process has no Redis dependency
+        # (it never authenticates), so it is ready once listening.
         await health_servicer.set(
             READINESS_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING
         )
+    if health_monitor is None and serves_auth:
         logger.warning(
             "Dependency health monitor disabled "
             "(interval=%s, state_service available=%s) — the readiness "
@@ -432,8 +473,9 @@ async def start_grpc_server(
         )
 
     logger.info(
-        "gRPC server listening on %s (max_concurrent_streams=%d)",
+        "gRPC server listening on %s (role=%s, max_concurrent_streams=%d)",
         listen_addr,
+        config.role,
         config.max_concurrent_streams,
     )
     metrics_reporter: Optional[asyncio.Task] = None
@@ -444,6 +486,7 @@ async def start_grpc_server(
                 proc_servicer,
                 auth_servicer,
                 interval_seconds=config.metrics_interval_seconds,
+                role=config.role,
             ),
             name="metrics-reporter",
         )
