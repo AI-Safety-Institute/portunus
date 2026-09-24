@@ -366,3 +366,69 @@ async def test_monitor_disabled_reports_readiness_serving():
         assert await _status(runtime, READINESS_SERVICE_NAME) == SERVING
     finally:
         await stop_grpc_server(runtime, grace_seconds=1, flush_reserve_seconds=0.2)
+
+
+@pytest.mark.asyncio
+async def test_readiness_holds_while_local_cache_can_serve():
+    """A Redis outage must not pull a task that can still serve from L1.
+
+    Readiness only flips once the dependency is down AND the local cache has
+    nothing servable left; it returns on the first good Redis probe.
+    """
+    health = _RecordingHealthServicer()
+    dependency = _ToggleDependency(ok=True)
+    cache = {"servable": True}
+    task = asyncio.create_task(
+        _dependency_health_loop(
+            health,  # type: ignore[arg-type]
+            dependency,
+            interval_seconds=0.01,
+            timeout_seconds=0.5,
+            failure_threshold=2,
+            can_serve_without_dependency=lambda: cache["servable"],
+        )
+    )
+    try:
+        await _wait_for(lambda: SERVING in health.for_service(READINESS_SERVICE_NAME))
+
+        dependency.ok = False
+        checks_at_outage = dependency.checks
+        await _wait_for(lambda: dependency.checks >= checks_at_outage + 5)
+        assert health.for_service(READINESS_SERVICE_NAME) == [SERVING]
+
+        cache["servable"] = False
+        await _wait_for(
+            lambda: NOT_SERVING in health.for_service(READINESS_SERVICE_NAME)
+        )
+
+        dependency.ok = True
+        await _wait_for(
+            lambda: health.for_service(READINESS_SERVICE_NAME)[-1] == SERVING
+        )
+    finally:
+        await _cancel(task)
+
+
+@pytest.mark.asyncio
+async def test_raising_serve_without_dependency_counts_as_not_ready():
+    health = _RecordingHealthServicer()
+
+    def _boom() -> bool:
+        raise RuntimeError("boom")
+
+    task = asyncio.create_task(
+        _dependency_health_loop(
+            health,  # type: ignore[arg-type]
+            _ToggleDependency(ok=False),
+            interval_seconds=0.01,
+            timeout_seconds=0.5,
+            failure_threshold=1,
+            can_serve_without_dependency=_boom,
+        )
+    )
+    try:
+        await _wait_for(
+            lambda: NOT_SERVING in health.for_service(READINESS_SERVICE_NAME)
+        )
+    finally:
+        await _cancel(task)

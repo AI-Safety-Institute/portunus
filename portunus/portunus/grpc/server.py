@@ -7,6 +7,7 @@ import contextlib
 import logging
 import signal
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
@@ -85,6 +86,7 @@ async def _dependency_health_loop(
     interval_seconds: float,
     timeout_seconds: float,
     failure_threshold: int,
+    can_serve_without_dependency: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Drive the ``readiness`` gRPC health service from Redis health.
 
@@ -101,6 +103,12 @@ async def _dependency_health_loop(
     runs immediately (readiness starts NOT_SERVING), so a healthy boot is ready
     within one round-trip.
 
+    ``can_serve_without_dependency`` is consulted when the probe fails: while
+    it returns True (the L1 auth cache still holds servable entries) the probe
+    counts as a success. Otherwise a correlated Redis blip pulls every task out
+    of rotation at once, even though each could keep serving its cached
+    principals — turning a partial degradation into a full outage.
+
     ``stop_grpc_server`` cancels this task *before* flipping the drain's
     NOT_SERVING, so the monitor can never resurrect a draining task.
     """
@@ -116,6 +124,18 @@ async def _dependency_health_loop(
         except Exception as e:
             logger.warning("Dependency health check raised: %s", type(e).__name__)
             ok = False
+
+        if not ok and can_serve_without_dependency is not None:
+            try:
+                ok = can_serve_without_dependency()
+            except Exception as e:
+                logger.warning("Serve-without-dependency check raised: %s", e)
+            if ok:
+                logger.warning(
+                    "Dependency health check failed; staying ready on the local "
+                    "auth cache",
+                    extra={"event": "dependency_health_degraded"},
+                )
 
         if ok:
             consecutive_failures = 0
@@ -390,6 +410,9 @@ async def start_grpc_server(
                 interval_seconds=config.health_check_interval_seconds,
                 timeout_seconds=config.health_check_timeout_seconds,
                 failure_threshold=config.health_check_failure_threshold,
+                can_serve_without_dependency=getattr(
+                    auth_service, "has_servable_cache_entries", None
+                ),
             ),
             name="dependency-health-monitor",
         )
