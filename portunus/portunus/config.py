@@ -170,6 +170,16 @@ class GrpcConfig(BaseModel):
         ge=1,
         le=65535,
     )
+    audit_port: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Separate audit listener; unset retains the shared listener",
+    )
+    audit_drop_on_pressure: bool = Field(
+        default=False,
+        description="Drop audit submissions immediately when their queue is full",
+    )
     max_concurrent_streams: int = Field(
         default=1000,
         description="Per-connection HTTP/2 stream limit",
@@ -225,6 +235,25 @@ class GrpcConfig(BaseModel):
             "headroom: building a record adds ~33% (base64) transiently."
         ),
         ge=1,
+    )
+    publish_workers: Optional[int] = Field(
+        default=None,
+        description="Publisher workers; unset retains the stream-based worker count",
+        ge=1,
+        le=64,
+    )
+    publish_batch_size: int = Field(
+        default=500,
+        description="Maximum queued records grouped before per-stream publishing",
+        ge=1,
+        le=3000,
+    )
+    publish_coalesce_ms: float = Field(
+        default=0.0,
+        description="Delay in milliseconds between partial publisher batches",
+        ge=0.0,
+        le=100.0,
+        allow_inf_nan=False,
     )
     drop_sentinel_timeout_seconds: float = Field(
         default=0.25,
@@ -491,6 +520,15 @@ def get_config() -> PortunusConfig:
         enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
         host=os.environ.get("GRPC_HOST", "127.0.0.1"),
         port=int(os.environ.get("GRPC_PORT", "9000")),
+        audit_port=(
+            int(os.environ["GRPC_AUDIT_PORT"])
+            if "GRPC_AUDIT_PORT" in os.environ
+            else None
+        ),
+        audit_drop_on_pressure=os.environ.get(
+            "GRPC_AUDIT_DROP_ON_PRESSURE", "false"
+        ).lower()
+        == "true",
         max_concurrent_streams=int(
             os.environ.get("GRPC_MAX_CONCURRENT_STREAMS", "1000")
         ),
@@ -512,6 +550,13 @@ def get_config() -> PortunusConfig:
         publish_queue_max_bytes=int(
             os.environ.get("GRPC_PUBLISH_QUEUE_MAX_BYTES", str(256 * 1024 * 1024))
         ),
+        publish_workers=(
+            int(os.environ["GRPC_PUBLISH_WORKERS"])
+            if "GRPC_PUBLISH_WORKERS" in os.environ
+            else None
+        ),
+        publish_batch_size=int(os.environ.get("GRPC_PUBLISH_BATCH_SIZE", "500")),
+        publish_coalesce_ms=float(os.environ.get("GRPC_PUBLISH_COALESCE_MS", "0")),
         drop_sentinel_timeout_seconds=float(
             os.environ.get("GRPC_DROP_SENTINEL_TIMEOUT_SECONDS", "0.25")
         ),
