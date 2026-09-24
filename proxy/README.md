@@ -31,6 +31,14 @@ This favours forwarding availability during an audit outage; it does not make
 audit delivery durable. Authentication and signing still fail closed. The two
 servers share Python CPU, so this isolates admission rather than all resources.
 
+To isolate CPU as well, run two Portunus processes (e.g. two containers in the
+same task) from the same image: one with `GRPC_ROLE=auth` (ext_authz, signing
+and health on `GRPC_PORT`, no Firehose config needed) and one with
+`GRPC_ROLE=audit` (ext_proc and health on `GRPC_AUDIT_PORT`, falling back to
+`GRPC_PORT`). Point Envoy's `PORTUNUS_AUDIT_GRPC_PORT` at the audit process.
+The audit process has no Redis dependency, so its readiness never follows a
+Redis outage. The default `GRPC_ROLE=all` keeps both servicers in one process.
+
 ## Filter chain
 
 1. **Common HTTP filters** — request-id, X-Ray tracing.

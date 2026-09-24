@@ -3,7 +3,7 @@
 import logging
 import os
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -45,6 +45,57 @@ class RedisConfig(BaseModel):
     use_tls: bool = Field(
         default=True,
         description="Whether to use TLS for Redis connections",
+    )
+    pool_timeout_seconds: float = Field(
+        default=1.0,
+        description="How long a command waits for a free pooled connection "
+        "before failing (the pool blocks rather than erroring at the cap)",
+        gt=0,
+    )
+    health_check_interval_seconds: int = Field(
+        default=30,
+        description="PING a pooled connection before use if it has been idle "
+        "this long (0 disables)",
+        ge=0,
+    )
+
+
+class AuthCacheConfig(BaseModel):
+    """In-process (L1) auth-result cache and full-auth fallback limits.
+
+    The L1 cache sits in front of Redis. A revocation (secret rotation, cache
+    flush) takes up to ``local_ttl_seconds`` to reach every task, plus
+    ``local_stale_seconds`` while Redis is unreachable — never past the
+    credential expiry.
+    """
+
+    local_ttl_seconds: float = Field(
+        default=30.0,
+        description="Seconds an auth result is served from process memory "
+        "without consulting Redis (0 disables the L1 cache)",
+        ge=0,
+    )
+    local_stale_seconds: float = Field(
+        default=300.0,
+        description="Seconds past the L1 TTL an entry may still be served "
+        "when the Redis refresh fails",
+        ge=0,
+    )
+    local_max_entries: int = Field(
+        default=10000,
+        description="LRU bound on the L1 cache",
+        ge=0,
+    )
+    fallback_max_concurrent: int = Field(
+        default=32,
+        description="Max concurrent full authentications (STS + Secrets "
+        "Manager) per process; bounds the stampede when Redis misbehaves",
+        ge=1,
+    )
+    fallback_acquire_timeout_s: float = Field(
+        default=1.0,
+        description="Seconds to wait for a full-auth slot before shedding (503)",
+        gt=0,
     )
 
 
@@ -175,6 +226,13 @@ class GrpcConfig(BaseModel):
         ge=1,
         le=65535,
         description="Separate audit listener; unset retains the shared listener",
+    )
+    role: Literal["all", "auth", "audit"] = Field(
+        default="all",
+        description="Which servicers this process hosts: 'all' (ext_authz + "
+        "ext_proc), 'auth' (ext_authz + health on port), or 'audit' (ext_proc "
+        "+ health on audit_port, falling back to port). Run one 'auth' and one "
+        "'audit' process to stop audit load sharing the auth event loop.",
     )
     audit_drop_on_pressure: bool = Field(
         default=False,
@@ -391,6 +449,10 @@ class PortunusConfig(BaseModel):
         default_factory=SigningConfig,
         description="KMS signing throughput / concurrency bounds",
     )
+    auth_cache: AuthCacheConfig = Field(
+        default_factory=AuthCacheConfig,
+        description="In-process auth cache and full-auth fallback limits",
+    )
     log_level: str = Field(
         default="INFO",
         description="Logging level",
@@ -446,6 +508,10 @@ def get_config() -> PortunusConfig:
         log_ttl=int(os.environ.get("LOG_TTL", "3600")),
         max_connections=int(os.environ.get("REDIS_MAX_CONNECTIONS", "200")),
         use_tls=os.environ.get("REDIS_USE_TLS", "true").lower() == "true",
+        pool_timeout_seconds=float(os.environ.get("REDIS_POOL_TIMEOUT_SECONDS", "1.0")),
+        health_check_interval_seconds=int(
+            os.environ.get("REDIS_HEALTH_CHECK_INTERVAL_SECONDS", "30")
+        ),
     )
 
     aws = AwsConfig(
@@ -485,6 +551,7 @@ def get_config() -> PortunusConfig:
             if "GRPC_AUDIT_PORT" in os.environ
             else None
         ),
+        role=os.environ.get("GRPC_ROLE", "all"),  # type: ignore[arg-type]
         audit_drop_on_pressure=os.environ.get(
             "GRPC_AUDIT_DROP_ON_PRESSURE", "false"
         ).lower()
@@ -549,6 +616,20 @@ def get_config() -> PortunusConfig:
         kms_max_attempts=int(os.environ.get("SIGNING_KMS_MAX_ATTEMPTS", "2")),
     )
 
+    auth_cache = AuthCacheConfig(
+        local_ttl_seconds=float(os.environ.get("AUTH_LOCAL_CACHE_TTL_SECONDS", "30")),
+        local_stale_seconds=float(
+            os.environ.get("AUTH_LOCAL_CACHE_STALE_SECONDS", "300")
+        ),
+        local_max_entries=int(os.environ.get("AUTH_LOCAL_CACHE_MAX_ENTRIES", "10000")),
+        fallback_max_concurrent=int(
+            os.environ.get("AUTH_FALLBACK_MAX_CONCURRENT", "32")
+        ),
+        fallback_acquire_timeout_s=float(
+            os.environ.get("AUTH_FALLBACK_ACQUIRE_TIMEOUT_S", "1.0")
+        ),
+    )
+
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -559,6 +640,7 @@ def get_config() -> PortunusConfig:
         firehose=firehose,
         grpc=grpc,
         signing=signing,
+        auth_cache=auth_cache,
     )
 
 

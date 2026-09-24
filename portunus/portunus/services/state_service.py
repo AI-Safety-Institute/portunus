@@ -80,6 +80,37 @@ class PooledBotoSession:
         return _PooledClientContext(self._state_service, service_name, kwargs)
 
 
+def _build_redis_pool() -> aioredis.BlockingConnectionPool:
+    """Build the shared Redis pool from config.
+
+    ``BlockingConnectionPool`` rather than the default pool: at the cap the
+    default raises ``ConnectionError("Too many connections")`` immediately,
+    which the auth path treats as a Redis failure and falls through to STS +
+    Secrets Manager — a burst turns into a stampede. Blocking for up to
+    ``pool_timeout_seconds`` queues the burst on the pool instead.
+    """
+    redis_config = config.redis
+    connection_kwargs: dict[str, Any] = {
+        "host": redis_config.host,
+        "port": redis_config.port,
+        "password": redis_config.password or None,
+        "decode_responses": True,
+        "socket_timeout": 5.0,
+        "socket_connect_timeout": 2.0,
+        "retry_on_timeout": True,
+        "health_check_interval": redis_config.health_check_interval_seconds,
+    }
+    if redis_config.use_tls:
+        connection_kwargs["connection_class"] = aioredis.SSLConnection
+        connection_kwargs["ssl_cert_reqs"] = "required"
+    return aioredis.BlockingConnectionPool(
+        max_connections=redis_config.max_connections,
+        # Typed int in redis-py, but it only feeds asyncio.timeout.
+        timeout=redis_config.pool_timeout_seconds,  # type: ignore[arg-type]
+        **connection_kwargs,
+    )
+
+
 class StateService:
     """Manages Redis connections and pooled AWS clients.
 
@@ -215,19 +246,7 @@ class StateService:
                     bool(config.redis.password),
                 )
 
-                self.redis_client = aioredis.Redis(
-                    host=config.redis.host,
-                    port=config.redis.port,
-                    password=config.redis.password if config.redis.password else None,
-                    decode_responses=True,
-                    max_connections=config.redis.max_connections,
-                    ssl=config.redis.use_tls,
-                    ssl_cert_reqs="required" if config.redis.use_tls else "none",
-                    socket_timeout=5.0,
-                    socket_connect_timeout=2.0,
-                    retry_on_timeout=True,
-                    health_check_interval=5,
-                )
+                self.redis_client = aioredis.Redis.from_pool(_build_redis_pool())
 
                 ping_result = await self.redis_client.ping()
                 logger.info(
