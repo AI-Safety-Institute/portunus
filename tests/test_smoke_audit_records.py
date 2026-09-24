@@ -25,7 +25,6 @@ import pytest
 import requests
 
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "portunus"))
-os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
 from conftest import _read_audit_s3_records, encode_base64  # noqa: E402

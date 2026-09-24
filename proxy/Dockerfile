@@ -29,7 +29,6 @@ RUN case "${TARGETARCH}" in \
     chmod +x /usr/bin/yq
 
 COPY envoy.yaml /envoy/envoy.yaml
-COPY xray.json /envoy/xray.json
 
 RUN chown -R envoy:envoy /envoy
 

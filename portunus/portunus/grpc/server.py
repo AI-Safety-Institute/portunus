@@ -18,10 +18,30 @@ from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
-from portunus.config import FirehoseConfig, GrpcConfig
+from portunus.config import FirehoseConfig, GrpcConfig, MetricsConfig
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
-from portunus.metrics import emit_metrics
+from portunus.metrics import (
+    ACTIVE_EXT_PROC_STREAMS,
+    AUTH_L1_COALESCED,
+    AUTH_L1_HIT,
+    AUTH_L1_MISS,
+    AUTH_L1_STALE_SERVED,
+    BUILD_FAILED_RECORDS,
+    DELIVERY_FAILED_RECORDS,
+    DROPPED_RECORDS,
+    EVENT_LOOP_LAG,
+    FIREHOSE_PUT_ERRORS,
+    FIREHOSE_THROTTLED_RECORDS,
+    PUBLISH_QUEUE_BYTES,
+    PUBLISH_QUEUE_DEPTH,
+    PUBLISHED_RECORDS,
+    SENTINEL_DROPPED_RECORDS,
+    SKIPPED_UNCONFIGURED_RECORDS,
+    SUBMITTED_RECORDS,
+    MetricsAggregator,
+    configure_metrics,
+)
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
@@ -74,8 +94,13 @@ class GrpcRuntime:
     # Background Redis-ping task driving the readiness health status — None when
     # the monitor is disabled or no state service is available.
     health_monitor: Optional[asyncio.Task] = field(default=None)
-    # Background CloudWatch EMF reporter — None when disabled (interval 0).
+    # Background CloudWatch EMF reporter — None when metrics are disabled.
     metrics_reporter: Optional[asyncio.Task] = field(default=None)
+    # Background event-loop lag probe — None when metrics or the probe are off.
+    event_loop_probe: Optional[asyncio.Task] = field(default=None)
+    # The aggregator the reporter flushes; flushed once more at drain so the
+    # final interval is not lost with the process.
+    metrics: Optional[MetricsAggregator] = field(default=None)
     audit_server: Optional[grpc.aio.Server] = field(default=None)
 
 
@@ -167,76 +192,120 @@ async def _dependency_health_loop(
         await asyncio.sleep(interval_seconds)
 
 
-def _counter_snapshot(
-    publish_queue: BoundedPublishQueue,
-    auth_servicer: PortunusAuthServicer,
-) -> dict[str, int]:
-    """Cumulative counters, keyed by their CloudWatch metric names."""
-    return {
-        "SubmittedRecords": publish_queue.submitted_total,
-        "PublishedRecords": publish_queue.published_total,
-        "DroppedRecords": publish_queue.dropped_total,
-        "BuildFailedRecords": publish_queue.build_failed_total,
-        "DeliveryFailedRecords": publish_queue.delivery_failed_total,
-        "SkippedUnconfiguredRecords": publish_queue.skipped_unconfigured_total,
-        "SentinelDroppedRecords": publish_queue.sentinel_dropped_total,
-        "CheckAllowed": auth_servicer.check_allowed_total,
-        "CheckDenied": auth_servicer.check_denied_total,
-    }
-
-
-# Metrics only an ext_authz process produces; an ext_proc-only process owns the
-# rest. A split deployment emits each metric from exactly one process so idle
-# zero gauges from the other role don't drag CloudWatch averages down.
-_AUTH_METRICS = frozenset({"CheckAllowed", "CheckDenied"})
-
-
-def _collect_metrics(
+def register_audit_metrics(
+    metrics: MetricsAggregator,
     publish_queue: BoundedPublishQueue,
     proc_servicer: PortunusProcessServicer,
-    auth_servicer: PortunusAuthServicer,
-    last: dict[str, int],
-    role: str = "all",
-) -> tuple[dict[str, int], dict[str, int]]:
-    """One reporter tick: per-interval counter deltas + point-in-time gauges.
+    publish_service: Optional[PublishService],
+) -> None:
+    """Register the ext_proc (audit) metric sources on ``metrics``.
 
-    Returns ``(metrics_to_emit, new_snapshot)``. Deltas (not cumulative
-    values) so CloudWatch Sum over any period is the true count for that
-    period regardless of process restarts.
+    The publish queue and publish service already keep cumulative counters,
+    so they are registered as delta sources rather than being taught to call
+    the aggregator on their own hot paths.
+
+    Args:
+        metrics: The aggregator to register against.
+        publish_queue: Queue whose counters and depth are reported.
+        proc_servicer: Servicer whose active-stream count is gauged.
+        publish_service: Firehose client wrapper; None skips its counters
+            (tests, and any future queue without a service behind it).
     """
-    current = _counter_snapshot(publish_queue, auth_servicer)
-    metrics: dict[str, int] = {name: current[name] - last[name] for name in current}
-    metrics["PublishQueueDepth"] = publish_queue.qsize()
-    metrics["PublishQueueBytes"] = publish_queue.queued_bytes
-    metrics["ActiveExtProcStreams"] = proc_servicer.active_stream_count
-    if role == "auth":
-        metrics = {k: v for k, v in metrics.items() if k in _AUTH_METRICS}
-    elif role == "audit":
-        metrics = {k: v for k, v in metrics.items() if k not in _AUTH_METRICS}
-    return metrics, current
+    metrics.register_delta_source(
+        lambda: {
+            SUBMITTED_RECORDS: publish_queue.submitted_total,
+            PUBLISHED_RECORDS: publish_queue.published_total,
+            DROPPED_RECORDS: publish_queue.dropped_total,
+            BUILD_FAILED_RECORDS: publish_queue.build_failed_total,
+            DELIVERY_FAILED_RECORDS: publish_queue.delivery_failed_total,
+            SKIPPED_UNCONFIGURED_RECORDS: publish_queue.skipped_unconfigured_total,
+            SENTINEL_DROPPED_RECORDS: publish_queue.sentinel_dropped_total,
+        }
+    )
+    if publish_service is not None:
+        metrics.register_delta_source(
+            lambda: {
+                FIREHOSE_THROTTLED_RECORDS: publish_service.throttled_total,
+                FIREHOSE_PUT_ERRORS: publish_service.put_errors_total,
+            }
+        )
+    metrics.register_gauge_source(
+        lambda: {
+            PUBLISH_QUEUE_DEPTH: publish_queue.qsize(),
+            PUBLISH_QUEUE_BYTES: publish_queue.queued_bytes,
+            ACTIVE_EXT_PROC_STREAMS: proc_servicer.active_stream_count,
+        }
+    )
+
+
+def register_auth_metrics(
+    metrics: MetricsAggregator, auth_service: AuthService
+) -> None:
+    """Register the ext_authz metric sources on ``metrics``.
+
+    Check outcomes, Redis-cache outcomes and full-auth timings are counted
+    inline by the servicer and the auth service; only the L1 cache keeps its
+    own cumulative counters, so only it needs a delta source.
+
+    Args:
+        metrics: The aggregator to register against.
+        auth_service: Service owning the L1 auth cache.
+    """
+    local_cache = getattr(auth_service, "local_cache", None)
+    if local_cache is None:
+        return
+    metrics.register_delta_source(
+        lambda: {
+            AUTH_L1_HIT: local_cache.hits_total,
+            AUTH_L1_STALE_SERVED: local_cache.stale_served_total,
+            AUTH_L1_MISS: local_cache.misses_total,
+            AUTH_L1_COALESCED: local_cache.coalesced_total,
+        }
+    )
+
+
+async def _event_loop_lag_probe(
+    metrics: MetricsAggregator, *, interval_seconds: float
+) -> None:
+    """Sample how late the event loop wakes a fixed-length sleep.
+
+    Drift between the requested sleep and the elapsed time is the loop's
+    scheduling backlog: the single number that says whether a latency spike
+    is Portunus being CPU-starved (a blocking call on the loop, a GC pause,
+    a throttled task) rather than a slow dependency. Samples land in the
+    ``EventLoopLag`` distribution, so CloudWatch reports the interval's max
+    and average without an EMF line per probe.
+
+    Args:
+        metrics: Aggregator receiving the samples.
+        interval_seconds: Nominal sleep between samples.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        before = loop.time()
+        await asyncio.sleep(interval_seconds)
+        lag_ms = (loop.time() - before - interval_seconds) * 1000
+        if lag_ms > 0:
+            metrics.observe(EVENT_LOOP_LAG, lag_ms)
 
 
 async def _metrics_reporter_loop(
-    publish_queue: BoundedPublishQueue,
-    proc_servicer: PortunusProcessServicer,
-    auth_servicer: PortunusAuthServicer,
-    *,
-    interval_seconds: float,
-    role: str = "all",
+    metrics: MetricsAggregator, *, interval_seconds: float
 ) -> None:
-    """Emit CloudWatch EMF metrics every ``interval_seconds``.
+    """Flush the aggregated interval as EMF every ``interval_seconds``.
 
-    Metrics must never take the server down: anything but cancellation is
-    logged and the loop continues.
+    Metrics must never take the server down: ``flush`` swallows its own
+    failures, and anything else non-cancellation is logged and the loop
+    continues.
+
+    Args:
+        metrics: Aggregator to flush.
+        interval_seconds: Flush period.
     """
-    last = _counter_snapshot(publish_queue, auth_servicer)
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            metrics, last = _collect_metrics(
-                publish_queue, proc_servicer, auth_servicer, last, role
-            )
-            emit_metrics(metrics, units={"PublishQueueBytes": "Bytes"})
+            metrics.flush()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -249,11 +318,16 @@ async def start_grpc_server(
     firehose: FirehoseConfig,
     auth_service: AuthService,
     publish_service: PublishService,
+    metrics_config: Optional[MetricsConfig] = None,
 ) -> Optional[GrpcRuntime]:
     """Start the Portunus gRPC server.
 
     Registers ext_authz, ext_proc, the health service, and reflection. Returns
     None when ``config.enabled`` is False.
+
+    ``metrics_config`` defaults to a disabled :class:`MetricsConfig`, so an
+    embedded server (tests, local harnesses) never writes EMF to stdout
+    unless it asks to.
 
     Raises ``RuntimeError`` when the channel-identity key or the Firehose audit
     sink is misconfigured, so a task that would accept unauthenticated callers
@@ -478,17 +552,46 @@ async def start_grpc_server(
         config.role,
         config.max_concurrent_streams,
     )
+    # CloudWatch EMF. Each role registers only the sources it owns, so a
+    # split deployment emits every metric from exactly one process instead of
+    # the idle half dragging averages down with structural zeroes.
+    metrics_config = metrics_config or MetricsConfig()
+    metrics = configure_metrics(
+        enabled=metrics_config.enabled,
+        namespace=metrics_config.namespace,
+        service_name=metrics_config.service_name,
+        role=config.role,
+    )
     metrics_reporter: Optional[asyncio.Task] = None
-    if config.metrics_interval_seconds > 0:
+    event_loop_probe: Optional[asyncio.Task] = None
+    if metrics.enabled:
+        if serves_auth:
+            register_auth_metrics(metrics, auth_service)
+        if serves_audit:
+            register_audit_metrics(
+                metrics, publish_queue, proc_servicer, publish_service
+            )
         metrics_reporter = asyncio.create_task(
             _metrics_reporter_loop(
-                publish_queue,
-                proc_servicer,
-                auth_servicer,
-                interval_seconds=config.metrics_interval_seconds,
-                role=config.role,
+                metrics, interval_seconds=metrics_config.flush_interval_seconds
             ),
             name="metrics-reporter",
+        )
+        if metrics_config.event_loop_probe_seconds > 0:
+            event_loop_probe = asyncio.create_task(
+                _event_loop_lag_probe(
+                    metrics,
+                    interval_seconds=metrics_config.event_loop_probe_seconds,
+                ),
+                name="event-loop-lag-probe",
+            )
+        logger.info(
+            "CloudWatch EMF metrics enabled (namespace=%s, service=%s, "
+            "role=%s, flush=%.0fs)",
+            metrics_config.namespace,
+            metrics_config.service_name,
+            config.role,
+            metrics_config.flush_interval_seconds,
         )
 
     return GrpcRuntime(
@@ -499,6 +602,8 @@ async def start_grpc_server(
         health_servicer=health_servicer,
         health_monitor=health_monitor,
         metrics_reporter=metrics_reporter,
+        event_loop_probe=event_loop_probe,
+        metrics=metrics if metrics.enabled else None,
         audit_server=audit_server,
     )
 
@@ -538,10 +643,14 @@ async def stop_grpc_server(
         with contextlib.suppress(asyncio.CancelledError):
             await runtime.health_monitor
 
-    if runtime.metrics_reporter is not None:
-        runtime.metrics_reporter.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await runtime.metrics_reporter
+    # Stop the reporter and the probe before draining, then flush once at the
+    # very end (below) so the final partial interval — including whatever the
+    # drain itself reports — still reaches CloudWatch.
+    for task in (runtime.metrics_reporter, runtime.event_loop_probe):
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     # Flip BOTH health services to NOT_SERVING so an in-flight probe sees the
     # drain immediately: readiness stops routing new connections, and liveness
@@ -632,6 +741,12 @@ async def stop_grpc_server(
         runtime.publish_queue.cancelled_total,
     )
 
+    # Final flush AFTER the drain accounting above: the last interval's
+    # counters (including the drain's own drops) would otherwise die with
+    # the process.
+    if runtime.metrics is not None:
+        runtime.metrics.flush()
+
 
 async def run() -> None:
     """Process entrypoint: build services, serve gRPC, drain on SIGTERM.
@@ -648,14 +763,6 @@ async def run() -> None:
     from portunus.services.publish_service import PublishService
     from portunus.services.state_service import StateService
 
-    if config.aws.xray_enabled:
-        # Configures the global recorder + patches AWS clients; ext_authz
-        # Check opens a segment per request joined from x-amzn-trace-id.
-        from portunus.services.xray_service import XRayService
-
-        XRayService()
-        logger.info("X-Ray tracing enabled (daemon=%s)", config.aws.xray_daemon_address)
-
     state_service = StateService()
     cache_service = CacheService(state_service=state_service)
     publish_service = PublishService(state_service=state_service)
@@ -666,6 +773,7 @@ async def run() -> None:
         firehose=config.firehose,
         auth_service=auth_service,
         publish_service=publish_service,
+        metrics_config=config.metrics,
     )
     if runtime is None:
         logger.error(

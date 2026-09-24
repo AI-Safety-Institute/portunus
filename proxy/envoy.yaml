@@ -22,20 +22,10 @@ static_resources:
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-          tracing:
-            provider:
-              name: envoy.tracers.xray
-              typed_config:
-                "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
-                sampling_rule_manifest:
-                  filename: /envoy/xray_subst.json
-                daemon_endpoint:
-                  address: ${AWS_XRAY_DAEMON_ADDRESS}
-                  port_value: 2000
-                  protocol: UDP
-                segment_name: pp-${TARGET_HOST}
-            spawn_upstream_span: true
-            verbose: true
+          # No `tracing` provider: request correlation rides on
+          # x-request-id (below) and the JSON access log, and aggregate
+          # timing comes from CloudWatch EMF metrics that Portunus emits on
+          # stdout. There is no span exporter to configure.
           generate_request_id: true
           access_log:
           - name: envoy.access_loggers.file

@@ -36,7 +36,6 @@ async def test_separate_listeners_keep_services_and_channel_auth_separate(
             proxy_api_key=key,
             publish_workers=1,
             health_check_interval_seconds=0,
-            metrics_interval_seconds=0,
         ),
         firehose=FirehoseConfig(
             **{
@@ -136,7 +135,6 @@ async def test_auth_role_serves_only_ext_authz_and_needs_no_firehose(
             proxy_api_key=key,
             publish_workers=1,
             health_check_interval_seconds=0,
-            metrics_interval_seconds=0,
         ),
         firehose=FirehoseConfig(),
         auth_service=object(),
@@ -183,7 +181,6 @@ async def test_audit_role_serves_only_ext_proc_on_audit_port_without_redis_monit
             publish_workers=1,
             health_check_interval_seconds=0.01,
             health_check_failure_threshold=1,
-            metrics_interval_seconds=0,
         ),
         firehose=_ALL_STREAMS,
         auth_service=object(),
@@ -228,8 +225,16 @@ async def test_audit_role_still_requires_firehose_config():
         )
 
 
-def test_split_roles_emit_disjoint_metrics():
-    from portunus.grpc.server import _collect_metrics, _counter_snapshot
+def test_split_roles_register_disjoint_metric_sources(capsys):
+    """Each role emits only the metrics it owns.
+
+    Neither role then reports the other's structural zeroes, which would drag
+    a split deployment's CloudWatch averages down.
+    """
+    import json
+
+    from portunus.grpc.server import register_audit_metrics, register_auth_metrics
+    from portunus.metrics import MetricsAggregator
 
     class _Queue:
         submitted_total = published_total = dropped_total = 0
@@ -243,15 +248,31 @@ def test_split_roles_emit_disjoint_metrics():
     class _Proc:
         active_stream_count = 0
 
+    class _Cache:
+        hits_total = stale_served_total = misses_total = coalesced_total = 0
+
     class _Auth:
-        check_allowed_total = check_denied_total = 0
+        local_cache = _Cache()
 
-    queue, proc, auth = _Queue(), _Proc(), _Auth()
-    last = _counter_snapshot(queue, auth)  # type: ignore[arg-type]
-    everything, _ = _collect_metrics(queue, proc, auth, last)  # type: ignore[arg-type]
-    auth_only, _ = _collect_metrics(queue, proc, auth, last, "auth")  # type: ignore[arg-type]
-    audit_only, _ = _collect_metrics(queue, proc, auth, last, "audit")  # type: ignore[arg-type]
+    def _emitted(register) -> set[str]:
+        metrics = MetricsAggregator(
+            enabled=True, namespace="Portunus", service_name="p", role="all"
+        )
+        register(metrics)
+        metrics.flush()
+        doc = json.loads(capsys.readouterr().out.strip())
+        return {m["Name"] for m in doc["_aws"]["CloudWatchMetrics"][0]["Metrics"]}
 
-    assert set(auth_only) == {"CheckAllowed", "CheckDenied"}
-    assert set(auth_only).isdisjoint(audit_only)
-    assert set(auth_only) | set(audit_only) == set(everything)
+    auth_only = _emitted(lambda m: register_auth_metrics(m, _Auth()))  # type: ignore[arg-type]
+    audit_only = _emitted(
+        lambda m: register_audit_metrics(m, _Queue(), _Proc(), None)  # type: ignore[arg-type]
+    )
+
+    assert auth_only == {
+        "AuthCacheL1Hit",
+        "AuthCacheL1StaleServed",
+        "AuthCacheL1Miss",
+        "AuthCacheL1Coalesced",
+    }
+    assert auth_only.isdisjoint(audit_only)
+    assert "PublishQueueDepth" in audit_only

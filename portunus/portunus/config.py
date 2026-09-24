@@ -171,25 +171,53 @@ class FirehoseConfig(BaseModel):
         return [env_var for env_var, value in required.items() if not value]
 
 
+class MetricsConfig(BaseModel):
+    """CloudWatch EMF metrics, emitted on stdout by the metrics reporter.
+
+    Off by default so local runs, the CLI and the test suite stay quiet; the
+    ECS task definition turns it on.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to aggregate and emit CloudWatch EMF metrics",
+    )
+    namespace: str = Field(
+        default="Portunus",
+        description="CloudWatch namespace for the emitted metrics",
+        min_length=1,
+    )
+    flush_interval_seconds: float = Field(
+        default=60.0,
+        description=(
+            "How often the aggregated interval is flushed as one EMF "
+            "document. Shorter intervals cost log volume without improving "
+            "resolution below CloudWatch's 60s storage period."
+        ),
+        gt=0.0,
+    )
+    service_name: str = Field(
+        default="portunus",
+        description=(
+            "Value of the low-cardinality ``ServiceName`` dimension, e.g. "
+            "the proxy deployment's name. The ``Role`` dimension comes from "
+            "GRPC_ROLE."
+        ),
+        min_length=1,
+    )
+    event_loop_probe_seconds: float = Field(
+        default=1.0,
+        description=(
+            "Sleep-drift probe interval behind the EventLoopLag metric. "
+            "0 disables the probe."
+        ),
+        ge=0.0,
+    )
+
+
 class AwsConfig(BaseModel):
     """AWS-related configuration settings."""
 
-    xray_daemon_address: str = Field(
-        default="127.0.0.1:2000",
-        description="AWS X-Ray daemon address",
-    )
-    xray_log_group: str = Field(
-        default="/aws/xray/portunus",
-        description="AWS X-Ray log group",
-    )
-    xray_extra_log_groups: Optional[str] = Field(
-        default=None,
-        description="Additional AWS X-Ray log group, comma separated (optional)",
-    )
-    xray_enabled: bool = Field(
-        default=True,
-        description="Whether AWS X-Ray tracing is enabled",
-    )
     endpoint_url: str | None = Field(
         default=None,
         description="Intended for overriding client urls for testing with LocalStack",
@@ -247,14 +275,6 @@ class GrpcConfig(BaseModel):
         default=30,
         description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
-    )
-    metrics_interval_seconds: float = Field(
-        default=60.0,
-        description=(
-            "Interval for the CloudWatch EMF metrics reporter (publish-queue "
-            "counters, active ext_proc streams, Check outcomes). 0 disables."
-        ),
-        ge=0.0,
     )
     drain_flush_reserve_seconds: float = Field(
         default=5.0,
@@ -437,6 +457,10 @@ class PortunusConfig(BaseModel):
         default_factory=AwsConfig,
         description="AWS configuration",
     )
+    metrics: MetricsConfig = Field(
+        default_factory=MetricsConfig,
+        description="CloudWatch EMF metrics configuration",
+    )
     firehose: FirehoseConfig = Field(
         default_factory=FirehoseConfig,
         description="Firehose direct-PUT configuration",
@@ -515,11 +539,19 @@ def get_config() -> PortunusConfig:
     )
 
     aws = AwsConfig(
-        xray_daemon_address=os.environ.get("AWS_XRAY_DAEMON_ADDRESS", "127.0.0.1:2000"),
-        xray_log_group=os.environ.get("AWS_XRAY_LOG_GROUP", "/aws/xray/portunus"),
-        xray_extra_log_groups=os.environ.get("AWS_XRAY_EXTRA_LOG_GROUPS", None),
-        xray_enabled=os.environ.get("AWS_XRAY_SDK_ENABLED", "true").lower() != "false",
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL", None),
+    )
+
+    metrics = MetricsConfig(
+        enabled=os.environ.get("METRICS_ENABLED", "false").lower() == "true",
+        namespace=os.environ.get("METRICS_NAMESPACE", "Portunus"),
+        flush_interval_seconds=float(
+            os.environ.get("METRICS_FLUSH_INTERVAL_SECONDS", "60")
+        ),
+        service_name=os.environ.get("METRICS_SERVICE_NAME", "portunus"),
+        event_loop_probe_seconds=float(
+            os.environ.get("METRICS_EVENT_LOOP_PROBE_SECONDS", "1.0")
+        ),
     )
 
     firehose = FirehoseConfig(
@@ -561,9 +593,6 @@ def get_config() -> PortunusConfig:
         ),
         graceful_shutdown_seconds=int(
             os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
-        ),
-        metrics_interval_seconds=float(
-            os.environ.get("GRPC_METRICS_INTERVAL_SECONDS", "60.0")
         ),
         drain_flush_reserve_seconds=float(
             os.environ.get("GRPC_DRAIN_FLUSH_RESERVE_SECONDS", "5.0")
@@ -637,6 +666,7 @@ def get_config() -> PortunusConfig:
         proxy_header_prefix=os.environ.get("PORTUNUS_HEADER_PREFIX", "portunus"),
         redis=redis,
         aws=aws,
+        metrics=metrics,
         firehose=firehose,
         grpc=grpc,
         signing=signing,

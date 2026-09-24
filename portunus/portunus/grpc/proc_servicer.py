@@ -34,13 +34,9 @@ from portunus.grpc.frame_observer import (
 )
 from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
 from portunus.models import WSSummaryRecord
+from portunus.request_context import parse_trace_root, request_id_var, set_trace_id
 from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 from portunus.services.publish_service import PublishService
-from portunus.services.xray_service import (
-    parse_trace_header,
-    request_id_var,
-    set_trace_id,
-)
 from portunus.util import chunk_body_data, generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
@@ -213,12 +209,11 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
 
         Also binds the correlation contextvars: each ext_proc stream is one
         grpc.aio task, so setting them here covers every log line the stream
-        emits. No X-Ray segment is opened — ext_proc is fire-and-forget
-        observability; a per-stream segment would only add trace noise.
+        emits.
         """
         request_id = _extract_request_id(first)
         request_id_var.set(request_id)
-        trace_root, _, _ = parse_trace_header(_extract_header(first, "x-amzn-trace-id"))
+        trace_root = parse_trace_root(_extract_header(first, "x-amzn-trace-id"))
         if trace_root:
             set_trace_id(trace_root)
         mode = _extract_mode(first)

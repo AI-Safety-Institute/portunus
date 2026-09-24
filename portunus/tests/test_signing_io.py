@@ -128,7 +128,6 @@ asyncio.run(main())
         environment = {
             **os.environ,
             "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
-            "AWS_XRAY_SDK_ENABLED": "false",
             "AWS_ENDPOINT_URL": endpoint.url,
             "AWS_MAX_ATTEMPTS": "4",
             "SIGNING_KMS_CONNECT_TIMEOUT_S": "0.1",

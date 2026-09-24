@@ -70,6 +70,20 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 | `AUTH_FALLBACK_MAX_CONCURRENT` / `AUTH_FALLBACK_ACQUIRE_TIMEOUT_S` | Cap on concurrent full authentications (STS + Secrets Manager) per process; requests that can't get a slot within the timeout are shed with 503 | defaults `32` / `1.0`. Stops a Redis outage turning into an STS/Secrets Manager stampede |
 | `FIREHOSE_*_STREAM` | Per-record-type Firehose delivery streams (metadata, request/response headers/body/trailers, ws summary) | direct-PUT |
 | `RATE_LIMIT_PERCENT_ENABLED` / `RATE_LIMIT_INTERVAL_SECONDS` / `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Optional rate limiting | `0` disables |
+| `METRICS_ENABLED` | Aggregate and emit CloudWatch EMF metrics on stdout | default `false`, so local runs and tests stay quiet; the task definition sets it |
+| `METRICS_NAMESPACE` / `METRICS_SERVICE_NAME` | CloudWatch namespace, and the `ServiceName` dimension value | defaults `Portunus` / `portunus`. Dimensions are `ServiceName` + `Role` (from `GRPC_ROLE`) only — nothing per-task, per-principal or per-host |
+| `METRICS_FLUSH_INTERVAL_SECONDS` / `METRICS_EVENT_LOOP_PROBE_SECONDS` | Flush period for the aggregated interval; sampling period of the event-loop lag probe | defaults `60` / `1.0`. Counters ship as per-interval deltas and latencies as EMF `Values`/`Counts` histograms, so the hot path costs one counter bump per request, not one log line |
+
+## Observability
+
+No distributed tracing. Per-request correlation is `x-request-id` (Envoy
+access log → Portunus structured logs → Firehose audit records), plus an
+inbound `x-amzn-trace-id` `Root=` id on log lines when an upstream set one.
+Aggregate behaviour is CloudWatch EMF: `portunus/portunus/metrics.py` keeps
+counters, delta sources, gauges and bucketed distributions in memory and
+`grpc/server.py`'s reporter flushes one `_aws` JSON line per interval, with a
+final flush at drain. Metric names are constants in `metrics.py` — use them
+rather than string literals, since a typo'd name just never appears.
 
 ## Development
 

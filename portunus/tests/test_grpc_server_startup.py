@@ -132,7 +132,6 @@ async def test_reflection_discovers_auth_audit_and_health_services(unused_tcp_po
         proxy_api_key="local-reflection-test-key",
         port=unused_tcp_port,
         health_check_interval_seconds=0,
-        metrics_interval_seconds=0,
     )
     runtime = await start_grpc_server(
         config=config,

@@ -8,8 +8,7 @@ Envoy-based reverse proxy that handles client traffic and delegates authenticati
 proxy/
 ├── envoy.yaml      # Envoy configuration: listener, filter chain, ext_authz/ext_proc clusters, routes
 ├── entrypoint.sh   # Startup script — sets defaults and runs envsubst over envoy.yaml
-├── Dockerfile      # Proxy container image
-└── xray.json       # AWS X-Ray tracing config
+└── Dockerfile      # Proxy container image
 ```
 
 There is no Lua filter and no proxy-utils library: all auth and audit logic lives in the Portunus gRPC servicers.
@@ -41,7 +40,7 @@ Redis outage. The default `GRPC_ROLE=all` keeps both servicers in one process.
 
 ## Filter chain
 
-1. **Common HTTP filters** — request-id, X-Ray tracing.
+1. **Common HTTP filters** — request-id generation.
 2. **`envoy.filters.http.local_ratelimit`** — first in the chain; rejects excess load before any backend RPC.
 3. **`envoy.filters.http.ext_authz` #1** — gRPC call to `PortunusAuthServicer.Check` on headers only. Returns:
    - The real `Authorization` header (real api_key from the secret).
@@ -156,8 +155,8 @@ Envoy emits its timings and attempt count as JSON numbers; the provider header
 is a string. Missing timings or headers are `null`, including on requests that
 never reach the upstream or end before the relevant event. Treat unavailable or
 nonnumeric timing values as missing, not zero. The provider header is supporting
-evidence, not an independently measured duration. Access-log timings do not
-depend on X-Ray sampling or audit delivery.
+evidence, not an independently measured duration. Access-log timings are
+independent of audit delivery.
 
 ## Building
 
@@ -166,15 +165,15 @@ cd proxy
 docker build -t portunus-proxy .
 ```
 
-### X-Ray sampling
+### Request correlation
 
-`XRAY_SAMPLING_RATE` sets the default X-Ray request sampling probability from
-`0` to `1` (default `1.0`). For example, `0.01` samples approximately 1% of
-otherwise eligible requests. The fixed reservoir remains zero, and existing
-health-check exclusions are preserved. Invalid values prevent startup.
+The proxy exports no traces. Envoy generates `x-request-id` for every request
+and the JSON access log records it, so a request is traceable across the access
+log, Portunus's structured logs, and the Firehose audit records by that one id.
+An inbound `x-amzn-trace-id` is forwarded untouched and its `Root=` id is
+attached to Portunus's log lines for correlation with whatever upstream set it.
 
-Incoming trace IDs and sampling decisions are retained. Consequently a caller's
-`Sampled=1` can override this default: it is not a hard export-rate limit or a
-way to disable tracing completely. Python follows Envoy's sampling decision
-through authenticated gRPC metadata. Each selected request can emit several
-segments, so size the export budget using segment volume as well as request rate.
+Aggregate behaviour (Check outcomes, auth latency, cache hit rates, audit queue
+health, event-loop lag) comes from the CloudWatch EMF metrics Portunus flushes
+to stdout — see `METRICS_*` in the Portunus README. There is no per-request
+sampling knob because there is nothing per-request to sample.

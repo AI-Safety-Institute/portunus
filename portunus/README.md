@@ -19,11 +19,15 @@ portunus/
   config.py         Env-driven PortunusConfig (singleton at import time).
   exceptions.py     Service exception types (AuthenticationError, CredentialsError, ...).
   logging.py        StructuredLogFormatter: JSON log lines on stdout, enriched
-                    with the request_id / trace_id contextvars set by
-                    xray_service. Configured at import time.
-  metrics.py        CloudWatch EMF reporter: emits Embedded Metric Format
-                    JSON lines on a dedicated stdout logger (namespace
-                    portunus-proxy), bypassing the structured formatter.
+                    with the request_id / trace_id contextvars from
+                    request_context. Configured at import time.
+  metrics.py        In-process metric aggregation (counters, delta sources,
+                    gauges, bucketed distributions) flushed as CloudWatch
+                    Embedded Metric Format JSON lines on a dedicated stdout
+                    logger, bypassing the structured formatter.
+  request_context.py  request_id / trace_id contextvars and the
+                    x-amzn-trace-id Root= parser; no dependencies, so any
+                    module can import it without side effects.
   models.py         Pydantic request models and dataclass Firehose record types
                     (MetadataRecord, RequestBodyRecord, ResponseBodyRecord,
                     WSSummaryRecord, JoinedLogRecord). Ships standalone into the
@@ -64,8 +68,6 @@ portunus/
     state_service.py           Redis client lifecycle.
     payload_service.py         Base64 / JSON payload encode/decode.
     arn_service.py             Secret ARN parsing.
-    xray_service.py            X-Ray tracing helpers; owns the request_id /
-                               trace_id contextvars.
 ```
 
 ## gRPC-service environment variables
@@ -80,6 +82,51 @@ These gate the servicer process specifically; the root README documents the rest
 | `GRPC_PROXY_API_KEY_OPTIONAL` | When `true`, an empty `GRPC_PROXY_API_KEY` is permitted (dev only). |
 
 See `portunus/config.py` for the rest (Redis, Firehose stream names, rate limiting, TLS toggles, header naming).
+
+## CloudWatch EMF metrics
+
+Portunus aggregates metrics in-process and flushes the interval as one EMF
+JSON line on stdout, which the ECS `awslogs` driver already ships to
+CloudWatch Logs — no agent, no SDK, no metric filter. The hot path only bumps
+an in-memory counter or histogram bucket, so a few thousand requests per
+second cost one log line per flush, not per request.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `METRICS_ENABLED` | `false` | Master switch. Off by default so local runs and tests stay quiet; deployments set it to `true`. |
+| `METRICS_NAMESPACE` | `Portunus` | CloudWatch namespace. |
+| `METRICS_FLUSH_INTERVAL_SECONDS` | `60` | Flush period. Below CloudWatch's 60s storage resolution it costs log volume for no extra detail. |
+| `METRICS_SERVICE_NAME` | `portunus` | Value of the `ServiceName` dimension (e.g. the proxy deployment's name). |
+| `METRICS_EVENT_LOOP_PROBE_SECONDS` | `1.0` | Sleep-drift sampling period behind `EventLoopLag`; `0` disables the probe. |
+
+Dimensions are `ServiceName` and `Role` (from `GRPC_ROLE`) only — deliberately
+low cardinality. A per-task or per-principal dimension would multiply the
+custom-metric bill by the size of the fleet and of the customer base.
+
+| Metric | Unit | Meaning |
+| --- | --- | --- |
+| `CheckAllowed` / `CheckDenied` | Count | ext_authz outcomes; together they partition every `Check`. |
+| `CheckShed` | Count | Subset of `CheckDenied` returned as 503 (full-auth capacity exhausted). |
+| `CheckError` | Count | Subset of `CheckDenied` returned as another 5xx (500 internal, 504 auth timeout). |
+| `CheckLatency` | Milliseconds | Distribution of end-to-end `Check` duration. |
+| `AuthCacheL1Hit` / `AuthCacheL1Miss` / `AuthCacheL1StaleServed` / `AuthCacheL1Coalesced` | Count | In-process auth cache: fresh hits, misses that ran a loader, entries served stale during a Redis failure, and requests coalesced onto an in-flight load. |
+| `AuthCacheRedisHit` / `AuthCacheRedisMiss` / `AuthCacheRedisError` | Count | Redis auth-cache outcomes on the L1-miss path. |
+| `FullAuth` / `FullAuthLatency` | Count / Milliseconds | Full authentications (STS `get-caller-identity` + Secrets Manager) and their duration, timed on failure as well as success. |
+| `FullAuthShed` | Count | Full authentications refused by the concurrency semaphore. |
+| `SubmittedRecords` / `PublishedRecords` / `DroppedRecords` / `BuildFailedRecords` / `DeliveryFailedRecords` / `SkippedUnconfiguredRecords` / `SentinelDroppedRecords` | Count | Audit-pipeline accounting, mirroring the publish queue's own reconciliation. |
+| `FirehoseThrottledRecords` / `FirehosePutErrors` | Count | Records rejected for quota reasons, and records lost to a raised `PutRecordBatch`. |
+| `PublishQueueDepth` / `PublishQueueBytes` | Count / Bytes | Queue occupancy sampled at flush. |
+| `ActiveExtProcStreams` | Count | Live ext_proc streams sampled at flush. |
+| `EventLoopLag` | Milliseconds | Drift of a 1s sleep — the loop's scheduling backlog, which separates "Portunus is CPU-starved" from "the dependency is slow". |
+
+Counters are reported as **per-interval deltas**, so a CloudWatch `Sum` over
+any period is that period's true count regardless of task restarts.
+Distributions ship as EMF `Values`/`Counts` arrays over a √2-spaced bucket
+ladder; each bucket reports its upper bound, so a latency is never
+under-reported (over-reported by at most ~41%) and CloudWatch can still
+compute averages and percentiles. In a split `GRPC_ROLE` deployment each
+process registers only the metrics it owns, so neither role dilutes the
+other's series with structural zeroes.
 
 ## gRPC publisher tuning
 

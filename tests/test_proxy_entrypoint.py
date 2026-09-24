@@ -1,6 +1,5 @@
 """Exercise proxy startup and shutdown through the built container entrypoint."""
 
-import json
 import os
 import socket
 import subprocess
@@ -73,7 +72,6 @@ def running_proxy(image, overrides, *, command=()):
         "TARGET_HOST_TRANSPORT_SOCKET": "null",
         "WS_TARGET_HOST_TRANSPORT_SOCKET": "null",
         "DOWNSTREAM_TLS_TRANSPORT_SOCKET": "null",
-        "AWS_XRAY_DAEMON_ADDRESS": "127.0.0.1",
         "ENVOY_LOG_LEVEL": "error",
         "DRAIN_TIME_S": "1",
     }
@@ -242,31 +240,3 @@ def test_audit_listener_can_be_routed_separately(entrypoint_image, audit_port):
         }
         assert ports["portunus_grpc_cluster"] == 19000
         assert ports["portunus_extproc_cluster"] == int(audit_port or "19000")
-
-
-@pytest.mark.parametrize("rate", [None, "0", "0.01", "1"])
-def test_proxy_applies_configured_xray_sampling_rate(entrypoint_image, rate):
-    overrides = {} if rate is None else {"XRAY_SAMPLING_RATE": rate}
-    with running_proxy(entrypoint_image, overrides) as proxy:
-        proxy.wait_for_ping()
-        rendered = subprocess.run(
-            ["docker", "exec", proxy.name, "cat", "/envoy/xray_subst.json"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        manifest = json.loads(rendered.stdout)
-        assert manifest["default"] == {
-            "fixed_target": 0,
-            "rate": 1.0 if rate is None else float(rate),
-        }
-        assert manifest["rules"][0]["rate"] == 0
-
-
-@pytest.mark.parametrize("rate", ["-1", "1.01", "NaN", '0.1,"fixed_target":999'])
-def test_invalid_sampling_rate_prevents_startup(entrypoint_image, rate):
-    with running_proxy(entrypoint_image, {"XRAY_SAMPLING_RATE": rate}) as proxy:
-        result = subprocess.run(
-            ["docker", "wait", proxy.name], capture_output=True, text=True, timeout=8
-        )
-        assert result.stdout.strip() == "1"

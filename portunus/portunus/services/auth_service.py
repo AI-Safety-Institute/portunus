@@ -8,6 +8,7 @@ API keys, and managing principal identities.
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from botocore.exceptions import ClientError
@@ -19,6 +20,15 @@ from portunus.exceptions import (
     AuthOverloadedError,
     CredentialsError,
     PayloadError,
+)
+from portunus.metrics import (
+    AUTH_REDIS_ERROR,
+    AUTH_REDIS_HIT,
+    AUTH_REDIS_MISS,
+    FULL_AUTH,
+    FULL_AUTH_LATENCY,
+    FULL_AUTH_SHED,
+    metrics,
 )
 from portunus.models import (
     AuthPayload,
@@ -37,7 +47,6 @@ from portunus.services.cache_service import (
 from portunus.services.local_auth_cache import LocalAuthCache
 from portunus.services.secrets_service import SecretsService
 from portunus.services.state_service import StateService
-from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -132,7 +141,6 @@ class AuthService:
         self.secrets_service = secrets_service
         self.boto_session = self.secrets_service.boto_session
 
-    @capture_async()
     async def get_aws_identity(
         self, credentials: Optional[AwsCredentials] = None
     ) -> PrincipalInfo:
@@ -191,7 +199,6 @@ class AuthService:
         # Parse the ARN to get identity information
         return parse_identity_from_arn(principal_arn)
 
-    @capture_async()
     async def authenticate(
         self, payload: AuthPayload, request_id: str, target_host: Optional[str] = None
     ) -> AuthResult:
@@ -266,6 +273,7 @@ class AuthService:
                         payload.raw, target_host
                     )
                     if cached_result:
+                        metrics.incr(AUTH_REDIS_HIT)
                         result = AuthResult(
                             api_key=cached_result.api_key,
                             signing_key=cached_result.signing_key,
@@ -273,7 +281,9 @@ class AuthService:
                         )
                         self._remember(key, result, payload)
                         return result
+                    metrics.incr(AUTH_REDIS_MISS)
             except (TimeoutError, RedisTimeoutError) as e:
+                metrics.incr(AUTH_REDIS_ERROR)
                 stale = self._stale(key)
                 if stale is not None:
                     logger.warning(
@@ -290,6 +300,7 @@ class AuthService:
                 )
                 raise TimeoutError("Cache read timed out during authentication") from e
             except Exception as e:
+                metrics.incr(AUTH_REDIS_ERROR)
                 stale = self._stale(key)
                 if stale is not None:
                     logger.warning(
@@ -320,13 +331,19 @@ class AuthService:
             async with asyncio.timeout(self._fallback_acquire_timeout_s):
                 await self._fallback_slots.acquire()
         except TimeoutError:
+            metrics.incr(FULL_AUTH_SHED)
             logger.warning(
                 "Full-auth capacity exhausted; shedding (request_id=%s)", request_id
             )
             raise AuthOverloadedError() from None
+        metrics.incr(FULL_AUTH)
+        started = time.perf_counter()
         try:
             return await self._full_authenticate(payload, target_host)
         finally:
+            # Timed whatever the outcome: a slow FAILING STS is exactly the
+            # case the latency series has to show.
+            metrics.observe(FULL_AUTH_LATENCY, (time.perf_counter() - started) * 1000)
             self._fallback_slots.release()
 
     def _remember(

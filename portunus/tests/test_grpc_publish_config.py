@@ -20,7 +20,7 @@ def grpc_environment(
         "GRPC_PORT": str(unused_tcp_port),
         "GRPC_PROXY_API_KEY": "local-publisher-tuning-key",
         "GRPC_HEALTH_CHECK_INTERVAL_SECONDS": "0",
-        "GRPC_METRICS_INTERVAL_SECONDS": "0",
+        "METRICS_ENABLED": "false",
     }
     settings.update(
         {
