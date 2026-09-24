@@ -31,6 +31,7 @@ from portunus.models import (
 )
 from portunus.services import federation_service
 from portunus.services.federation_service import (
+    ANTHROPIC_TOKEN_URL,
     FEDERATION_SESSION_SECONDS,
     IDENTITY_TOKEN_SECONDS,
     JWT_BEARER_GRANT_TYPE,
@@ -524,7 +525,7 @@ class TestAnthropicTokenExchange:
 
         (request,) = requests
         assert request.method == "POST"
-        assert str(request.url) == "https://api.example.com/v1/oauth/token"
+        assert str(request.url) == ANTHROPIC_TOKEN_URL
         assert json.loads(request.content) == {
             "grant_type": JWT_BEARER_GRANT_TYPE,
             "assertion": "header.payload.signature",

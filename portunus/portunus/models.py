@@ -580,8 +580,8 @@ class AnthropicWifSecret(MintSecretBase):
     """Mint an Anthropic OAuth token via workload identity federation.
 
     The federation session requests an STS web identity token for ``audience``
-    and exchanges it at ``https://<host>/v1/oauth/token`` (RFC 7523 JWT
-    bearer grant) using the identifiers below.
+    and exchanges it at ``https://api.anthropic.com/v1/oauth/token`` (RFC 7523
+    JWT bearer grant) using the identifiers below.
     """
 
     type: Literal["anthropic_wif"]
