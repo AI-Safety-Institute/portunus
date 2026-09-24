@@ -1,11 +1,16 @@
+import asyncio
 import base64
+import functools
 import hashlib
 import logging
+import weakref
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Callable, Literal, Optional, TypedDict
 
 import boto3
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, HttpUrl
 
@@ -21,12 +26,11 @@ class SignableRequest(BaseModel):
     """Request model for signature generation.
 
     Attributes:
-        url: Full URL of the request to be signed.
-             If the sent request is different in any way, including query or hash
-             parameters, the signature will be rejected.
-        method: HTTP method of the request to be signed
-        content_type: Content-Type of the request body
-        content_digest: Digest of the request body
+        url: Full URL to sign; any difference (incl. query/fragment) in the
+            sent request rejects the signature.
+        method: HTTP method to sign.
+        content_type: Content-Type of the request body.
+        content_digest: Digest of the request body.
     """
 
     type: Literal["anthropic"]
@@ -45,17 +49,121 @@ SignatureHeaders = TypedDict(
 )
 
 
-def _get_region_from_arn(arn: str) -> str:
-    """Extract the region from an AWS ARN.
+class SigningOverloadedError(Exception):
+    """Raised when the signing concurrency cap stayed saturated too long.
 
-    ARN format: arn:aws:service:region:account:resource
-
-    Args:
-        arn: An AWS ARN string
-
-    Returns:
-        The region component of the ARN
+    Callers must fail closed (deny, ideally 503) rather than queue: each waiter
+    pins its buffered body (up to 32 MiB, Envoy ``with_request_body``), so
+    prompt shedding is what stops a signing burst exhausting memory.
     """
+
+
+def _signing_settings() -> tuple[int, int, float]:
+    """Resolve (executor_workers, max_concurrent, acquire_timeout_s).
+
+    A single seam over ``config.signing`` so tests can patch the sizing
+    in one place.
+    """
+    signing_cfg = config.signing
+    return (
+        signing_cfg.kms_executor_workers,
+        signing_cfg.max_concurrent,
+        signing_cfg.acquire_timeout_s,
+    )
+
+
+# Dedicated executor for KMS.Sign so signing throughput has an explicit knob,
+# not the shared process-default to_thread pool (~min(32, cpu+4) threads) that
+# a slow KMS tail would back up toward the 15s ext_authz timeout. Threads are
+# process-wide; the semaphore below is per event loop.
+_kms_executor: Optional[ThreadPoolExecutor] = None
+_signing_semaphores: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Semaphore
+] = weakref.WeakKeyDictionary()
+
+
+def _get_kms_executor() -> ThreadPoolExecutor:
+    global _kms_executor
+    if _kms_executor is None:
+        workers, _, _ = _signing_settings()
+        _kms_executor = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="kms-sign"
+        )
+    return _kms_executor
+
+
+def _get_signing_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _signing_semaphores.get(loop)
+    if semaphore is None:
+        _, max_concurrent, _ = _signing_settings()
+        semaphore = asyncio.Semaphore(max_concurrent)
+        _signing_semaphores[loop] = semaphore
+    return semaphore
+
+
+def reset_signing_runtime(*, wait: bool = False) -> None:
+    """Tear down the KMS executor + semaphores (shutdown / test isolation)."""
+    global _kms_executor
+    if _kms_executor is not None:
+        _kms_executor.shutdown(wait=wait, cancel_futures=True)
+        _kms_executor = None
+    _signing_semaphores.clear()
+
+
+async def sign_request_async(
+    req: "SignableRequest",
+    signing_key: SigningKey,
+    api_key: str,
+    user_credentials: AwsCredentials,
+    *,
+    sign_fn: Optional[Callable[..., SignatureHeaders]] = None,
+) -> SignatureHeaders:
+    """Bounded, off-loop signing: the async entrypoint for the signing pass.
+
+    Wraps a synchronous signer (:func:`sign_request`; tests inject via
+    ``sign_fn``) with two bounds: a per-event-loop semaphore capping concurrent
+    signings (waiters over the timeout are shed with
+    :class:`SigningOverloadedError`, see there for why) and a dedicated
+    ``ThreadPoolExecutor`` for the blocking KMS call.
+
+    Raises:
+        SigningOverloadedError: concurrency cap saturated past the acquire
+            timeout; the caller must deny the request.
+    """
+    signer = sign_fn if sign_fn is not None else sign_request
+    _, _, acquire_timeout = _signing_settings()
+    semaphore = _get_signing_semaphore()
+    try:
+        async with asyncio.timeout(acquire_timeout):
+            await semaphore.acquire()
+    except TimeoutError:
+        raise SigningOverloadedError(
+            "Signing concurrency cap saturated; shedding request"
+        ) from None
+    try:
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            _get_kms_executor(),
+            functools.partial(signer, req, signing_key, api_key, user_credentials),
+        )
+    except BaseException:
+        semaphore.release()
+        raise
+
+    def signing_finished(completed: asyncio.Future[SignatureHeaders]) -> None:
+        semaphore.release()
+        # A disconnected caller cannot retrieve a later worker exception.
+        if not completed.cancelled():
+            completed.exception()
+
+    future.add_done_callback(signing_finished)
+    # Cancelling the RPC cannot stop its running thread or free its capacity.
+    return await asyncio.shield(future)
+
+
+def _get_region_from_arn(arn: str) -> str:
+    """Extract the region from an AWS ARN (``arn:aws:service:region:...``)."""
     parts = arn.split(":")
     return parts[3]
 
@@ -66,24 +174,20 @@ def sign_request(
     api_key: str,
     user_credentials: AwsCredentials,
 ) -> SignatureHeaders:
-    """
-    Sign an API request using AWS KMS according to RFC 9421 (HTTP Message Signatures).
+    """Sign an API request using AWS KMS per RFC 9421 (HTTP Message Signatures).
 
     Args:
-        req: request details used to create the signature
+        req: Request details to sign.
         signing_key: The signing key for this api key.
-        api_key: The provider API key
-        user_credentials: User's AWS credentials to use for KMS signing.
+        api_key: The provider API key.
+        user_credentials: User's AWS credentials for KMS signing.
 
     Returns:
-        Dictionary containing RFC 9421 compliant signature headers:
-        - "Signature-Input": Metadata about the signature
-        - "Signature": The actual signature
+        RFC 9421 signature headers: "Signature-Input" and "Signature".
 
     Raises:
-        CredentialsError: If the user's AWS credentials are invalid or expired
+        CredentialsError: If the user's AWS credentials are invalid or expired.
     """
-    # RFC 9421 signature base
     created: int = int(datetime.now().timestamp())
     algorithm: str = "ecdsa-p256-sha256"
 
@@ -99,6 +203,14 @@ def sign_request(
         aws_session_token=user_credentials.session_token,
         # Add endpoint_url if configured (for LocalStack)
         endpoint_url=config.aws.endpoint_url,
+        config=BotoConfig(
+            connect_timeout=config.signing.kms_connect_timeout_s,
+            read_timeout=config.signing.kms_read_timeout_s,
+            retries={
+                "mode": "standard",
+                "total_max_attempts": config.signing.kms_max_attempts,
+            },
+        ),
     )
 
     # Error codes that indicate credential issues
@@ -121,8 +233,8 @@ def sign_request(
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         logging.error(
-            f"KMS sign operation failed: {error_code}",
-            exc_info=e,
+            "KMS sign operation failed: %s",
+            error_code or type(e).__name__,
             extra={
                 "kms_key_arn": signing_key.kms_key_arn,
                 "provider_id": signing_key.provider_id,
@@ -131,6 +243,8 @@ def sign_request(
         if error_code in credential_error_codes:
             raise CredentialsError("AWS credentials are invalid or expired") from e
         raise
+    finally:
+        kms.close()
 
     signature_b64: str = base64.b64encode(response["Signature"]).decode()
     signature_name = "sig1"
@@ -147,7 +261,7 @@ def _build_signature_params_and_base(
     created: int,
     algorithm: str,
 ) -> tuple[str, bytes]:
-    # OrderedDict to ensure the signing order and the signature parameters order match
+    # OrderedDict: signing order must match the signature-params order.
     covered_components: OrderedDict[str, str] = OrderedDict()
     covered_components["@method"] = req.method
     covered_components["@target-uri"] = str(req.url)

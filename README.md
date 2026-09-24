@@ -219,7 +219,9 @@ You can use `encode_payload()` to construct an authorization payload programmati
 from portunus.services.payload_service import encode_payload
 
 # credentials dict from STS assume-role or get-session-token
-payload = encode_payload(credentials, "arn:aws:secretsmanager:eu-west-2:123456789012:secret:my-api-key")
+payload = encode_payload(
+    credentials, "arn:aws:secretsmanager:eu-west-2:123456789012:secret:my-api-key"
+)
 ```
 
 ### Running Tests

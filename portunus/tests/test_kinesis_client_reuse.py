@@ -71,6 +71,16 @@ class TestKinesisClientReuse:
         lifecycle.exited.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_state_shutdown_closes_shared_kinesis_client(self):
+        service, _, lifecycle = _state_service_with_fake_kinesis()
+        await service.get_kinesis_client()
+
+        await service.close()
+        await service.close()
+
+        assert lifecycle.exited.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_publish_reuses_client_between_records(self):
         service, kinesis_client, lifecycle = _state_service_with_fake_kinesis()
         publish_service = PublishService(state_service=service)

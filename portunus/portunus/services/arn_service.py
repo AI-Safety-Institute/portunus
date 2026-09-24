@@ -1,9 +1,4 @@
-"""
-ARN handling service module.
-
-This module contains functions for working with AWS ARNs, including parsing
-and extracting identity information.
-"""
+"""AWS ARN parsing and identity extraction."""
 
 import logging
 from typing import Optional, Tuple
@@ -90,7 +85,9 @@ def parse_identity_from_arn(arn: str):
         role_name = path_parts[0]
         principal = f"assumed-role/{role_name}"
         session_name = path_parts[1]
-        # Extract project from role name (AISI-specific pattern)
+        # Extract project from a deployment convention where assumed-role
+        # names follow ``UserProfile_<name>_<project>``. Deployments without
+        # this convention fall through with ``project = None``.
         if role_name.startswith("UserProfile_"):
             role_parts = role_name.split("_")
             if len(role_parts) >= 3:
@@ -100,7 +97,9 @@ def parse_identity_from_arn(arn: str):
         principal = None
         session_name = None
         project = None
-        logging.warning(f"Unrecognized ARN format: {arn}")
+        # ARN includes a customer-influenced session-name segment; log
+        # only the length to avoid log-injection.
+        logging.warning("Unrecognized ARN format (len=%d)", len(arn))
 
     return PrincipalInfo(
         arn=arn,

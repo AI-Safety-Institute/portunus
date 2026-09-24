@@ -29,7 +29,7 @@ import pytest
 APP_SOURCE = """
 from fastapi import FastAPI
 from portunus.logging import LoggingMiddleware
-from portunus.services.xray_service import XRayService
+from portunus.services.xray_service import XRayService, capture_async
 
 xray_service = XRayService()  # module scope, exactly like portunus.app
 
@@ -38,9 +38,14 @@ app.add_middleware(LoggingMiddleware)
 
 
 @app.get("/trace")
+@capture_async("trace-handler")
 async def trace():
     segment = xray_service.recorder.current_segment()
-    return {"request_id": segment.trace_id if segment else "No-Trace-Id"}
+    subsegment = xray_service.recorder.current_subsegment()
+    return {
+        "request_id": segment.trace_id if segment else "No-Trace-Id",
+        "subsegment": subsegment.name if subsegment else None,
+    }
 """
 
 
@@ -117,6 +122,7 @@ def test_trace_id_reaches_handler_segment(uvicorn_server: str) -> None:
         )
         assert resp.status_code == 200
         assert resp.json()["request_id"] == trace_id
+        assert resp.json()["subsegment"] == "trace-handler"
 
 
 def test_missing_trace_header_falls_back(uvicorn_server: str) -> None:
