@@ -36,6 +36,17 @@ BuiltRecord = Tuple[str, bytes]
 _MAX_BATCH_RECORDS = 500
 _MAX_BATCH_BYTES = 4 * 1024 * 1024
 
+# Per-record ErrorCodes that mean "the stream is over its quota", as opposed
+# to a malformed record. Counted separately so an under-provisioned stream is
+# distinguishable from a code bug in the CloudWatch metrics.
+_THROTTLE_ERROR_CODES = frozenset(
+    {
+        "ServiceUnavailableException",
+        "ProvisionedThroughputExceededException",
+        "ThrottlingException",
+    }
+)
+
 
 def _serialize(record_data: Dict[str, Any]) -> bytes:
     """Serialize a record dict to newline-terminated JSON bytes."""
@@ -74,6 +85,12 @@ class PublishService:
     def __init__(self, state_service: Optional[StateService] = None):
         """Initialize the PublishService."""
         self.state_service = state_service or StateService()
+        # Cumulative Firehose failure counters, surfaced as per-interval
+        # deltas by the metrics reporter. Throttles are separated from hard
+        # errors because they mean "raise the stream's quota", not "fix a
+        # bug"; both already log, but a log line is not an alarm.
+        self.throttled_total = 0
+        self.put_errors_total = 0
 
     async def put_record_batch(self, stream_name: str, records: List[bytes]) -> int:
         """Ship ``records`` to ``stream_name`` via Firehose ``PutRecordBatch``.
@@ -110,6 +127,7 @@ class PublishService:
                     Records=[{"Data": data} for data in records],
                 )
             except Exception as e:
+                self.put_errors_total += len(records)
                 # Log type(e).__name__ only — botocore messages can carry
                 # payload fragments (customer body content).
                 logger.error(
@@ -142,6 +160,8 @@ class PublishService:
                     if code:
                         retry.append(data)
                         last_error_codes[code] = last_error_codes.get(code, 0) + 1
+                        if code in _THROTTLE_ERROR_CODES:
+                            self.throttled_total += 1
             else:
                 # A misaligned response cannot confirm which inputs succeeded.
                 # Retrying the whole group may duplicate records, but never hides loss.

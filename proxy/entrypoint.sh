@@ -93,14 +93,6 @@ EOF
   )
 fi
 
-# Keep the sampling manifest numeric and preserve its health-check exclusions.
-export XRAY_SAMPLING_RATE=${XRAY_SAMPLING_RATE:-1.0}
-if ! awk -v rate="$XRAY_SAMPLING_RATE" 'BEGIN { exit !(rate ~ /^(0(\.[0-9]+)?|1(\.0+)?)$/) }'; then
-  echo "[entrypoint] FATAL: XRAY_SAMPLING_RATE must be a decimal between 0 and 1" >&2
-  exit 1
-fi
-yq -o=json '.default.rate = env(XRAY_SAMPLING_RATE)' /envoy/xray.json > /envoy/xray_subst.json || exit 1
-
 # Apply environment variable substitution to the Envoy config.
 envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
 

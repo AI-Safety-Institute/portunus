@@ -153,19 +153,6 @@ wheels = [
 ]
 
 [[package]]
-name = "aws-xray-sdk"
-version = "2.15.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "botocore" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/14/25/0cbd7a440080def5e6f063720c3b190a25f8aa2938c1e34415dc18241596/aws_xray_sdk-2.15.0.tar.gz", hash = "sha256:794381b96e835314345068ae1dd3b9120bd8b4e21295066c37e8814dbb341365", size = 76315, upload-time = "2025-10-29T20:59:45Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/c3/f30a7a63e664acc7c2545ca0491b6ce8264536e0e5cad3965f1d1b91e960/aws_xray_sdk-2.15.0-py2.py3-none-any.whl", hash = "sha256:422d62ad7d52e373eebb90b642eb1bb24657afe03b22a8df4a8b2e5108e278a3", size = 103228, upload-time = "2025-10-29T21:00:24.12Z" },
-]
-
-[[package]]
 name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1138,7 +1125,6 @@ source = { editable = "portunus" }
 dependencies = [
     { name = "aiobotocore" },
     { name = "async-timeout" },
-    { name = "aws-xray-sdk" },
     { name = "boto3" },
     { name = "brotli" },
     { name = "cryptography" },
@@ -1160,7 +1146,6 @@ dependencies = [
 requires-dist = [
     { name = "aiobotocore", specifier = ">=2.13.0,<3" },
     { name = "async-timeout", specifier = ">=4.0.3,<5" },
-    { name = "aws-xray-sdk", specifier = ">=2.14.0,<3" },
     { name = "boto3", specifier = ">=1.34.144,<2" },
     { name = "brotli", specifier = ">=1.1.0,<2" },
     { name = "cryptography", specifier = ">=50.0.0,<51" },
@@ -1203,7 +1188,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "aiobotocore" },
-    { name = "aws-xray-sdk" },
     { name = "boto3-stubs", extra = ["kms", "secretsmanager"] },
     { name = "fakeredis" },
     { name = "freezegun" },
@@ -1219,7 +1203,6 @@ dev = [
     { name = "requests" },
     { name = "ruff" },
     { name = "types-aiobotocore" },
-    { name = "types-aws-xray-sdk" },
     { name = "types-grpcio" },
     { name = "types-protobuf" },
     { name = "types-pyyaml" },
@@ -1233,7 +1216,6 @@ requires-dist = [{ name = "portunus", editable = "portunus" }]
 [package.metadata.requires-dev]
 dev = [
     { name = "aiobotocore", specifier = ">=2.24.1,<3" },
-    { name = "aws-xray-sdk", specifier = ">=2.14.0,<3" },
     { name = "boto3-stubs", extras = ["secretsmanager", "kms"], specifier = ">=1.43.67,<2" },
     { name = "fakeredis", specifier = ">=2.37.0,<3" },
     { name = "freezegun", specifier = ">=1.5.0,<2" },
@@ -1249,7 +1231,6 @@ dev = [
     { name = "requests", specifier = ">=2.32.3,<3" },
     { name = "ruff", specifier = ">=0.16.2,<1" },
     { name = "types-aiobotocore", specifier = ">=3.9.0,<4" },
-    { name = "types-aws-xray-sdk", specifier = ">=2.14.0.20250708,<3" },
     { name = "types-grpcio", specifier = ">=1.0.0" },
     { name = "types-protobuf", specifier = ">=4.24.0" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260724,<7" },
@@ -1725,15 +1706,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b4/8d/d9654bb658aedc849eca2f761669d4a53faa56a75464663f5d7e5be58c27/types_aiobotocore-3.9.1.tar.gz", hash = "sha256:d86497c3d821ca3e5b0c4705ad85066672c57c64b715333500979f4565844d4e", size = 89449, upload-time = "2026-09-09T03:35:15.643Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/a4/426846af7d5ddb7254942d4144a8d2a497aa1a7d20a579307e2431cb42e6/types_aiobotocore-3.9.1-py3-none-any.whl", hash = "sha256:768ca08c54e4c1657a62a8229aa465263a73c2290b5339cf2a2314b0a61d392c", size = 55271, upload-time = "2026-09-09T03:35:11.703Z" },
-]
-
-[[package]]
-name = "types-aws-xray-sdk"
-version = "2.15.0.20260518"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d0/aa/6d5389c1e8c1495c74e3f37483ca950b57bee3c634e9c8b5df63e30ffde4/types_aws_xray_sdk-2.15.0.20260518.tar.gz", hash = "sha256:cab6bb8cf1169bd0cb4fb80e6ab4f04a4335268f087d3284e521cc0085209022", size = 24652, upload-time = "2026-05-18T06:03:42.413Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/30/36/bf8a742a68649888a962bde1c8830f819ada9d542704c1063f0a63c6e5af/types_aws_xray_sdk-2.15.0.20260518-py3-none-any.whl", hash = "sha256:919cb882fe4b65e3261838d05431ce60be6b245b76b30588aff940ee1a7ef492", size = 44813, upload-time = "2026-05-18T06:03:41.435Z" },
 ]
 
 [[package]]

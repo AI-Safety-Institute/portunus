@@ -16,7 +16,6 @@ from redis.exceptions import ConnectionError, MaxConnectionsError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
-from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -275,7 +274,6 @@ class StateService:
             finally:
                 self.redis_client = None
 
-    @capture_async()
     async def execute_redis[T](
         self,
         operation: Callable[[aioredis.Redis], Awaitable[T]],

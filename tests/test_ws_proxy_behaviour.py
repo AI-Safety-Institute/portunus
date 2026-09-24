@@ -28,7 +28,6 @@ from websockets.exceptions import ConnectionClosed
 
 # Add portunus to the path so conftest helpers import cleanly.
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "portunus"))
-os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
 from conftest import encode_base64  # noqa: E402

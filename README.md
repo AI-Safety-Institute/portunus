@@ -20,7 +20,8 @@ Supporting AWS services:
 - **Kinesis Firehose (direct-PUT)** for the audit pipeline.
 - **AWS Secrets Manager** for the real API keys.
 - **AWS KMS** for request signing (signing tenants only).
-- **AWS X-Ray** for distributed tracing.
+- **CloudWatch Logs** for the structured logs and the embedded (EMF) metrics
+  Portunus writes to stdout.
 
 ## Data flow
 
@@ -157,9 +158,17 @@ The same fixtures cover:
 
 Tests that need the Docker stack are tagged `@pytest.mark.slow`. CI runs both surfaces in `.github/workflows/test.yml`; the lint and type-check workflows skip the Docker-driven lane.
 
-### X-Ray and CloudWatch integration
+### CloudWatch integration
 
-For [X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) integration to work locally you need valid AWS credentials in your environment when you start the docker stack. See `docker-compose.yaml`.
+Portunus does not export traces. Per-request correlation rides on Envoy's
+`x-request-id` (and the inbound `x-amzn-trace-id`, when present), which appears
+on every structured log line and every Firehose audit record; aggregate
+behaviour comes from [CloudWatch embedded metrics
+(EMF)](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format.html)
+that Portunus aggregates in-process and flushes to stdout once per
+`METRICS_FLUSH_INTERVAL_SECONDS`. CloudWatch Logs extracts them with no agent
+and no metric filter. Set `METRICS_ENABLED=true` to turn them on (off by
+default, including in `docker-compose.yaml`, so local stdout stays readable).
 
 For [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) integration to work locally, uncomment the logging settings for the relevant services and provide credentials in `~/.aws/credentials` (default profile). See `docker-compose.yaml`.
 

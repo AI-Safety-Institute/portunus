@@ -11,12 +11,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   chunks, WebSocket frame records, and optional per-connection summaries.
 - Separate gRPC liveness and Redis-dependent readiness checks. Configure load
   balancers to probe Envoy's `/healthz`; `/ping` reports Envoy liveness only.
-- Periodic CloudWatch EMF metrics for authentication outcomes, audit queue
-  capacity, and publication failures.
+- Aggregated CloudWatch EMF metrics for authentication outcomes and latency,
+  auth-cache behaviour (in-process and Redis), full-authentication volume and
+  latency, audit queue capacity, Firehose throttling and failures, and
+  event-loop lag. Metrics are accumulated in process and flushed once per
+  `METRICS_FLUSH_INTERVAL_SECONDS`, never per request. Configure with
+  `METRICS_ENABLED` (default off), `METRICS_NAMESPACE`,
+  `METRICS_SERVICE_NAME` and `METRICS_FLUSH_INTERVAL_SECONDS`; dimensions are
+  `ServiceName` and `Role` only.
 - [An operator procedure for flushing the auth cache](docs/runbooks/flush-auth-cache.md).
 
 ### Changed
 
+- **Removed AWS X-Ray tracing**, in favour of the CloudWatch EMF metrics above.
+  The `aws-xray-sdk` dependency, the Envoy `envoy.tracers.xray` provider,
+  `proxy/xray.json` and the docker-compose X-Ray daemon are gone, along with
+  the `AWS_XRAY_*` and `XRAY_SAMPLING_RATE` environment variables and the
+  `GRPC_METRICS_INTERVAL_SECONDS` knob (now
+  `METRICS_FLUSH_INTERVAL_SECONDS`). Per-request correlation is unchanged:
+  `x-request-id` still joins the access log, the structured logs and the audit
+  records, and an inbound `x-amzn-trace-id` `Root=` id is still attached to
+  Portunus's log lines. Nothing emits spans any more, so trace-based latency
+  breakdowns must come from the access log's per-phase timings and the EMF
+  latency distributions instead.
 - The backend image uses a glibc-based Python runtime and native protobuf.
   The gRPC server uses uvloop on supported platforms; Redis uses hiredis.
 - gRPC publisher worker count, mixed-batch size and coalescing delay are
@@ -30,7 +47,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   SDK metadata for every batch.
 - gRPC authorization normalizes request headers once and builds fresh response
   protobufs in place, preserving the existing signing and audit metadata contract.
-- Configured-off tracing skips per-call SDK wrappers; enabled tracing is unchanged.
 - Envoy defaults to one worker instead of the host CPU count. Set
   `ENVOY_CONCURRENCY` to match its allocated CPU capacity.
 - The backend now runs the gRPC server. Set `GRPC_ENABLED=true`, and configure

@@ -21,6 +21,7 @@ import base64
 import hashlib
 import json
 import logging
+import time
 import uuid
 from typing import Any, Callable, Dict, Optional
 
@@ -46,19 +47,22 @@ from portunus.grpc.proxy_auth import (
 from portunus.grpc.proxy_auth import (
     extract_target_host as _extract_target_host,
 )
+from portunus.metrics import (
+    CHECK_ALLOWED,
+    CHECK_DENIED,
+    CHECK_ERROR,
+    CHECK_LATENCY,
+    CHECK_SHED,
+    metrics,
+)
 from portunus.models import AuthPayload
+from portunus.request_context import parse_trace_root, request_id_var, set_trace_id
 from portunus.services.auth_service import AuthService
 from portunus.services.signing_service import (
     SignableRequest,
     SignatureHeaders,
     SigningOverloadedError,
     sign_request_async,
-)
-from portunus.services.xray_service import (
-    XRayContext,
-    parse_trace_header,
-    request_id_var,
-    set_trace_id,
 )
 
 logger = logging.getLogger("api.access")
@@ -92,12 +96,27 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         """Handle an Envoy ext_authz Check call.
 
         Never raises — failures are reported as ``denied_response``.
+
+        Also the single place Check outcomes and latency are metered:
+        ``CheckShed`` (503) and ``CheckError`` (other 5xx) are subsets of
+        ``CheckDenied``, so allowed + denied still partitions every Check
+        while an overload stays distinguishable from a customer's bad
+        credentials.
         """
+        started = time.perf_counter()
         response = await self._check_inner(request, context)
+        metrics.observe(CHECK_LATENCY, (time.perf_counter() - started) * 1000)
         if response.HasField("denied_response"):
             self.check_denied_total += 1
+            metrics.incr(CHECK_DENIED)
+            status = response.denied_response.status.code
+            if status == 503:
+                metrics.incr(CHECK_SHED)
+            elif status >= 500:
+                metrics.incr(CHECK_ERROR)
         else:
             self.check_allowed_total += 1
+            metrics.incr(CHECK_ALLOWED)
         return response
 
     async def _check_inner(
@@ -124,27 +143,17 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             handler = self._auth_pass
 
         headers = _http_headers(request)
-        # Authenticated Envoy metadata carries the RPC parent and sampling
-        # decision, which may be absent from the original HTTP trace header.
+        # Authenticated Envoy metadata is preferred over the HTTP header: a
+        # client can forge the latter, and only the former is Envoy's own.
         trace_header = headers.get("x-amzn-trace-id", "")
         for key, value in context.invocation_metadata() or ():
             if key == "x-amzn-trace-id" and isinstance(value, str):
                 trace_header = value
                 break
-        trace_root, parent_id, sampled = parse_trace_header(trace_header)
-        if config.aws.xray_enabled and trace_root:
-            # Join the trace Envoy/ALB started so this Check (and the patched
-            # STS/SecretsManager/KMS calls under it) appear as a child of the
-            # customer request's trace.
-            async with XRayContext(
-                trace_root,
-                segment_name="portunus-ext-authz",
-                parent_id=parent_id,
-                sampled=sampled,
-            ):
-                return await handler(request, context, request_id, headers)
+        trace_root = parse_trace_root(trace_header)
         if trace_root:
-            # X-Ray disabled: still surface the trace id on log lines.
+            # Correlation only — surface the upstream trace id on every log
+            # line of this RPC.
             set_trace_id(trace_root)
         return await handler(request, context, request_id, headers)
 

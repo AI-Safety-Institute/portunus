@@ -17,8 +17,6 @@ portunus_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "portun
 if portunus_path not in sys.path:
     sys.path.append(portunus_path)
 
-# Disable X-Ray SDK for tests
-os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 
 # Set default region for tests (config validation requires it)
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")

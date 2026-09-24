@@ -10,7 +10,6 @@ import asyncio
 import base64
 import hashlib
 import json
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -34,9 +33,9 @@ from portunus.exceptions import (
     FetchSecretError,
     PayloadError,
 )
-from portunus.grpc import auth_servicer as auth_module
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.models import AuthResult, PrincipalInfo, SigningKey
+from portunus.request_context import trace_id_var
 from portunus.services import state_service as state_module
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
@@ -246,31 +245,27 @@ def _make_servicer(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rpc_sampled", [None, False, True])
+@pytest.mark.parametrize("rpc_trace", [None, "1-00000000-000000000000000000000002"])
 @pytest.mark.parametrize("valid_proxy", [False, True])
-async def test_envoy_trace_decision_precedes_http_header_after_proxy_auth(
-    monkeypatch, rpc_sampled, valid_proxy
+async def test_envoy_trace_id_precedes_http_header_after_proxy_auth(
+    monkeypatch, rpc_trace, valid_proxy
 ):
-    monkeypatch.setattr(portunus_config.aws, "xray_enabled", True)
+    """Trace correlation binds Envoy's own id, and only once the proxy key is good."""
     http_root = "1-00000000-000000000000000000000001"
-    rpc_root = "1-00000000-000000000000000000000002"
-    seen = []
+    seen: list[str | None] = []
 
-    @asynccontextmanager
-    async def trace_context(trace_root, **kwargs):
-        seen.append((trace_root, kwargs["parent_id"], kwargs["sampled"]))
-        yield
+    async def record_trace(request, context, request_id, headers):
+        seen.append(trace_id_var.get())
+        return await auth_pass(request, context, request_id, headers)
 
-    monkeypatch.setattr(auth_module, "XRayContext", trace_context)
     metadata = [("x-portunus-proxy-key", _PROXY_KEY if valid_proxy else "invalid")]
-    if rpc_sampled is not None:
+    if rpc_trace is not None:
         metadata.append(
-            (
-                "x-amzn-trace-id",
-                f"Root={rpc_root};Parent=0000000000000002;Sampled={int(rpc_sampled)}",
-            )
+            ("x-amzn-trace-id", f"Root={rpc_trace};Parent=0000000000000002;Sampled=1")
         )
     servicer, auth, _ = _make_servicer()
+    auth_pass = servicer._auth_pass
+    monkeypatch.setattr(servicer, "_auth_pass", record_trace)
     response = await servicer.Check(
         _check_request(
             extra_headers={"x-amzn-trace-id": f"Root={http_root};Sampled=1"}
@@ -280,12 +275,9 @@ async def test_envoy_trace_decision_precedes_http_header_after_proxy_auth(
     if valid_proxy:
         assert response.HasField("ok_response")
         assert len(auth.auth_calls) == 1
-        assert seen == (
-            [(http_root, None, True)]
-            if rpc_sampled is None
-            else [(rpc_root, "0000000000000002", rpc_sampled)]
-        )
+        assert seen == [http_root if rpc_trace is None else rpc_trace]
     else:
+        # Denied before the handler runs: nothing is bound, nothing authenticates.
         assert response.HasField("denied_response")
         assert not seen and not auth.auth_calls
 

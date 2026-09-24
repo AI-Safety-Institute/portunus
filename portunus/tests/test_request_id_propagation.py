@@ -20,12 +20,11 @@ from envoy.service.auth.v3 import attribute_context_pb2, external_auth_pb2
 from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
 
 import portunus.config as portunus_config
-import portunus.grpc.auth_servicer as auth_servicer_mod
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.grpc.proc_servicer import _extract_request_id as _proc_extract_request_id
+from portunus.request_context import request_id_var, trace_id_var
 from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
-from portunus.services.xray_service import request_id_var, trace_id_var
 
 _auth_extract_request_id = PortunusAuthServicer._extract_request_id
 
@@ -167,59 +166,35 @@ async def test_check_binds_request_id_contextvar(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_check_opens_xray_segment_from_envoy_trace_header(monkeypatch):
-    """With X-Ray enabled, Check joins the trace Envoy propagates."""
+async def test_check_prefers_the_envoy_rpc_trace_id_over_the_http_header(monkeypatch):
+    """Envoy's own gRPC metadata wins: the HTTP header is client-forgeable."""
     monkeypatch.setattr(portunus_config.config.grpc, "proxy_api_key", "")
-    monkeypatch.setattr(portunus_config.config.aws, "xray_enabled", True)
-    calls: list[dict] = []
-
-    class FakeXRayContext:
-        def __init__(self, trace_id, segment_name=None, parent_id=None, sampled=None):
-            calls.append(
-                dict(
-                    trace_id=trace_id,
-                    segment_name=segment_name,
-                    parent_id=parent_id,
-                    sampled=sampled,
-                )
-            )
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-    monkeypatch.setattr(auth_servicer_mod, "XRayContext", FakeXRayContext)
     servicer = _make_auth_servicer()
+    seen: dict[str, str | None] = {}
 
     async def fake_auth_pass(request, context, request_id, headers):
+        seen["trace"] = trace_id_var.get()
         return external_auth_pb2.CheckResponse()
 
+    class _MetadataContext:
+        def invocation_metadata(self):
+            return [("x-amzn-trace-id", "Root=1-envoy-root;Sampled=1")]
+
     monkeypatch.setattr(servicer, "_auth_pass", fake_auth_pass)
-    trace_header = (
-        "Root=1-6800aa2c-abcdef012345678912345678;Parent=53995c3f42cd8ad8;Sampled=1"
-    )
     result = await servicer.Check(
-        _auth_request_with_headers("req-ctx-2", {"x-amzn-trace-id": trace_header}),
-        _FakeGrpcContext(),
+        _auth_request_with_headers(
+            "req-ctx-2", {"x-amzn-trace-id": "Root=1-client-forged;Sampled=1"}
+        ),
+        _MetadataContext(),
     )
     assert not result.HasField("denied_response")
-    assert calls == [
-        dict(
-            trace_id="1-6800aa2c-abcdef012345678912345678",
-            segment_name="portunus-ext-authz",
-            parent_id="53995c3f42cd8ad8",
-            sampled=True,
-        )
-    ]
+    assert seen["trace"] == "1-envoy-root"
 
 
 @pytest.mark.asyncio
-async def test_check_sets_trace_id_var_even_with_xray_disabled(monkeypatch):
-    """X-Ray off must not lose the trace id from log lines."""
+async def test_check_binds_trace_id_from_the_http_trace_header(monkeypatch):
+    """With no Envoy metadata, the HTTP trace header still correlates logs."""
     monkeypatch.setattr(portunus_config.config.grpc, "proxy_api_key", "")
-    monkeypatch.setattr(portunus_config.config.aws, "xray_enabled", False)
     servicer = _make_auth_servicer()
     seen: dict[str, str | None] = {}
 

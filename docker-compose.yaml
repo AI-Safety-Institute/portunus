@@ -49,22 +49,6 @@ services:
       - "./scripts/localstack-init-firehose.sh:/etc/localstack/init/ready.d/01-init-firehose.sh"
       - "./scripts/localstack-init-async-analysis.sh:/etc/localstack/init/ready.d/02-init-async-analysis.sh"
 
-  xray-daemon:
-    image: amazon/aws-xray-daemon
-    container_name: xray-daemon
-    init: true
-    networks:
-      app_network:
-        ipv4_address: 172.20.0.10  # Fixed IP address for X-Ray daemon
-    ports:
-      - "2000:2000/udp"
-    environment:
-      AWS_REGION: 'eu-west-2'
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
-    command: -o
-
   proxy:
     build: proxy/
     init: true
@@ -93,14 +77,11 @@ services:
       WS_TARGET_HOST_TRANSPORT_SOCKET: "null"
       ENVOY_LOG_LEVEL: info
       PORTUNUS_API_KEY_OPTIONAL: "true"
-      AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
       # Uncomment the three env vars below to
       # enable rate-limiting
       # RATE_LIMIT_PERCENT_ENABLED: 100
       # RATE_LIMIT_INTERVAL_SECONDS: 2
       # RATE_LIMIT_REQUESTS_PER_INTERVAL: 1
-    depends_on:
-      - xray-daemon
 
   redis:
     image: redis:alpine
@@ -117,7 +98,6 @@ services:
     depends_on:
       - proxy
       - redis
-      - xray-daemon
     build: portunus/
     container_name: portunus
     init: true
@@ -126,8 +106,8 @@ services:
     # namespace means portunus can't publish its own ports — the proxy service
     # publishes on its behalf for the bridged health probe.
     network_mode: "service:proxy"
-    # To ship these logs to CloudWatch (so X-Ray can correlate them by trace
-    # id), uncomment below and put credentials in /root/.aws/credentials'
+    # To ship these logs (and the EMF metric lines) to CloudWatch,
+    # uncomment below and put credentials in /root/.aws/credentials'
     # default profile — env vars alone won't override an instance profile.
     #
     # logging:
@@ -146,9 +126,9 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: redis_secure_password
       CACHE_DURATION: 172800
-      AWS_XRAY_SDK_ENABLED: true
-      AWS_XRAY_DAEMON_ADDRESS: "172.20.0.10:2000"
-      AWS_XRAY_LOG_GROUP: /aws/portunus
+      # EMF metrics stay off locally: they would interleave with the
+      # structured logs for no benefit without a CloudWatch sink.
+      METRICS_ENABLED: "false"
       # Localstack endpoint. Unset to make real AWS requests
       AWS_ENDPOINT_URL: http://localstack:4566
       REDIS_USE_TLS: "false"
@@ -169,8 +149,6 @@ services:
       # connection-refused → 403.
       GRPC_ENABLED: "true"
       GRPC_PORT: "9000"
-      # Fast metrics ticks locally so the EMF lines are visible in short runs.
-      GRPC_METRICS_INTERVAL_SECONDS: "${GRPC_METRICS_INTERVAL_SECONDS:-10}"
       # Empty proxy_api_key disables the proxy-identity check (test-only; the
       # SC-namespace gate that motivates it in prod doesn't apply on the bridge).
       # GRPC_PROXY_API_KEY_OPTIONAL=true acknowledges this; without it the
