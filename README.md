@@ -227,7 +227,7 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
 1. Verifies the caller with STS and fetches the secret, as for stored keys.
 2. Checks `federation_role_arn` is `arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><name>` with `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS`; `<name>` is any further IAM path plus the role name. Nothing else is called if this fails.
 3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`, tagged with the user (`FEDERATION_USER_TAG_KEY`: the caller's STS source identity if its session carries one, else its IAM role name), the caller's IAM role name (`FEDERATION_PRINCIPAL_TAG_KEY`), its role session name (`FEDERATION_SESSION_TAG_KEY`) and its project (`FEDERATION_PROJECT_TAG_KEY`). A service acting for a user sets `SourceIdentity` when assuming its own role, so the user tag names that user while the principal tag names the service's role and the session tag its acting session.
-4. Exchanges the token at `https://<host>/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
+4. Exchanges the token at `https://api.anthropic.com/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
 If STS or the token endpoint cannot be reached or answers 5xx/429, or steps 3–4 take longer than 6 s, `/authorise` returns 503 rather than 403.
 
