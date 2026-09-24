@@ -48,6 +48,34 @@ class RedisConfig(BaseModel):
     )
 
 
+class AuthCacheConfig(BaseModel):
+    """In-process (L1) auth-result cache and full-auth fallback limits.
+
+    The L1 cache sits in front of Redis. A revocation (secret rotation, cache
+    flush) takes up to ``local_ttl_seconds`` to reach every task, plus
+    ``local_stale_seconds`` while Redis is unreachable — never past the
+    credential expiry.
+    """
+
+    local_ttl_seconds: float = Field(
+        default=30.0,
+        description="Seconds an auth result is served from process memory "
+        "without consulting Redis (0 disables the L1 cache)",
+        ge=0,
+    )
+    local_stale_seconds: float = Field(
+        default=300.0,
+        description="Seconds past the L1 TTL an entry may still be served "
+        "when the Redis refresh fails",
+        ge=0,
+    )
+    local_max_entries: int = Field(
+        default=10000,
+        description="LRU bound on the L1 cache",
+        ge=0,
+    )
+
+
 class FirehoseConfig(BaseModel):
     """Per-component Firehose delivery stream names for log record publishing.
 
@@ -391,6 +419,10 @@ class PortunusConfig(BaseModel):
         default_factory=SigningConfig,
         description="KMS signing throughput / concurrency bounds",
     )
+    auth_cache: AuthCacheConfig = Field(
+        default_factory=AuthCacheConfig,
+        description="In-process auth cache and full-auth fallback limits",
+    )
     log_level: str = Field(
         default="INFO",
         description="Logging level",
@@ -549,6 +581,14 @@ def get_config() -> PortunusConfig:
         kms_max_attempts=int(os.environ.get("SIGNING_KMS_MAX_ATTEMPTS", "2")),
     )
 
+    auth_cache = AuthCacheConfig(
+        local_ttl_seconds=float(os.environ.get("AUTH_LOCAL_CACHE_TTL_SECONDS", "30")),
+        local_stale_seconds=float(
+            os.environ.get("AUTH_LOCAL_CACHE_STALE_SECONDS", "300")
+        ),
+        local_max_entries=int(os.environ.get("AUTH_LOCAL_CACHE_MAX_ENTRIES", "10000")),
+    )
+
     return PortunusConfig(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
@@ -559,6 +599,7 @@ def get_config() -> PortunusConfig:
         firehose=firehose,
         grpc=grpc,
         signing=signing,
+        auth_cache=auth_cache,
     )
 
 

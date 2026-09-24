@@ -38,6 +38,28 @@ def normalise_target_host(host: Optional[str]) -> Optional[str]:
     return normalised
 
 
+def auth_cache_key(payload: str, target_host: Optional[str] = None) -> str:
+    """Hash payload + target_host into a Redis-safe cache key.
+
+    ``target_host`` MUST be included: without it, a bearer authorised for
+    provider A could reuse a cached api_key through a proxy fronting
+    provider B, bypassing the host restriction
+    ``validate_and_extract_api_key`` enforces on miss.
+
+    The two components are hashed independently (not joined with a
+    delimiter) so no (host, payload) pair can collide by shifting bytes
+    across a separator — e.g. ``("a:b","c")`` vs ``("a","b:c")``. Host is
+    normalised as in the miss-path check, keeping key and recheck
+    consistent.
+    """
+    host_component = normalise_target_host(target_host) or ""
+    composite = (
+        hashlib.sha256(host_component.encode("utf-8")).digest()
+        + hashlib.sha256(payload.encode("utf-8")).digest()
+    )
+    return hashlib.sha256(composite).hexdigest()
+
+
 class CacheService:
     """Caches and retrieves authentication responses in Redis.
 
@@ -54,25 +76,8 @@ class CacheService:
     def generate_cache_key(
         self, payload: str, target_host: Optional[str] = None
     ) -> str:
-        """Hash payload + target_host into a Redis-safe cache key.
-
-        ``target_host`` MUST be included: without it, a bearer authorised for
-        provider A could reuse a cached api_key through a proxy fronting
-        provider B, bypassing the host restriction
-        ``validate_and_extract_api_key`` enforces on miss.
-
-        The two components are hashed independently (not joined with a
-        delimiter) so no (host, payload) pair can collide by shifting bytes
-        across a separator — e.g. ``("a:b","c")`` vs ``("a","b:c")``. Host is
-        normalised as in the miss-path check, keeping key and recheck
-        consistent.
-        """
-        host_component = normalise_target_host(target_host) or ""
-        composite = (
-            hashlib.sha256(host_component.encode("utf-8")).digest()
-            + hashlib.sha256(payload.encode("utf-8")).digest()
-        )
-        return hashlib.sha256(composite).hexdigest()
+        """Redis-safe key for (payload, target_host); see :func:`auth_cache_key`."""
+        return auth_cache_key(payload, target_host)
 
     async def get_cached_auth_result(
         self, payload: str, target_host: Optional[str] = None

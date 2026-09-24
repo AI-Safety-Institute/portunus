@@ -216,3 +216,139 @@ class TestAuthenticateCacheRead:
 
         secrets_service.boto_session.create_client.assert_not_called()
         secrets_service.fetch_secret.assert_not_called()
+
+
+class TestLocalAuthCache:
+    """The in-process L1 tier in front of Redis."""
+
+    @staticmethod
+    def _service(clock):
+        from portunus.services.local_auth_cache import LocalAuthCache
+
+        secrets_service = MagicMock()
+        secrets_service.boto_session = MagicMock()
+        secrets_service.fetch_secret = AsyncMock(return_value="sk-live")
+        cache_service = MagicMock()
+        cache_service.get_cached_auth_result = AsyncMock(return_value=None)
+        cache_service.cache_auth_result = AsyncMock(return_value=True)
+        service = AuthService(
+            secrets_service=secrets_service,
+            cache_service=cache_service,
+            local_cache=LocalAuthCache(
+                ttl_seconds=30, stale_seconds=300, max_entries=100, clock=clock
+            ),
+        )
+        install_sts_client(service)
+        return service
+
+    @pytest.fixture
+    def clock(self):
+        class Clock:
+            now = 1000.0
+
+            def __call__(self):
+                return self.now
+
+        return Clock()
+
+    @pytest.mark.asyncio
+    async def test_second_request_served_from_memory(self, clock, payload):
+        service = self._service(clock)
+        first = await service.authenticate(payload, "r1", "api.openai.com")
+        second = await service.authenticate(payload, "r2", "api.openai.com")
+        assert first == second
+        assert service.cache_service.get_cached_auth_result.await_count == 1
+        assert service.secrets_service.fetch_secret.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_redis_hit_populates_memory(self, clock, payload):
+        service = self._service(clock)
+        cached = AuthResult(
+            api_key="sk-cached", signing_key=None, principal_info=PrincipalInfo()
+        )
+        service.cache_service.get_cached_auth_result.return_value = cached
+        await service.authenticate(payload, "r1", "api.openai.com")
+        result = await service.authenticate(payload, "r2", "api.openai.com")
+        assert result.api_key == "sk-cached"
+        assert service.cache_service.get_cached_auth_result.await_count == 1
+        service.secrets_service.fetch_secret.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_target_host_is_part_of_memory_key(self, clock, payload):
+        service = self._service(clock)
+        await service.authenticate(payload, "r1", "api.openai.com")
+        await service.authenticate(payload, "r2", "api.anthropic.com")
+        assert service.cache_service.get_cached_auth_result.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_refreshes_from_redis_after_ttl(self, clock, payload):
+        service = self._service(clock)
+        await service.authenticate(payload, "r1", "h")
+        clock.now += 31
+        await service.authenticate(payload, "r2", "h")
+        assert service.cache_service.get_cached_auth_result.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_redis_timeout_serves_stale_entry(self, clock, payload):
+        service = self._service(clock)
+        first = await service.authenticate(payload, "r1", "h")
+        clock.now += 60
+        service.cache_service.get_cached_auth_result.side_effect = (
+            redis.exceptions.TimeoutError()
+        )
+        assert await service.authenticate(payload, "r2", "h") == first
+        assert service.secrets_service.fetch_secret.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_redis_error_serves_stale_without_sts(self, clock, payload):
+        service = self._service(clock)
+        first = await service.authenticate(payload, "r1", "h")
+        clock.now += 60
+        service.cache_service.get_cached_auth_result.side_effect = (
+            redis.exceptions.ConnectionError()
+        )
+        assert await service.authenticate(payload, "r2", "h") == first
+        assert service.secrets_service.fetch_secret.await_count == 1
+        assert service.boto_session.create_client.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_redis_timeout_without_stale_entry_rejects(self, clock, payload):
+        service = self._service(clock)
+        service.cache_service.get_cached_auth_result.side_effect = (
+            redis.exceptions.TimeoutError()
+        )
+        with pytest.raises(TimeoutError):
+            await service.authenticate(payload, "r1", "h")
+        service.secrets_service.fetch_secret.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cold_requests_share_one_redis_read(self, clock, payload):
+        import asyncio
+
+        service = self._service(clock)
+        release = asyncio.Event()
+
+        async def slow_get(*_args):
+            await release.wait()
+            return None
+
+        service.cache_service.get_cached_auth_result.side_effect = slow_get
+        tasks = [
+            asyncio.create_task(service.authenticate(payload, f"r{i}", "h"))
+            for i in range(20)
+        ]
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.gather(*tasks)
+        assert len({r.api_key for r in results}) == 1
+        assert service.cache_service.get_cached_auth_result.await_count == 1
+        assert service.secrets_service.fetch_secret.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failures_not_cached(self, clock, payload):
+        service = self._service(clock)
+        service.secrets_service.fetch_secret.side_effect = CredentialsError("nope")
+        for _ in range(2):
+            with pytest.raises(CredentialsError):
+                await service.authenticate(payload, "r", "h")
+        assert service.secrets_service.fetch_secret.await_count == 2
