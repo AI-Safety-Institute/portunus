@@ -46,6 +46,18 @@ class RedisConfig(BaseModel):
         default=True,
         description="Whether to use TLS for Redis connections",
     )
+    pool_timeout_seconds: float = Field(
+        default=1.0,
+        description="How long a command waits for a free pooled connection "
+        "before failing (the pool blocks rather than erroring at the cap)",
+        gt=0,
+    )
+    health_check_interval_seconds: int = Field(
+        default=30,
+        description="PING a pooled connection before use if it has been idle "
+        "this long (0 disables)",
+        ge=0,
+    )
 
 
 class AuthCacheConfig(BaseModel):
@@ -489,6 +501,10 @@ def get_config() -> PortunusConfig:
         log_ttl=int(os.environ.get("LOG_TTL", "3600")),
         max_connections=int(os.environ.get("REDIS_MAX_CONNECTIONS", "200")),
         use_tls=os.environ.get("REDIS_USE_TLS", "true").lower() == "true",
+        pool_timeout_seconds=float(os.environ.get("REDIS_POOL_TIMEOUT_SECONDS", "1.0")),
+        health_check_interval_seconds=int(
+            os.environ.get("REDIS_HEALTH_CHECK_INTERVAL_SECONDS", "30")
+        ),
     )
 
     aws = AwsConfig(

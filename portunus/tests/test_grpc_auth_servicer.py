@@ -1157,7 +1157,9 @@ async def test_cache_timeout_denies_each_pass_without_calling_aws(
         state.redis_client = TimedOutRedis()  # type: ignore[assignment]
     else:
         monkeypatch.setattr(
-            state_module.aioredis, "Redis", lambda **kw: TimedOutRedis()
+            state_module.aioredis.Redis,
+            "from_pool",
+            staticmethod(lambda _pool: TimedOutRedis()),
         )
     signer = FakeSignRequest()
     servicer = PortunusAuthServicer(
