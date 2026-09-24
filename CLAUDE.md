@@ -65,6 +65,7 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 | `CACHE_DURATION` | Auth-cache TTL | seconds |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_MAX_CONNECTIONS` | Redis connection | |
 | `AUTH_LOCAL_CACHE_TTL_SECONDS` / `AUTH_LOCAL_CACHE_STALE_SECONDS` / `AUTH_LOCAL_CACHE_MAX_ENTRIES` | In-process (L1) auth cache in front of Redis: TTL, stale-on-Redis-failure window, LRU bound | defaults `30` / `300` / `10000`; TTL `0` disables. Revocation takes up to the TTL per task (plus the stale window during a Redis outage), never past credential expiry |
+| `AUTH_FALLBACK_MAX_CONCURRENT` / `AUTH_FALLBACK_ACQUIRE_TIMEOUT_S` | Cap on concurrent full authentications (STS + Secrets Manager) per process; requests that can't get a slot within the timeout are shed with 503 | defaults `32` / `1.0`. Stops a Redis outage turning into an STS/Secrets Manager stampede |
 | `FIREHOSE_*_STREAM` | Per-record-type Firehose delivery streams (metadata, request/response headers/body/trailers, ws summary) | direct-PUT |
 | `RATE_LIMIT_PERCENT_ENABLED` / `RATE_LIMIT_INTERVAL_SECONDS` / `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Optional rate limiting | `0` disables |
 

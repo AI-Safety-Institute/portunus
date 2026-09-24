@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from portunus.config import config
 from portunus.exceptions import (
     AuthenticationError,
+    AuthOverloadedError,
     CredentialsError,
     FetchSecretError,
     PayloadError,
@@ -225,6 +226,8 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             return _denied(
                 code=e.http_status_code, body=e.message, request_id=request_id
             )
+        except AuthOverloadedError as e:
+            return _denied(code=503, body=e.message, request_id=request_id)
         except Exception as e:
             # Log type name only — boto / pydantic / wsproto messages can carry
             # payload bytes.
@@ -346,6 +349,8 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             return _denied(
                 code=e.http_status_code, body=e.message, request_id=request_id
             )
+        except AuthOverloadedError as e:
+            return _denied(code=503, body=e.message, request_id=request_id)
         except SigningOverloadedError:
             # Concurrency cap saturated past the acquire timeout — shed (503)
             # rather than pile up buffered bodies.

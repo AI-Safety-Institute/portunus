@@ -352,3 +352,59 @@ class TestLocalAuthCache:
             with pytest.raises(CredentialsError):
                 await service.authenticate(payload, "r", "h")
         assert service.secrets_service.fetch_secret.await_count == 2
+
+
+class TestBoundedFallback:
+    """Full authentication (STS + Secrets Manager) runs under a cap."""
+
+    @pytest.mark.asyncio
+    async def test_sheds_when_fallback_slots_exhausted(
+        self, auth_service, valid_credentials, monkeypatch
+    ):
+        import asyncio
+
+        from portunus.exceptions import AuthOverloadedError
+
+        auth_service._fallback_slots = asyncio.Semaphore(1)
+        auth_service._fallback_acquire_timeout_s = 0.05
+        install_sts_client(auth_service)
+        release = asyncio.Event()
+
+        async def slow_fetch(_payload):
+            await release.wait()
+            return "sk-live"
+
+        auth_service.secrets_service.fetch_secret = AsyncMock(side_effect=slow_fetch)
+
+        def make_payload(raw):
+            return AuthPayload(
+                raw=raw,
+                credentials=valid_credentials,
+                secret_arn="arn:aws:secretsmanager:eu-west-2:1:secret:x",
+            )
+
+        first = asyncio.create_task(
+            auth_service.authenticate(make_payload("a"), "r1", "h")
+        )
+        await asyncio.sleep(0.01)
+        with pytest.raises(AuthOverloadedError):
+            await auth_service.authenticate(make_payload("b"), "r2", "h")
+        release.set()
+        assert (await first).api_key == "sk-live"
+        # Slot released: the next distinct key authenticates normally.
+        result = await auth_service.authenticate(make_payload("c"), "r3", "h")
+        assert result.api_key == "sk-live"
+
+    @pytest.mark.asyncio
+    async def test_slot_released_on_failure(self, auth_service, payload):
+        import asyncio
+
+        auth_service._fallback_slots = asyncio.Semaphore(1)
+        auth_service.secrets_service.fetch_secret = AsyncMock(
+            side_effect=CredentialsError("nope")
+        )
+        install_sts_client(auth_service)
+        for _ in range(3):
+            with pytest.raises(CredentialsError):
+                await auth_service.authenticate(payload, "r", "h")
+        assert not auth_service._fallback_slots.locked()

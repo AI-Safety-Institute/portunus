@@ -75,6 +75,13 @@ class FetchSecretError(ServiceError):
     message: str
 
 
+class AuthOverloadedError(ServiceError):
+    """Full-authentication capacity (STS + Secrets Manager) is saturated."""
+
+    def __init__(self, message: str = "Authentication capacity exhausted"):
+        super().__init__(message)
+
+
 class ConfigurationError(ServiceError):
     """Exception raised when there's an error in the configuration."""
 

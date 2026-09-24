@@ -1302,3 +1302,30 @@ async def test_allow_responses_preserve_identity_and_header_policy_over_grpc(
             key_header.lower() != "authorization" and mode != "signing-auth"
         )
         assert ("x-portunus-signing-required" in removed) == (mode == "unsigned")
+
+
+@pytest.mark.asyncio
+async def test_auth_pass_sheds_with_503_when_full_auth_capacity_exhausted():
+    from portunus.exceptions import AuthOverloadedError
+
+    servicer, _auth, _sign = _make_servicer(
+        auth=FakeAuthService(raises=AuthOverloadedError())
+    )
+
+    response = await servicer.Check(_check_request(), _ctx_with_key())
+
+    assert response.denied_response.status.code == 503
+    assert "capacity" in response.denied_response.body.lower()
+
+
+@pytest.mark.asyncio
+async def test_signing_pass_sheds_with_503_when_full_auth_capacity_exhausted():
+    from portunus.exceptions import AuthOverloadedError
+
+    servicer, _auth, _sign = _make_servicer(
+        auth=FakeAuthService(raises=AuthOverloadedError())
+    )
+
+    response = await servicer.Check(_check_request(body=b"{}"), _signing_ctx())
+
+    assert response.denied_response.status.code == 503

@@ -16,6 +16,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from portunus.config import config
 from portunus.exceptions import (
     AuthenticationError,
+    AuthOverloadedError,
     CredentialsError,
     PayloadError,
 )
@@ -115,6 +116,10 @@ class AuthService:
                 max_entries=config.auth_cache.local_max_entries,
             )
         self.local_cache = local_cache
+        self._fallback_slots = asyncio.Semaphore(
+            config.auth_cache.fallback_max_concurrent
+        )
+        self._fallback_acquire_timeout_s = config.auth_cache.fallback_acquire_timeout_s
         self.cache_service = cache_service or CacheService()
         if secrets_service is None:
             state_service = getattr(self.cache_service, "state_service", None)
@@ -295,9 +300,34 @@ class AuthService:
                     return stale
                 logger.error("Cache read error during auth: %s", type(e).__name__)
 
-        auth_result = await self._full_authenticate(payload, target_host)
+        auth_result = await self._bounded_full_authenticate(
+            payload, request_id, target_host
+        )
         self._remember(key, auth_result, payload)
         return auth_result
+
+    async def _bounded_full_authenticate(
+        self, payload: AuthPayload, request_id: str, target_host: Optional[str]
+    ) -> AuthResult:
+        """Run full authentication under the per-process concurrency cap.
+
+        When Redis wobbles every miss lands here; unbounded, that is one STS
+        and one Secrets Manager call per distinct key per task at once, which
+        is what throttled STS and turned a Redis blip into a 403 storm. Past
+        the cap requests are shed with :class:`AuthOverloadedError` (503).
+        """
+        try:
+            async with asyncio.timeout(self._fallback_acquire_timeout_s):
+                await self._fallback_slots.acquire()
+        except TimeoutError:
+            logger.warning(
+                "Full-auth capacity exhausted; shedding (request_id=%s)", request_id
+            )
+            raise AuthOverloadedError() from None
+        try:
+            return await self._full_authenticate(payload, target_host)
+        finally:
+            self._fallback_slots.release()
 
     def _remember(
         self, key: Optional[str], result: AuthResult, payload: AuthPayload

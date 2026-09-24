@@ -74,6 +74,17 @@ class AuthCacheConfig(BaseModel):
         description="LRU bound on the L1 cache",
         ge=0,
     )
+    fallback_max_concurrent: int = Field(
+        default=32,
+        description="Max concurrent full authentications (STS + Secrets "
+        "Manager) per process; bounds the stampede when Redis misbehaves",
+        ge=1,
+    )
+    fallback_acquire_timeout_s: float = Field(
+        default=1.0,
+        description="Seconds to wait for a full-auth slot before shedding (503)",
+        gt=0,
+    )
 
 
 class FirehoseConfig(BaseModel):
@@ -587,6 +598,12 @@ def get_config() -> PortunusConfig:
             os.environ.get("AUTH_LOCAL_CACHE_STALE_SECONDS", "300")
         ),
         local_max_entries=int(os.environ.get("AUTH_LOCAL_CACHE_MAX_ENTRIES", "10000")),
+        fallback_max_concurrent=int(
+            os.environ.get("AUTH_FALLBACK_MAX_CONCURRENT", "32")
+        ),
+        fallback_acquire_timeout_s=float(
+            os.environ.get("AUTH_FALLBACK_ACQUIRE_TIMEOUT_S", "1.0")
+        ),
     )
 
     return PortunusConfig(
