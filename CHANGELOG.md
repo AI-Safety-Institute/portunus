@@ -60,7 +60,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   this change misses once after deploy.
 - JSON secrets that carry a `type` are validated strictly against that type
   and rejected on failure. JSON without a `type` keeps the previous
-  behaviour (stored key, or used verbatim when it matches no schema).
+  behaviour (stored key, or used verbatim when it matches no schema), except
+  an object with a `federation_role_arn`, which is rejected as a mint secret
+  missing its `type`.
 - The proxy removes the header the auth payload arrived in (`API_KEY_HEADER`)
   from the upstream request and sets the header the credential is written to
   (`output_header`, else `API_KEY_HEADER`); when both name the same header this

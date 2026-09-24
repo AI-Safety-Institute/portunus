@@ -50,6 +50,34 @@ class TestParseSecret:
         assert isinstance(secret, SecretsManagerAuthPayload)
         assert secret.api_key == raw
 
+    def test_json_with_api_key_field_and_no_type(self):
+        secret = parse_secret(json.dumps({"api_key": "sk-by-name"}))
+
+        assert isinstance(secret, SecretsManagerAuthPayload)
+        assert secret.api_key == "sk-by-name"
+        assert secret.host is None
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {k: v for k, v in WIF_SECRET.items() if k != "type"},
+            {"federation_role_arn": ROLE_ARN},
+            {"federation_role_arn": ROLE_ARN, "secret": "sk-also-present"},
+        ],
+    )
+    def test_typeless_secret_naming_a_federation_role_is_rejected(
+        self, data: dict, caplog
+    ):
+        caplog.set_level(logging.INFO, logger="api.access")
+
+        with pytest.raises(
+            AuthenticationError, match="federation role but has no type"
+        ):
+            parse_secret(json.dumps(data))
+
+        assert ROLE_ARN not in caplog.text
+        assert "sk-also-present" not in caplog.text
+
     def test_explicit_static_type(self):
         secret = parse_secret('{"type": "static", "secret": "sk-typed"}')
 
