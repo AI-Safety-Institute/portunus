@@ -33,8 +33,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `portunus:principal`, `portunus:session`, `portunus:project`).
   `FEDERATION_STS_ENDPOINT_URL` is also new. Mint secrets reject unknown
   fields. Minted results are cached until the earlier of `CACHE_DURATION` and
-  one minute before the token expires; concurrent misses for one payload share
-  a mint per process.
+  one minute before the token expires; concurrent misses for one payload and
+  target share a mint per process.
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or the
   provider's token endpoint cannot be reached or answers 5xx/429, or when
   minting exceeds its 6 s deadline.
@@ -54,6 +54,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (#136)
 
 ### Changed
+- Cached authorization results are keyed by the payload and the proxy's
+  target host, not the payload alone, so a result cached through one proxy is
+  not a hit for a proxy with a different upstream. Every entry cached before
+  this change misses once after deploy.
 - JSON secrets that carry a `type` are validated strictly against that type
   and rejected on failure. JSON without a `type` keeps the previous
   behaviour (stored key, or used verbatim when it matches no schema).
