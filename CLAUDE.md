@@ -28,7 +28,7 @@ This repo implements a secure API key proxy system with two main components:
    - Makes a synchronous call to `/authorise` endpoint
    - Passes the extracted payload in the request body: `{"authorization": "<payload>"}`
 3. Portunus (`app.py` → `services.auth_service` → `AuthService.get_api_key_from_payload`):
-   - Checks Redis cache first (keyed by SHA-256 of payload)
+   - Checks Redis cache first (keyed by SHA-256 of the payload and the target host)
    - If cached, returns stored API key immediately (faster responses)
    - If not cached, proceeds with full authentication:
    - Takes the raw payload (already without the Bearer prefix)
@@ -36,7 +36,7 @@ This repo implements a secure API key proxy system with two main components:
    - Extracts AWS credentials and secret ARN
    - Creates AWS session with provided credentials
    - Retrieves the secret from AWS Secrets Manager and parses it (`services.secret_validation_service.parse_secret`): plaintext or `{"secret", "host"}` is a stored key; `{"type": "anthropic_wif", ...}` describes a token to mint
-   - For mint secrets, `services.federation_service.TokenMintService` checks the federation role ARN is in `FEDERATION_ALLOWED_ACCOUNT_IDS` and under `FEDERATION_ROLE_PATH_PREFIX` (any path depth), assumes exactly that role with the caller's credentials (regional STS endpoint), issues an STS web identity token from that session, and exchanges it at `https://api.anthropic.com/v1/oauth/token`; the result carries `output_header="authorization"`, `output_prefix="Bearer "`. Concurrent misses for one payload share a mint per process. STS or provider unavailability, or a missed 6 s mint deadline, raises `UpstreamServiceError` (503)
+   - For mint secrets, `services.federation_service.TokenMintService` checks the federation role ARN is in `FEDERATION_ALLOWED_ACCOUNT_IDS` and under `FEDERATION_ROLE_PATH_PREFIX` (any path depth), assumes exactly that role with the caller's credentials (regional STS endpoint), issues an STS web identity token from that session, and exchanges it at `https://api.anthropic.com/v1/oauth/token`; the result carries `output_header="authorization"`, `output_prefix="Bearer "`. Concurrent misses for one payload and target share a mint per process. STS or provider unavailability, or a missed 6 s mint deadline, raises `UpstreamServiceError` (503)
    - Caches the result: stored keys for `CACHE_DURATION`; minted tokens for min(`CACHE_DURATION`, token expiry - 1 min)
    - Publishes metadata (principal info) to Kinesis Data Streams for audit trail
    - Returns formatted API key with principal info

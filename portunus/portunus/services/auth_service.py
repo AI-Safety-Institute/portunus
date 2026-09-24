@@ -73,8 +73,9 @@ class AuthService:
             boto_session=self.boto_session
         )
         # Per-process single flight for minting: concurrent cache misses on
-        # one payload wait for a single mint instead of each calling STS and
-        # the provider. A lock is dropped once no coroutine holds it.
+        # one payload and target wait for a single mint instead of each
+        # calling STS and the provider. A lock is dropped once no coroutine
+        # holds it.
         self._mint_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
@@ -142,16 +143,18 @@ class AuthService:
         """
         Authenticate a request using the provided payload.
 
-        Checks the Redis cache first (keyed by the raw payload). On a miss it
-        verifies the caller with STS, fetches and parses the secret, and either
-        returns the stored key or mints a short-lived token as the secret
-        describes. Stored keys are cached for the configured cache duration;
-        minted tokens for no longer than the token remains valid.
+        Checks the Redis cache first (keyed by the raw payload and the target
+        host). On a miss it verifies the caller with STS, fetches and parses
+        the secret, and either returns the stored key or mints a short-lived
+        token as the secret describes. Stored keys are cached for the
+        configured cache duration; minted tokens for no longer than the token
+        remains valid.
 
         Args:
             payload: The parsed base64-encoded payload from authorization header
             request_id: The unique request ID for logging and correlation
-            target_host: Optional target host from the proxy for validation
+            target_host: Optional target host from the proxy; part of the cache
+                key and checked against the secret's host restriction
 
         Returns:
             AuthResult containing:
@@ -168,7 +171,7 @@ class AuthService:
             TimeoutError: If the cache read times out; the request is rejected
                 rather than falling back to STS and Secrets Manager
         """
-        cached_result = await self._read_cache(payload)
+        cached_result = await self._read_cache(payload, target_host)
         if cached_result:
             return cached_result
 
@@ -184,13 +187,13 @@ class AuthService:
 
             if isinstance(secret, MintSecretBase):
                 return await self._authenticate_with_minted_token(
-                    payload, principal_info, secret
+                    payload, target_host, principal_info, secret
                 )
 
             auth_result = AuthResult(
                 api_key=secret.api_key, principal_info=principal_info
             )
-            await self._write_cache(payload, auth_result)
+            await self._write_cache(payload, target_host, auth_result)
             return auth_result
         except (PayloadError, CredentialsError, ServiceError, TimeoutError):
             raise
@@ -201,13 +204,14 @@ class AuthService:
     async def _authenticate_with_minted_token(
         self,
         payload: AuthPayload,
+        target_host: Optional[str],
         principal_info: PrincipalInfo,
         secret: MintSecretBase,
     ) -> AuthResult:
-        async with self._mint_lock(payload):
-            # A concurrent request for the same payload may have minted and
-            # cached a token while this one waited for the lock.
-            cached_result = await self._read_cache(payload)
+        async with self._mint_lock(payload, target_host):
+            # A concurrent request for the same payload and target may have
+            # minted and cached a token while this one waited for the lock.
+            cached_result = await self._read_cache(payload, target_host)
             if cached_result:
                 return cached_result
 
@@ -221,18 +225,22 @@ class AuthService:
                 output_prefix=MINTED_TOKEN_PREFIX,
                 expires_at=minted.expires_at,
             )
-            await self._write_cache(payload, auth_result)
+            await self._write_cache(payload, target_host, auth_result)
             return auth_result
 
-    def _mint_lock(self, payload: AuthPayload) -> asyncio.Lock:
-        key = self.cache_service.generate_cache_key(payload.raw)
+    def _mint_lock(
+        self, payload: AuthPayload, target_host: Optional[str]
+    ) -> asyncio.Lock:
+        key = self.cache_service.generate_cache_key(payload.raw, target_host)
         lock = self._mint_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
             self._mint_locks[key] = lock
         return lock
 
-    async def _read_cache(self, payload: AuthPayload) -> Optional[AuthResult]:
+    async def _read_cache(
+        self, payload: AuthPayload, target_host: Optional[str]
+    ) -> Optional[AuthResult]:
         """Best-effort cache lookup.
 
         Errors are logged and treated as a miss, except a timeout, which is
@@ -243,7 +251,9 @@ class AuthService:
             return None
         try:
             async with asyncio.timeout(5):
-                return await self.cache_service.get_cached_auth_result(payload.raw)
+                return await self.cache_service.get_cached_auth_result(
+                    payload.raw, target_host
+                )
         except (TimeoutError, RedisTimeoutError) as e:
             logger.warning(
                 f"Cache read timed out during auth ({type(e).__name__}); rejecting "
@@ -254,7 +264,12 @@ class AuthService:
             logger.error(f"Cache read error during auth: {type(e).__name__}: {e}")
             return None
 
-    async def _write_cache(self, payload: AuthPayload, auth_result: AuthResult) -> None:
+    async def _write_cache(
+        self,
+        payload: AuthPayload,
+        target_host: Optional[str],
+        auth_result: AuthResult,
+    ) -> None:
         """Best-effort cache write."""
         if not (payload.raw and auth_result.successful):
             return
@@ -268,7 +283,7 @@ class AuthService:
                         token_expires_at=auth_result.expires_at,
                     )
                 await self.cache_service.cache_auth_result(
-                    payload.raw, auth_result, ttl
+                    payload.raw, target_host, auth_result, ttl
                 )
         except Exception as e:
             logger.error(f"Cache write error during auth: {e}")
