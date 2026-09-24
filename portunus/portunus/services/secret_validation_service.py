@@ -40,12 +40,14 @@ def parse_secret(secret_string: str) -> SecretsManagerSecret:
 
     Plaintext, non-object JSON, and JSON objects without a ``type`` that do not
     match the static schema are used verbatim as the API key, as they always
-    have been. A JSON object with a ``type`` must validate as that type: a
-    misconfigured mint secret raises rather than being forwarded upstream as a
-    credential.
+    have been. The exception is a typeless object with a
+    ``federation_role_arn``: that is a mint secret missing its ``type`` and
+    raises rather than being forwarded upstream as a credential. A JSON object
+    with a ``type`` must validate as that type, for the same reason.
 
     Raises:
-        AuthenticationError: ``type`` is unknown or its fields are invalid.
+        AuthenticationError: ``type`` is unknown or its fields are invalid, or
+            the object names a federation role without a ``type``.
     """
     try:
         data = json.loads(secret_string)
@@ -54,6 +56,11 @@ def parse_secret(secret_string: str) -> SecretsManagerSecret:
         return SecretsManagerAuthPayload(api_key=secret_string)
 
     if not isinstance(data, dict) or "type" not in data:
+        # federation_role_arn is the field every mint secret type shares
+        # (MintSecretBase); without a type it would be used as the API key.
+        if isinstance(data, dict) and "federation_role_arn" in data:
+            logger.error("Secret names a federation role but has no type")
+            raise AuthenticationError("Secret names a federation role but has no type")
         try:
             return SecretsManagerAuthPayload.model_validate(data)
         except ValidationError as e:
