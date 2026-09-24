@@ -20,7 +20,7 @@ Portunus settings are at their defaults unless stated: `FEDERATION_ROLE_PATH_PRE
 3. **Cache read.** Portunus looks the payload up in Redis (SHA-256 of the payload). A hit returns the cached token.
 4. **Identity and secret.** On a miss: `GetCallerIdentity` with the payload credentials, `GetSecretValue` on the secret ARN, parse. The secret's `host` must equal the proxy's `TARGET_HOST`. See each provider's *Secret*.
 5. **Federation role.** `federation_role_arn` must be in `FEDERATION_ALLOWED_ACCOUNT_IDS` and under `FEDERATION_ROLE_PATH_PREFIX`. Portunus assumes it with the caller's credentials at `FEDERATION_STS_ENDPOINT_URL` (`RoleSessionName` = the caller's IAM role name, `DurationSeconds` 3600). See [The AWS side](#the-aws-side).
-6. **Identity proof.** Anthropic, OpenAI, OpenRouter: `GetWebIdentityToken` from the federation session for the secret's `audience`, tagged with the four tag keys. GCP: a SigV4-signed `GetCallerIdentity` request bound to the pool provider. Permissions in [The AWS side](#the-aws-side); parameters in each provider's *What Portunus sends*.
+6. **Identity proof.** `GetWebIdentityToken` from the federation session for the secret's `audience`, tagged with the four tag keys; for GCP the audience is the pool provider's resource name. Permissions in [The AWS side](#the-aws-side); parameters in each provider's *What Portunus sends*.
 7. **Exchange.** The proof is posted to the provider's token endpoint, which checks it against a rule (Anthropic), mapping (OpenAI), policy (OpenRouter) or pool provider (GCP). See each provider's *Provider configuration*.
 8. **Inject.** `/authorise` returns the token with `output_header: "authorization"` and `output_prefix: "Bearer "`. The proxy writes `authorization: Bearer <token>`, removes the inbound `API_KEY_HEADER` when it differs, and forwards.
 9. **Cache write.** The token is cached until the earlier of `CACHE_DURATION` (86400 s unless set) and 60 s before it expires. Concurrent misses for one payload share one mint per process.
@@ -58,7 +58,7 @@ Parameters:
   ProviderAudience:
     Type: String
     Default: https://api.anthropic.com
-    Description: The secret's audience. Unused by gcp_wif.
+    Description: The secret's audience.
 
 Resources:
   FederationRoleBoundary:
@@ -145,12 +145,11 @@ Attach to each caller role. The CLI's default session policy carries the same st
 - Caller identity policy lacks `sts:AssumeRole` on the prefix, or the payload was encoded with a session policy without it: the same 403.
 - `MaxSessionDuration` below 3600: 403 `Could not assume federation role (ValidationError)`.
 - `ProviderAudience` differs from the secret's `audience`: 403 `Could not issue identity token (AccessDenied)`.
-- `sts:DurationSeconds` cap below 900 (Anthropic, OpenRouter) or 1800 (OpenAI): the same 403.
+- `sts:DurationSeconds` cap below 900 (Anthropic, OpenRouter, GCP) or 1800 (OpenAI): the same 403.
 - `sts:TagGetWebIdentityToken` missing, or `aws:TagKeys` not listing every key Portunus sends: the same 403.
 - Identity token requested for longer than the federation session's remaining life: 403 `Could not issue identity token (SessionDurationEscalationException)`. Portunus keeps the session at 3600 s, above every token lifetime it requests.
 - Outbound identity federation not enabled on the account: 403 `Could not issue identity token (OutboundWebIdentityFederationDisabledException)`.
 - Boundary missing: nothing fails; the role can later be widened beyond the two actions.
-- `gcp_wif` needs no identity policy: the proof is a signed `GetCallerIdentity`, which requires no permission. Drop `Policies`; keep the trust policy and boundary.
 
 ## Anthropic
 
@@ -299,40 +298,59 @@ curl -sS https://openrouter.proxy.example.org/api/v1/chat/completions \
   "type": "gcp_wif",
   "host": "aiplatform.googleapis.com",
   "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/portunus-fed-example-grant@teams.example-team",
-  "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-aws",
+  "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-oidc",
   "service_account": "example-sa@example-project.iam.gserviceaccount.com",
   "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
   "token_lifetime_seconds": 3600
 }
 ```
 
-`audience` must match `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`; `service_account` is an email; `scopes` (default shown, at least one) and `token_lifetime_seconds` (600–3600, default 3600) are optional. Portunus needs `AWS_DEFAULT_REGION` set for this type.
+`audience` must match `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`; `service_account` is an email; `scopes` (default shown, at least one) and `token_lifetime_seconds` (600–3600, default 3600) are optional.
 
 ### Provider configuration
 
-Google sees the assumed-role ARN `arn:aws:sts::123456789012:assumed-role/portunus-fed-example-grant@teams.example-team/<caller role name>`: no IAM path, and the session segment is the caller's role name. Map `google.subject` to the role name and keep the caller in an attribute:
+The pool provider is an OIDC provider whose issuer is the STS issuer URL; Google fetches the JWKS from `<issuer>/.well-known/openid-configuration`. `--allowed-audiences` must be set: the token's `aud` is the secret's `audience`, `//iam.googleapis.com/…`, and without the flag Google expects `https://iam.googleapis.com/…`. `sub` is the federation role's IAM ARN with its path, `arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/portunus-fed-example-grant@teams.example-team`, which a longer path can push past the 127-character limit on `google.subject`, so the mapping keeps the part after `role/portunus-fed/`, and the attribute condition matches the role path. The four tags sit under the `https://sts.amazonaws.com/` claim as `request_tags`, so the caller can be kept in an attribute:
 
 ```bash
 gcloud iam workload-identity-pools create example-pool --location=global
 
-gcloud iam workload-identity-pools providers create-aws example-aws \
+gcloud iam workload-identity-pools providers create-oidc example-oidc \
   --location=global --workload-identity-pool=example-pool \
-  --account-id=123456789012 \
-  --attribute-mapping="google.subject=assertion.arn.extract('assumed-role/{role}/'),attribute.caller=assertion.arn.extract('assumed-role/{role_and_session}').extract('/{session}')" \
-  --attribute-condition="assertion.arn.startsWith('arn:aws:sts::123456789012:assumed-role/portunus-fed-example-grant@teams.example-team/')"
+  --issuer-uri="https://<uuid>.tokens.sts.global.api.aws" \
+  --allowed-audiences="//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-oidc" \
+  --attribute-mapping="google.subject=assertion.sub.extract('role/portunus-fed/{role}'),attribute.user=assertion['https://sts.amazonaws.com/']['request_tags']['portunus:user']" \
+  --attribute-condition="assertion.sub.startsWith('arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/')"
 
 gcloud iam service-accounts add-iam-policy-binding example-sa@example-project.iam.gserviceaccount.com \
   --role=roles/iam.workloadIdentityUser \
-  --member="principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/subject/portunus-fed-example-grant@teams.example-team"
+  --member="principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/subject/teams/example-team/portunus-fed-example-grant@teams.example-team"
 ```
 
-The member uses the project number. The service account also needs the roles the upstream API requires (`roles/aiplatform.user` for Vertex AI). No request tags reach Google on this path; the caller appears only in `attribute.caller`.
+The same provider in Terraform:
+
+```hcl
+resource "google_iam_workload_identity_pool_provider" "example_oidc" {
+  workload_identity_pool_id          = "example-pool"
+  workload_identity_pool_provider_id = "example-oidc"
+  attribute_mapping = {
+    "google.subject" = "assertion.sub.extract('role/portunus-fed/{role}')"
+    "attribute.user" = "assertion['https://sts.amazonaws.com/']['request_tags']['portunus:user']"
+  }
+  attribute_condition = "assertion.sub.startsWith('arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/')"
+  oidc {
+    issuer_uri        = "https://<uuid>.tokens.sts.global.api.aws"
+    allowed_audiences = ["//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-oidc"]
+  }
+}
+```
+
+The member uses the project number. The service account also needs the roles the upstream API requires (`roles/aiplatform.user` for Vertex AI). The federation role is the one in [The AWS side](#the-aws-side) with `ProviderAudience` set to the pool provider resource name.
 
 ### What Portunus sends
 
-- `AssumeRole` on the federation role, 3600 s. No `GetWebIdentityToken`.
-- A SigV4-signed `POST https://sts.<AWS_DEFAULT_REGION>.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15` with the federation session's credentials and a signed `x-goog-cloud-target-resource: <audience>` header, serialised as Google's `aws4_request` subject token (URL-encoded JSON with `url`, `method`, `headers`). The signed host is the public regional endpoint even when `FEDERATION_STS_ENDPOINT_URL` names a VPC endpoint; Google replays the request there.
-- `POST https://sts.googleapis.com/v1/token`, form: `grant_type` `urn:ietf:params:oauth:grant-type:token-exchange`, `audience` (the pool provider), `scope` `https://www.googleapis.com/auth/iam`, `requested_token_type` `urn:ietf:params:oauth:token-type:access_token`, `subject_token_type` `urn:ietf:params:aws:token-type:aws4_request`, `subject_token`.
+- `AssumeRole` on the federation role, 3600 s.
+- `GetWebIdentityToken`: `Audience` `["//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-oidc"]`, `SigningAlgorithm` `RS256`, `DurationSeconds` 900, the four tags. As for Anthropic, the JWT's `sub` is the federation role's IAM ARN and the tags sit under `"https://sts.amazonaws.com/"` → `request_tags`.
+- `POST https://sts.googleapis.com/v1/token`, form: `grant_type` `urn:ietf:params:oauth:grant-type:token-exchange`, `audience` (the pool provider), `scope` `https://www.googleapis.com/auth/iam`, `requested_token_type` `urn:ietf:params:oauth:token-type:access_token`, `subject_token_type` `urn:ietf:params:oauth:token-type:jwt`, `subject_token` (the JWT).
 - `POST https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/example-sa@example-project.iam.gserviceaccount.com:generateAccessToken` with the federated token as bearer, JSON `{"scope": <scopes>, "lifetime": "3600s"}`.
 - Back: `accessToken`, `expireTime`. Cached for the lesser of `CACHE_DURATION` and `token_lifetime_seconds − 60`, so 3540 s at the defaults.
 
@@ -373,7 +391,7 @@ Every error from the proxy carries `x-portunus-error: true` and the body `{"erro
 | 403 `Token exchange with api.anthropic.com returned HTTP 401` | Every Anthropic denial is an opaque 401: `iss` ≠ issuer URL, `sub` fails `subject_prefix`, `aud` ≠ rule audience, rule id unknown or archived, service account not in the workspace, `workspace_id` missing for a multi-workspace rule, replayed `jti` | Portunus log line with the response body; Claude Console → Settings → Workload identity → authentication history (`match_subject_prefix`, `workspace_id_required`, `jti_reused`) |
 | 403 `Token exchange with OpenAI returned HTTP 4xx` | Provider id unknown or disabled; no enabled mapping matches `sub`, or more than one does; transformation failure; `aud` or `iss` mismatch | Portunus log line with the response body; OpenAI console → Workload Identity Provider |
 | 403 `Token exchange with OpenRouter returned HTTP 400` | `invalid_grant` "The subject token was not accepted": issuer, `sub`, `aud` or Condition mismatch; policy paused or deleted; entitlement removed | Portunus log line with the response body; OpenRouter → Settings → Workload identity |
-| 403 `Google STS exchange for <sa> returned HTTP 400` | Attribute condition false; provider `--account-id` ≠ `123456789012`; `audience` ≠ provider resource name; signed request rejected on replay | Portunus log line with the response body |
+| 403 `Google STS exchange for <sa> returned HTTP 400` | `iss` ≠ `--issuer-uri`; `aud` not in `--allowed-audiences`, or `audience` ≠ provider resource name; attribute condition false; mapped `google.subject` over 127 characters | Portunus log line with the response body |
 | 403 `Impersonation of <sa> returned HTTP 403` | `roles/iam.workloadIdentityUser` not bound to the mapped `google.subject`; IAM Credentials API disabled | Portunus log line with the response body; the service account's IAM policy |
 | 403 `… returned a malformed response` | 200 without `access_token`/`expires_in` (or `accessToken`/`expireTime`), or a non-JSON body | Portunus `… returned a malformed body` |
 | 503 `STS is unavailable` | STS endpoint unreachable or slow (2 s connect, 3 s read, one attempt) | Portunus `AssumeRole on federation role failed: <exception>` or `GetWebIdentityToken failed: <exception>`; endpoint DNS and security groups |
