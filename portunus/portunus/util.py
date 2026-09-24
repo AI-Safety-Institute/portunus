@@ -109,10 +109,9 @@ def generate_iso_timestamp() -> str:
         str: ISO-8601 formatted timestamp with millisecond precision
     """
     return (
-        datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[
-            :-3
-        ]
-        + "Z"
+        datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
     )
 
 
