@@ -131,7 +131,8 @@ def _wait_for_localstack_init_complete(timeout: int = 60) -> None:
     """Poll until all audit Firehose streams exist.
 
     LocalStack's healthcheck answers before its ready.d/ init scripts run,
-    so polling Firehose is the cheapest "init done" probe.
+    so polling Firehose is the cheapest "init done" probe. Each delivery
+    stream is created after its Kinesis source stream, so this covers both.
     """
     deadline = time.monotonic() + timeout
     needed = set(_REQUIRED_FIREHOSE_STREAMS)
@@ -150,7 +151,7 @@ def _wait_for_localstack_init_complete(timeout: int = 60) -> None:
 def _clear_audit_s3_prefix(prefix: str = "logs/") -> None:
     """Remove every object under the audit S3 prefix, isolating each test.
 
-    Firehose direct-PUT lands records in ``s3://portunus-logs-local/logs/<stream>/...``.
+    Firehose (reading the audit Kinesis streams) lands records in ``s3://portunus-logs-local/logs/<stream>/...``.
     """
     subprocess.run(
         [

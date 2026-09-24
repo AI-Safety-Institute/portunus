@@ -53,11 +53,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the same shared key of at least 16 bytes in backend `GRPC_PROXY_API_KEY` and
   proxy `PORTUNUS_API_KEY`. An empty key requires both components' explicit
   development-only opt-out settings.
-- Audit publication uses Firehose DirectPut delivery streams and bounded
-  `PutRecordBatch` calls, with one retry of failed records. Configure all seven
-  `FIREHOSE_*_STREAM` metadata, request, and response streams before startup;
-  `FIREHOSE_WS_SUMMARY_STREAM` is optional. Replace the previous `KINESIS_*`
-  settings and grant `firehose:PutRecordBatch` on the configured streams.
+- Audit publication packs records, newline-delimited, into Kinesis Data
+  Streams records (up to 256 KiB / 500 audit records each) under random
+  partition keys, shipped in bounded `PutRecords` calls with one retry of
+  failed records. Each stream must feed a Firehose with a JSON
+  `RecordDeAggregation` processor. Configure all seven `FIREHOSE_*_STREAM`
+  metadata, request, and response streams (now Kinesis stream names) before
+  startup; `FIREHOSE_WS_SUMMARY_STREAM` is optional. Replace the previous
+  `KINESIS_*` settings and grant `kinesis:PutRecords` on the configured streams.
 - Streamed HTTP body records use `num_chunks=0`, ordered `chunk_id` values,
   and `final_chunk` completion markers. Consumers must support these fields
   and the `dropped` and `truncated` indicators before upgrading. WebSocket

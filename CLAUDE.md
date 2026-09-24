@@ -5,13 +5,13 @@
 This repo implements a secure API key proxy with two cooperating components:
 
 - **Proxy**: Envoy-based reverse proxy whose filter chain delegates auth and audit to Portunus over gRPC.
-- **Portunus**: gRPC server hosting two servicers (Envoy ext_authz `Check` and ext_proc `Process`) plus the standard gRPC health service. Manages API keys from Secrets Manager, Redis-cached auth state, and Firehose publication.
+- **Portunus**: gRPC server hosting two servicers (Envoy ext_authz `Check` and ext_proc `Process`) plus the standard gRPC health service. Manages API keys from Secrets Manager, Redis-cached auth state, and Kinesis audit publication.
 
 ## Key functionality
 
 - Securely retrieve API keys from AWS Secrets Manager via short-lived AWS credentials supplied in the client's request.
 - Transparently proxy requests to third-party APIs (e.g. OpenAI, Anthropic) with header substitution.
-- Stream request / response / WebSocket audit to Firehose (direct-PUT) for downstream archival and analysis.
+- Stream request / response / WebSocket audit to Kinesis Data Streams (records packed newline-delimited, random partition keys), each drained by a Firehose that deaggregates to S3.
 - Redis cache for authorisation responses to keep the hot path off Secrets Manager.
 - Optional RFC 9421 request signing for Anthropic-style upstreams (Content-Digest + Signature / Signature-Input).
 - TLS termination, per-route rate limiting, and request-id propagation throughout.
@@ -28,7 +28,7 @@ This repo implements a secure API key proxy with two cooperating components:
    - Reads `x-portunus-target-host` from the same channel (not the HTTP request) to avoid client-side host forgery.
    - Checks the in-process L1 cache (`services/local_auth_cache.py`, short TTL, single-flight per key), then the Redis cache; on hit, returns the cached api_key. The key is the `sha256` of the **independently hashed** `target_host` and `payload` digests (`sha256(sha256(host) || sha256(payload))`, no delimiter, host normalised as on the miss path). The `target_host` binding is load-bearing: without it a bearer authorised for provider A could reuse a cached api_key through a proxy fronting provider B, bypassing the host restriction `validate_and_extract_api_key` enforces on miss. Hashing the two components separately rather than joining them means no `(host, payload)` pair can collide by shifting bytes across a separator.
    - On miss: decodes the payload, builds an STS session, calls `get-caller-identity`, fetches the secret from Secrets Manager, validates the target host if the secret is JSON-shaped, and caches the result.
-   - Forwards `principal_info` / `secret_arn` to ext_proc via `CheckResponse.dynamic_metadata`; ext_proc owns the Firehose metadata publish off the auth path.
+   - Forwards `principal_info` / `secret_arn` to ext_proc via `CheckResponse.dynamic_metadata`; ext_proc owns the audit metadata publish off the auth path.
    - Returns header mutations: the real `Authorization` header (api_key from the secret), the prefix-stripped payload, and (for signing tenants) the request header `x-portunus-signing-required: true`. On the non-signing branch `_ok` adds the header to `headers_to_remove` so a client-supplied value is stripped; on the signing branch it uses `OVERWRITE_IF_EXISTS_OR_ADD` to replace any client-supplied value with `true`. Envoy applies `headers_to_add` before `headers_to_remove`, so listing the header in both would strip the value we just set. Either way, the route_config also strips `x-portunus-signing-required` inbound — defence in depth.
 
 ### Signing (composite filter dispatching a second ext_authz pass)
@@ -46,7 +46,7 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 
 1. Envoy streams request and response bodies — and post-101 WebSocket frames — to `PortunusProcessServicer.Process` in `portunus/portunus/grpc/proc_servicer.py`.
 2. Body mode is `STREAMED` with `observability_mode: true` — Envoy ignores every `ProcessingResponse`, so the servicer is fire-and-forget from the customer's data path. Note: `observability_mode` only supports body modes `NONE` and `STREAMED` — `FULL_DUPLEX_STREAMED` is silently rejected at runtime.
-3. Each body chunk is published to Firehose as its own record with a monotonic per-direction `chunk_id` and `num_chunks=0` sentinel; consumers reassemble by `request_id` and check completion/loss markers.
+3. Each body chunk is published as its own audit record with a monotonic per-direction `chunk_id` and `num_chunks=0` sentinel; consumers reassemble by `request_id` and check completion/loss markers.
 4. WebSocket frames are parsed with `wsproto` (PerMessageDeflate finalize()'d against the upstream's `Sec-WebSocket-Extensions`). Each frame is a body record; one `WSSummaryRecord` per connection carries frame counts and close code.
 
 ## Configuration
@@ -68,7 +68,7 @@ Unsigned tenants never enter the buffering path; the body streams end-to-end.
 | `REDIS_POOL_TIMEOUT_SECONDS` / `REDIS_HEALTH_CHECK_INTERVAL_SECONDS` | Blocking-pool wait at the `REDIS_MAX_CONNECTIONS` cap; idle-connection PING interval | defaults `1.0` / `30`. The pool queues bursts rather than failing them over to STS |
 | `AUTH_LOCAL_CACHE_TTL_SECONDS` / `AUTH_LOCAL_CACHE_STALE_SECONDS` / `AUTH_LOCAL_CACHE_MAX_ENTRIES` | In-process (L1) auth cache in front of Redis: TTL, stale-on-Redis-failure window, LRU bound | defaults `30` / `300` / `10000`; TTL `0` disables. Revocation takes up to the TTL per task (plus the stale window during a Redis outage), never past credential expiry |
 | `AUTH_FALLBACK_MAX_CONCURRENT` / `AUTH_FALLBACK_ACQUIRE_TIMEOUT_S` | Cap on concurrent full authentications (STS + Secrets Manager) per process; requests that can't get a slot within the timeout are shed with 503 | defaults `32` / `1.0`. Stops a Redis outage turning into an STS/Secrets Manager stampede |
-| `FIREHOSE_*_STREAM` | Per-record-type Firehose delivery streams (metadata, request/response headers/body/trailers, ws summary) | direct-PUT |
+| `FIREHOSE_*_STREAM` | Per-record-type Kinesis data streams (metadata, request/response headers/body/trailers, ws summary) | historical name; each stream feeds a Firehose with JSON RecordDeAggregation |
 | `RATE_LIMIT_PERCENT_ENABLED` / `RATE_LIMIT_INTERVAL_SECONDS` / `RATE_LIMIT_REQUESTS_PER_INTERVAL` | Optional rate limiting | `0` disables |
 | `METRICS_ENABLED` | Aggregate and emit CloudWatch EMF metrics on stdout | default `false`, so local runs and tests stay quiet; the task definition sets it |
 | `METRICS_NAMESPACE` / `METRICS_SERVICE_NAME` | CloudWatch namespace, and the `ServiceName` dimension value | defaults `Portunus` / `portunus`. Dimensions are `ServiceName` + `Role` (from `GRPC_ROLE`) only — nothing per-task, per-principal or per-host |
@@ -106,7 +106,7 @@ CI runs both lanes (`.github/workflows/ci.yml`); lint and type-check skip the Do
 - `/portunus/portunus/services/auth_service.py` — STS + Secrets Manager + cache orchestration.
 - `/portunus/portunus/services/secrets_service.py` — Secrets Manager fetch (boto session injectable for tests).
 - `/portunus/portunus/services/signing_service.py` — RFC 9421 signing via KMS.
-- `/portunus/portunus/services/publish_service.py` — Firehose direct-PUT publishing.
+- `/portunus/portunus/services/publish_service.py` — packs audit records and publishes them to Kinesis Data Streams (`PutRecords`).
 - `/portunus/portunus/models.py` — Pydantic + dataclass models; ships standalone to Glue (lazy imports of other portunus modules).
 - `/proxy/envoy.yaml` — Envoy configuration: listener, filter chain, ext_authz / ext_proc clusters, routes.
 - `/proxy/entrypoint.sh` — TLS config and `envsubst` for environment variables.

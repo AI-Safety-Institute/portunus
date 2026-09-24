@@ -125,7 +125,7 @@ class StateService:
         # AsyncExitStack (avoiding the ~200ms per-entry aiohttp+TLS setup)
         # and closed in ``close()``.
         self._aws_stack: Optional[contextlib.AsyncExitStack] = None
-        self._firehose_client: Optional[Any] = None
+        self._kinesis_client: Optional[Any] = None
         self._aws_client_lock = asyncio.Lock()
         # Credential-keyed AWS client pool (STS / Secrets Manager): built with
         # the *caller's* temporary creds, so pooled per (service, credential
@@ -330,18 +330,30 @@ class StateService:
                     await self._aws_stack.__aenter__()
         return self._aws_stack
 
-    async def get_firehose_client(self):
-        """Return a shared Firehose direct-PUT client (created once per process)."""
-        if self._firehose_client is None:
+    async def get_kinesis_client(self):
+        """Return a shared Kinesis Data Streams client (created once per process).
+
+        Tight timeouts and a single SDK retry: a hung or throttled PutRecords
+        call holds the publish worker, and while it waits the bounded queue
+        fills and sheds audit. botocore's defaults (60 s read, legacy retries)
+        turned one stalled call into a minute of dropped records.
+        """
+        if self._kinesis_client is None:
             stack = await self._ensure_aws_stack()
             async with self._aws_client_lock:
-                if self._firehose_client is None:
-                    self._firehose_client = await stack.enter_async_context(
+                if self._kinesis_client is None:
+                    self._kinesis_client = await stack.enter_async_context(
                         self.boto_session.create_client(
-                            "firehose", config=AioConfig(user_agent="portunus-audit")
+                            "kinesis",
+                            config=AioConfig(
+                                user_agent="portunus-audit",
+                                connect_timeout=2,
+                                read_timeout=5,
+                                retries={"mode": "standard", "max_attempts": 2},
+                            ),
                         )
                     )
-        return self._firehose_client
+        return self._kinesis_client
 
     async def close(self) -> None:
         """Tear down cached AWS clients. Called on graceful shutdown."""
@@ -365,4 +377,4 @@ class StateService:
         if self._aws_stack is not None:
             await self._aws_stack.__aexit__(None, None, None)
             self._aws_stack = None
-            self._firehose_client = None
+            self._kinesis_client = None

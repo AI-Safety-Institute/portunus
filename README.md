@@ -13,11 +13,11 @@ It runs as two cooperating components:
   - Decodes the base64-encoded payload in the client's `Authorization` header — `{credentials, secret_arn}` — and uses those AWS credentials to fetch the real API key from Secrets Manager. Deployments must configure network access and IAM permissions for their intended trust boundary.
   - Secrets can be stored as plaintext (`"sk-…"`) or as JSON with a target-host check (`{"secret":"sk-…","host":"api.openai.com"}`); the latter only authorises for matching upstreams.
   - Returns the real key as a header mutation; Envoy applies it before forwarding upstream.
-  - Streams metadata, headers, and bodies to per-stream Firehose delivery streams for archival in S3.
+  - Streams metadata, headers, and bodies to per-stream Kinesis data streams; a Firehose per stream archives them in S3.
 
 Supporting AWS services:
 
-- **Kinesis Firehose (direct-PUT)** for the audit pipeline.
+- **Kinesis Data Streams → Firehose** for the audit pipeline. Portunus packs audit records (newline-delimited, up to 256 KiB / 500 per KDS record) under random partition keys; Firehose deaggregates them before partitioning and delivery.
 - **AWS Secrets Manager** for the real API keys.
 - **AWS KMS** for request signing (signing tenants only).
 - **CloudWatch Logs** for the structured logs and the embedded (EMF) metrics
@@ -34,7 +34,7 @@ sequenceDiagram
     participant Redis
     participant AWS as Secrets Manager / KMS / STS
     participant Target as Upstream target
-    participant Firehose
+    participant KDS as Kinesis Data Streams
 
     Client->>Envoy: Initial request
     Envoy->>Auth: Check (headers only)
@@ -48,11 +48,11 @@ sequenceDiagram
 
     Envoy->>Target: Forward request
     Envoy-->>Proc: Stream request headers (carry dynamic_metadata) + body chunks
-    Proc->>Firehose: Publish principal metadata record (off the auth-latency path)
+    Proc->>KDS: Publish principal metadata record (off the auth-latency path)
     Target-->>Envoy: Stream response
     Envoy-->>Client: Stream response to client
     Envoy-->>Proc: Stream response headers + body chunks
-    Proc->>Firehose: Publish records per chunk
+    Proc->>KDS: Publish records per chunk (packed)
 ```
 
 ## Configuration
@@ -174,7 +174,7 @@ For [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/
 
 ## Known issues
 
-- **Firehose record size**: Firehose has a 1 MiB max record size. Large payloads are chunked automatically (one record per chunk), but Envoy and Portunus both hold payloads in memory which can cause memory pressure under heavy load with large bodies.
+- **Audit record size**: Kinesis and Firehose have a 1 MiB max record size. Large payloads are chunked automatically (one record per chunk), but Envoy and Portunus both hold payloads in memory which can cause memory pressure under heavy load with large bodies.
 - **Scaling lag**: Deployments must configure capacity and scaling. Rapid load increases can exhaust request or signing capacity before additional instances become ready.
 - **WebSocket signing not supported**: If a tenant configured with a `signing_key` initiates a WebSocket upgrade, the proxy rejects the upgrade with `HTTP 400` and a body explaining the limitation. Either remove the `signing_key` from the tenant secret to use WebSocket, or use HTTPS for signed requests. The explicit rejection prevents an unsupported upgrade from being signed as an empty HTTP body.
 

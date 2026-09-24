@@ -62,7 +62,7 @@ portunus/
                                bytes across a separator.
     signing_service.py         RFC 9421 (HTTP Message Signatures) over AWS KMS.
                                KMS.Sign runs in a dedicated bounded executor.
-    publish_service.py         Firehose publish helpers; one method per record type.
+    publish_service.py         Record builders, one per record type, plus Kinesis packing and `PutRecords`.
     publish_queue.py           Bounded async queue with headroom reserved for
                                metadata vs body submits.
     state_service.py           Redis client lifecycle.
@@ -81,7 +81,7 @@ These gate the servicer process specifically; the root README documents the rest
 | `GRPC_PROXY_API_KEY` | Key of at least 16 bytes matching proxy `PORTUNUS_API_KEY`, presented in `x-portunus-proxy-key` initial metadata; enforced by `grpc/proxy_auth.py`. |
 | `GRPC_PROXY_API_KEY_OPTIONAL` | When `true`, an empty `GRPC_PROXY_API_KEY` is permitted (dev only). |
 
-See `portunus/config.py` for the rest (Redis, Firehose stream names, rate limiting, TLS toggles, header naming).
+See `portunus/config.py` for the rest (Redis, audit stream names, rate limiting, TLS toggles, header naming).
 
 ## CloudWatch EMF metrics
 
@@ -114,7 +114,7 @@ custom-metric bill by the size of the fleet and of the customer base.
 | `FullAuth` / `FullAuthLatency` | Count / Milliseconds | Full authentications (STS `get-caller-identity` + Secrets Manager) and their duration, timed on failure as well as success. |
 | `FullAuthShed` | Count | Full authentications refused by the concurrency semaphore. |
 | `SubmittedRecords` / `PublishedRecords` / `DroppedRecords` / `BuildFailedRecords` / `DeliveryFailedRecords` / `SkippedUnconfiguredRecords` / `SentinelDroppedRecords` | Count | Audit-pipeline accounting, mirroring the publish queue's own reconciliation. |
-| `FirehoseThrottledRecords` / `FirehosePutErrors` | Count | Records rejected for quota reasons, and records lost to a raised `PutRecordBatch`. |
+| `FirehoseThrottledRecords` / `FirehosePutErrors` | Count | Audit records rejected for Kinesis quota reasons, and records lost to a raised `PutRecords`. Names predate the move from Firehose to Kinesis. |
 | `PublishQueueDepth` / `PublishQueueBytes` | Count / Bytes | Queue occupancy sampled at flush. |
 | `ActiveExtProcStreams` | Count | Live ext_proc streams sampled at flush. |
 | `EventLoopLag` | Milliseconds | Drift of a 1s sleep — the loop's scheduling backlog, which separates "Portunus is CPU-starved" from "the dependency is slow". |
@@ -138,8 +138,9 @@ The gRPC publisher accepts these optional settings:
 | `GRPC_PUBLISH_BATCH_SIZE` | 500 records | 1–3000 |
 | `GRPC_PUBLISH_COALESCE_MS` | 0 milliseconds | 0–100, finite |
 
-The batch size groups queued records across destinations. Individual Firehose
-requests still obey the 500-record and 4-MiB limits. Coalescing pauses between
+The batch size groups queued records across destinations. Each stream's records
+are packed into Kinesis records of up to 256 KiB / 500 audit records, and
+`PutRecords` calls obey the 500-record and 5-MiB limits. Coalescing pauses between
 partial batches, adding up to the configured delay for new arrivals.
 Queue record and payload-byte limits continue to apply.
 
@@ -192,7 +193,7 @@ still apply, but metadata and gap markers can also be lost when that reserve
 fills. Loss counters distinguish records from rejected gap markers. The default
 is false, retaining bounded waits for metadata admission.
 
-Firehose record-level failures receive one retry after an asynchronous jittered
+Kinesis record-level failures receive one retry, under fresh partition keys, after an asynchronous jittered
 backoff. Repeated body-drop warnings are limited to one per second per servicer;
 loss counters still include every rejected record. Separate server admission
 shares the same Python process and CPU; this is best-effort audit delivery,

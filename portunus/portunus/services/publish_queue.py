@@ -8,7 +8,7 @@ records AND ``max_bytes`` retained payload bytes — each queued body task pins
 its raw chunk by closure, so a count-only cap would allow ~GBs retained.
 
 Workers block for one item then drain only what's ALREADY queued
-(``get_nowait``) up to ``max_batch``, shipping one Firehose ``PutRecordBatch``
+(``get_nowait``) up to ``max_batch``, shipping one packed Kinesis ``PutRecords``
 per stream. The batch is a subset of the bounded queue, so it adds no unbounded
 buffer.
 
@@ -36,7 +36,7 @@ from typing import Awaitable, Callable, List, Optional
 
 logger = logging.getLogger("api.access")
 
-# Ships one stream's built records; returns the count Firehose did NOT accept.
+# Ships one stream's built records; returns the count Kinesis did NOT accept.
 # Matches PublishService.put_record_batch.
 BatchSender = Callable[[str, List[bytes]], Awaitable[int]]
 

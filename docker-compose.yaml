@@ -132,16 +132,17 @@ services:
       # Localstack endpoint. Unset to make real AWS requests
       AWS_ENDPOINT_URL: http://localstack:4566
       REDIS_USE_TLS: "false"
-      # Firehose direct-PUT delivery streams for local testing. Names
-      # must match the streams created by scripts/localstack-init.sh.
-      FIREHOSE_METADATA_STREAM: portunus-firehose-metadata
-      FIREHOSE_REQUEST_HEADERS_STREAM: portunus-firehose-request-headers
-      FIREHOSE_REQUEST_BODY_STREAM: portunus-firehose-request-body
-      FIREHOSE_REQUEST_TRAILERS_STREAM: portunus-firehose-request-trailers
-      FIREHOSE_RESPONSE_HEADERS_STREAM: portunus-firehose-response-headers
-      FIREHOSE_RESPONSE_BODY_STREAM: portunus-firehose-response-body
-      FIREHOSE_RESPONSE_TRAILERS_STREAM: portunus-firehose-response-trailers
-      FIREHOSE_WS_SUMMARY_STREAM: portunus-firehose-ws-summary
+      # Kinesis data streams portunus publishes audit records to (each read
+      # by a Firehose delivery stream). Names must match the streams created
+      # by scripts/localstack-init-firehose.sh.
+      FIREHOSE_METADATA_STREAM: portunus-audit-metadata
+      FIREHOSE_REQUEST_HEADERS_STREAM: portunus-audit-request-headers
+      FIREHOSE_REQUEST_BODY_STREAM: portunus-audit-request-body
+      FIREHOSE_REQUEST_TRAILERS_STREAM: portunus-audit-request-trailers
+      FIREHOSE_RESPONSE_HEADERS_STREAM: portunus-audit-response-headers
+      FIREHOSE_RESPONSE_BODY_STREAM: portunus-audit-response-body
+      FIREHOSE_RESPONSE_TRAILERS_STREAM: portunus-audit-response-trailers
+      FIREHOSE_WS_SUMMARY_STREAM: portunus-audit-ws-summary
       # Header prefix; passed to portunus too so denied responses carry
       # x-{prefix}-error: true.
       PORTUNUS_HEADER_PREFIX: aisi-proxy

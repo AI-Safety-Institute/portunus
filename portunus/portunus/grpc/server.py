@@ -434,8 +434,8 @@ async def start_grpc_server(
         max_batch=config.publish_batch_size,
         coalesce_seconds=config.publish_coalesce_ms / 1000,
         drop_on_pressure=config.audit_drop_on_pressure,
-        # Workers drain in stream-grouped Firehose PutRecordBatch calls, keeping
-        # records/s under the per-stream quota without an unbounded buffer.
+        # Workers drain in stream-grouped Kinesis PutRecords calls, packing
+        # records to keep KDS records/s low without an unbounded buffer.
         batch_sender=publish_service.put_record_batch,
     )
     await publish_queue.start()

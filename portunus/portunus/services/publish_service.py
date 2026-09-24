@@ -1,7 +1,8 @@
-"""Publish service: ships audit records to Kinesis Firehose direct-PUT.
+"""Publish service: ships audit records to Kinesis Data Streams.
 
-``build_*`` methods serialize records to bytes; :meth:`put_record_batch` ships
-them via Firehose ``PutRecordBatch``. The bounded publish queue (see
+``build_*`` methods serialize records to bytes; :meth:`put_record_batch` packs
+and ships them via Kinesis ``PutRecords``. Each stream feeds a Firehose that
+deaggregates the packs and delivers to S3. The bounded publish queue (see
 :mod:`publish_queue`) drives batching, so memory stays bounded by the queue cap.
 """
 
@@ -9,6 +10,7 @@ import asyncio
 import base64
 import logging
 import random
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import orjson
@@ -29,12 +31,28 @@ from portunus.util import generate_iso_timestamp
 
 logger = logging.getLogger("api.access")
 
-# A built record: target delivery stream + newline-terminated JSON bytes.
+# A built record: target stream + newline-terminated JSON bytes.
 BuiltRecord = Tuple[str, bytes]
 
-# Firehose PutRecordBatch hard limits: 500 records and 4 MiB per call.
-_MAX_BATCH_RECORDS = 500
-_MAX_BATCH_BYTES = 4 * 1024 * 1024
+# Kinesis PutRecords hard limits: 500 records and 5 MiB per call, 1 MiB per
+# record (data + partition key).
+_MAX_CALL_RECORDS = 500
+_MAX_CALL_BYTES = 5 * 1024 * 1024
+
+# Audit records are packed, newline-delimited, into shared KDS records; the
+# Firehose reading each stream splits them again with RecordDeAggregation
+# (JSON sub-records, at most 500 per KDS record) before dynamic partitioning.
+# 256 KiB rather than the 1 MiB maximum so one record can't use up a whole
+# shard-second (1 MiB/s per shard) under random placement.
+_PACK_TARGET_BYTES = 256 * 1024
+_PACK_MAX_RECORDS = 500
+
+# A random partition key per packed record. A pack mixes many requests, so a
+# request- or connection-scoped key would mean nothing; random keys spread
+# every busy WebSocket or streamed body across all shards instead of pinning
+# it to one (on-demand scaling can't split a hot key). Consumers reassemble by
+# request_id + chunk_id / frame_index, so KDS ordering isn't needed.
+_PARTITION_KEY_BYTES = 32
 
 # Per-record ErrorCodes that mean "the stream is over its quota", as opposed
 # to a malformed record. Counted separately so an under-provisioned stream is
@@ -48,31 +66,62 @@ _THROTTLE_ERROR_CODES = frozenset(
 )
 
 
+# A packed KDS record: data + the number of audit records it carries.
+Pack = Tuple[bytes, int]
+
+
 def _serialize(record_data: Dict[str, Any]) -> bytes:
     """Serialize a record dict to newline-terminated JSON bytes."""
     return orjson.dumps(record_data, default=str, option=orjson.OPT_APPEND_NEWLINE)
 
 
-def _chunk_records(records: List[bytes]) -> List[List[bytes]]:
-    """Split records into Firehose-legal batches (<=500 recs, <=4 MiB).
+def _partition_key() -> str:
+    return uuid.uuid4().hex
 
-    A record over 4 MiB gets its own chunk and is rejected by Firehose
-    (counted failed) rather than dropped silently here; body records are
-    already capped well under this by ``FIREHOSE_MAX_RECORD_SIZE``.
+
+def _pack_records(records: List[bytes]) -> List[Pack]:
+    """Concatenate newline-terminated records into <=256 KiB / <=500 packs.
+
+    A record over the target gets a pack of its own (body records are capped
+    under the 1 MiB KDS limit by ``FIREHOSE_MAX_RECORD_SIZE``). A record
+    missing its trailing newline gets one: Firehose de-aggregation splits
+    packs on newlines, so one bare record would corrupt its whole pack.
     """
-    chunks: List[List[bytes]] = []
+    packs: List[Pack] = []
     current: List[bytes] = []
     current_bytes = 0
     for data in records:
+        if not data.endswith(b"\n"):
+            data += b"\n"
         size = len(data)
         if current and (
-            len(current) >= _MAX_BATCH_RECORDS
-            or current_bytes + size > _MAX_BATCH_BYTES
+            len(current) >= _PACK_MAX_RECORDS
+            or current_bytes + size > _PACK_TARGET_BYTES
+        ):
+            packs.append((b"".join(current), len(current)))
+            current = []
+            current_bytes = 0
+        current.append(data)
+        current_bytes += size
+    if current:
+        packs.append((b"".join(current), len(current)))
+    return packs
+
+
+def _chunk_packs(packs: List[Pack]) -> List[List[Pack]]:
+    """Split packs into PutRecords-legal calls (<=500 records, <=5 MiB)."""
+    chunks: List[List[Pack]] = []
+    current: List[Pack] = []
+    current_bytes = 0
+    for pack in packs:
+        size = len(pack[0]) + _PARTITION_KEY_BYTES
+        if current and (
+            len(current) >= _MAX_CALL_RECORDS or current_bytes + size > _MAX_CALL_BYTES
         ):
             chunks.append(current)
             current = []
             current_bytes = 0
-        current.append(data)
+        current.append(pack)
         current_bytes += size
     if current:
         chunks.append(current)
@@ -80,110 +129,116 @@ def _chunk_records(records: List[bytes]) -> List[List[bytes]]:
 
 
 class PublishService:
-    """Builds audit records and ships them to Firehose via PutRecordBatch."""
+    """Builds audit records and ships them to Kinesis Data Streams."""
 
     def __init__(self, state_service: Optional[StateService] = None):
         """Initialize the PublishService."""
         self.state_service = state_service or StateService()
-        # Cumulative Firehose failure counters, surfaced as per-interval
-        # deltas by the metrics reporter. Throttles are separated from hard
-        # errors because they mean "raise the stream's quota", not "fix a
-        # bug"; both already log, but a log line is not an alarm.
+        # Cumulative failure counters, in audit records, surfaced as
+        # per-interval deltas by the metrics reporter. Throttles are separated
+        # from hard errors because they mean "raise the stream's capacity",
+        # not "fix a bug"; both already log, but a log line is not an alarm.
         self.throttled_total = 0
         self.put_errors_total = 0
 
     async def put_record_batch(self, stream_name: str, records: List[bytes]) -> int:
-        """Ship ``records`` to ``stream_name`` via Firehose ``PutRecordBatch``.
+        """Ship ``records`` to the ``stream_name`` data stream via ``PutRecords``.
 
-        Splits into legal chunks (<=500 / <=4 MiB). On partial failure the
-        failed subset (via ``RequestResponses[].ErrorCode``) is retried once
-        after a short jittered backoff —
-        audit is fire-and-forget with no other retry. Survivors are logged with
-        their error codes (payload-free) so loss is observable. Returns the
-        count Firehose did NOT accept. Never raises.
+        Packs records into shared KDS records, then splits those into legal
+        calls. On partial failure the failed packs (via
+        ``Records[].ErrorCode``) are retried once, under fresh partition keys,
+        after a short jittered backoff — audit is fire-and-forget with no
+        other retry. Survivors are logged with their error codes
+        (payload-free) so loss is observable. Returns the count of audit
+        records Kinesis did NOT accept. Never raises.
         """
         if not stream_name or not records:
             return 0
 
-        client = await self.state_service.get_firehose_client()
+        client = await self.state_service.get_kinesis_client()
         failed = 0
-        for chunk in _chunk_records(records):
+        for chunk in _chunk_packs(_pack_records(records)):
             failed += await self._put_chunk_with_retry(client, stream_name, chunk)
         return failed
 
     async def _put_chunk_with_retry(
-        self, client: Any, stream_name: str, chunk: List[bytes]
+        self, client: Any, stream_name: str, chunk: List[Pack]
     ) -> int:
-        """PutRecordBatch one legal-sized chunk; retry the failed subset once.
+        """PutRecords one legal-sized chunk; retry the failed packs once.
 
-        Returns the number of records not accepted after the retry.
+        Returns the number of audit records not accepted after the retry.
         """
-        records = chunk
+        packs = chunk
         last_error_codes: Dict[str, int] = {}
         for attempt in (1, 2):
+            pending = sum(n for _, n in packs)
             try:
-                resp = await client.put_record_batch(
-                    DeliveryStreamName=stream_name,
-                    Records=[{"Data": data} for data in records],
+                resp = await client.put_records(
+                    StreamName=stream_name,
+                    Records=[
+                        {"Data": data, "PartitionKey": _partition_key()}
+                        for data, _ in packs
+                    ],
                 )
             except Exception as e:
-                self.put_errors_total += len(records)
+                self.put_errors_total += pending
                 # Log type(e).__name__ only — botocore messages can carry
                 # payload fragments (customer body content).
                 logger.error(
-                    "put_record_batch on %s raised: %s (%d records, attempt %d)",
+                    "put_records on %s raised: %s (%d records, attempt %d)",
                     stream_name,
                     type(e).__name__,
-                    len(records),
+                    pending,
                     attempt,
                 )
-                return len(records)
+                return pending
 
-            failed_count = resp.get("FailedPutCount")
-            responses = resp.get("RequestResponses")
+            failed_count = resp.get("FailedRecordCount")
+            responses = resp.get("Records")
             consistent = (
                 type(failed_count) is int
                 and isinstance(responses, list)
-                and len(responses) == len(records)
+                and len(responses) == len(packs)
                 and all(
                     isinstance(r, dict)
-                    and bool(r.get("RecordId")) != bool(r.get("ErrorCode"))
+                    and bool(r.get("SequenceNumber")) != bool(r.get("ErrorCode"))
                     for r in responses
                 )
                 and sum(bool(r.get("ErrorCode")) for r in responses) == failed_count
             )
-            retry: List[bytes] = []
+            retry: List[Pack] = []
             last_error_codes = {}
             if consistent:
-                for data, r in zip(records, responses):
+                for pack, r in zip(packs, responses):
                     code = r.get("ErrorCode")
                     if code:
-                        retry.append(data)
+                        retry.append(pack)
                         last_error_codes[code] = last_error_codes.get(code, 0) + 1
                         if code in _THROTTLE_ERROR_CODES:
-                            self.throttled_total += 1
+                            self.throttled_total += pack[1]
             else:
                 # A misaligned response cannot confirm which inputs succeeded.
                 # Retrying the whole group may duplicate records, but never hides loss.
-                retry = records
+                retry = packs
                 logger.warning(
-                    "Inconsistent Firehose response on %s; %d records unconfirmed",
+                    "Inconsistent Kinesis response on %s; %d records unconfirmed",
                     stream_name,
-                    len(records),
+                    pending,
                 )
             if not retry:
                 return 0
 
+            retry_count = sum(n for _, n in retry)
             if attempt == 1:
                 logger.warning(
-                    "put_record_batch on %s: %d/%d failed (%s); "
+                    "put_records on %s: %d/%d records failed (%s); "
                     "retrying subset after backoff",
                     stream_name,
-                    len(retry),
-                    len(records),
+                    retry_count,
+                    pending,
                     last_error_codes,
                 )
-                records = retry
+                packs = retry
                 # Per-record rejection arrives inside HTTP 200, so SDK
                 # request-level retry backoff does not cover it.
                 await asyncio.sleep(random.uniform(0.5, 1.5))
@@ -191,12 +246,12 @@ class PublishService:
 
             # Second attempt still failed — give up; surface the loss.
             logger.error(
-                "put_record_batch on %s: %d records unrecoverable after retry (%s)",
+                "put_records on %s: %d records unrecoverable after retry (%s)",
                 stream_name,
-                len(retry),
+                retry_count,
                 last_error_codes,
             )
-            return len(retry)
+            return retry_count
         return 0
 
     def build_metadata(

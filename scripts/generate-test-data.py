@@ -2,7 +2,7 @@
 """Generate test data by making varied HTTP requests through the Portunus proxy.
 
 The proxy authenticates, forwards to the target, and logs request/response data
-to Firehose (direct-PUT) → S3 for Glue processing — exercises the whole pipeline.
+to Kinesis → Firehose → S3 for Glue processing — exercises the whole pipeline.
 """
 
 import time

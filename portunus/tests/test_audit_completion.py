@@ -1,4 +1,4 @@
-"""Audit completion through the processor, queue, and Firehose serializer."""
+"""Audit completion through the processor, queue, and Kinesis packer."""
 
 from __future__ import annotations
 
@@ -19,23 +19,28 @@ from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
 
 
-class _Firehose:
+class _Kinesis:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
 
-    async def put_record_batch(self, **kwargs: Any) -> dict[str, Any]:
-        self.records.extend(json.loads(record["Data"]) for record in kwargs["Records"])
+    async def put_records(self, **kwargs: Any) -> dict[str, Any]:
+        # Each KDS record packs newline-delimited audit records, as Firehose's
+        # RecordDeAggregation expects.
+        for record in kwargs["Records"]:
+            self.records.extend(
+                json.loads(line) for line in record["Data"].splitlines()
+            )
         return {
-            "FailedPutCount": 0,
-            "RequestResponses": [{"RecordId": "accepted"} for _ in kwargs["Records"]],
+            "FailedRecordCount": 0,
+            "Records": [{"SequenceNumber": "1"} for _ in kwargs["Records"]],
         }
 
 
 class _State:
-    def __init__(self, sink: _Firehose) -> None:
+    def __init__(self, sink: _Kinesis) -> None:
         self.sink = sink
 
-    async def get_firehose_client(self) -> _Firehose:
+    async def get_kinesis_client(self) -> _Kinesis:
         return self.sink
 
 
@@ -87,7 +92,7 @@ async def _capture(
         "ws_summary",
     ):
         monkeypatch.setattr(config.firehose, f"{name}_stream_name", name)
-    sink = _Firehose()
+    sink = _Kinesis()
     publish = PublishService(state_service=_State(sink))  # type: ignore[arg-type]
     queue = BoundedPublishQueue(
         maxsize=100, num_workers=1, batch_sender=publish.put_record_batch
