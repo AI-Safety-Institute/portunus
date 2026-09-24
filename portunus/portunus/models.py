@@ -650,15 +650,18 @@ GCP_POOL_PROVIDER_PATTERN = (
 )
 # Email charset only; the value is URL-quoted into the impersonation URL path.
 GCP_SERVICE_ACCOUNT_PATTERN = r"^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$"
+GcpIdentityProof = Literal["oidc", "aws_sigv4"]
+"""How a ``gcp_wif`` federation session proves its identity to Google STS."""
 
 
 class GcpWifSecret(MintSecretBase):
     """Mint a Google service-account access token via workload identity federation.
 
-    The federation session's credentials sign an AWS ``GetCallerIdentity``
-    request, which Google STS exchanges for a federated token for
-    ``audience``; that token then impersonates ``service_account`` through the
-    IAM Credentials ``generateAccessToken`` API.
+    The federation session proves its identity in the form the workload
+    identity pool provider verifies (``identity_proof``); Google STS exchanges
+    that proof for a federated token for ``audience``, which then impersonates
+    ``service_account`` through the IAM Credentials ``generateAccessToken``
+    API.
 
     Attributes:
         audience: Full resource name of the workload identity pool provider,
@@ -667,6 +670,11 @@ class GcpWifSecret(MintSecretBase):
         service_account: Email of the service account to impersonate.
         scopes: OAuth scopes requested for the access token.
         token_lifetime_seconds: Requested access token lifetime, 600-3600 s.
+        identity_proof: ``oidc``: the pool provider is an OIDC provider
+            trusting the AWS account's STS token issuer, and the proof is an
+            STS web identity token for ``audience``. ``aws_sigv4``: the pool
+            provider is Google's AWS type, and the proof is a SigV4-signed
+            ``GetCallerIdentity`` request.
     """
 
     type: Literal["gcp_wif"]
@@ -678,6 +686,7 @@ class GcpWifSecret(MintSecretBase):
     # The 600 s floor sits well above the cache margin
     # (TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS), so a minted token is always cached.
     token_lifetime_seconds: int = Field(default=3600, ge=600, le=3600)
+    identity_proof: GcpIdentityProof = "oidc"
 
 
 # Every secret shape. A new mint provider subclasses MintSecretBase, joins this

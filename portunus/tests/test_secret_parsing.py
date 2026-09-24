@@ -253,6 +253,16 @@ class TestParseSecret:
         assert secret.service_account == GCP_SECRET["service_account"]
         assert secret.scopes == [GCP_CLOUD_PLATFORM_SCOPE]
         assert secret.token_lifetime_seconds == 3600
+        assert secret.identity_proof == "oidc"
+
+    @pytest.mark.parametrize("identity_proof", ["oidc", "aws_sigv4"])
+    def test_gcp_wif_identity_proof(self, identity_proof: str):
+        raw = json.dumps({**GCP_SECRET, "identity_proof": identity_proof})
+
+        secret = parse_secret(raw)
+
+        assert isinstance(secret, GcpWifSecret)
+        assert secret.identity_proof == identity_proof
 
     def test_gcp_wif_overrides(self):
         raw = json.dumps(
@@ -303,6 +313,11 @@ class TestParseSecret:
             {"token_lifetime_seconds": 30},
             {"token_lifetime_seconds": 599},
             {"token_lifetime_seconds": 7200},
+            {"identity_proof": ""},
+            {"identity_proof": "OIDC"},
+            {"identity_proof": "jwt"},
+            {"identity_proof": "sigv4"},
+            {"identity_proof": ["oidc"]},
         ],
     )
     def test_gcp_wif_missing_or_invalid_fields_raise(self, changes: dict):

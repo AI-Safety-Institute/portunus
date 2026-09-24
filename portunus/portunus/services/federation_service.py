@@ -14,8 +14,9 @@ Minting has two independent parts:
    adapter with the same ``exchange(proof, secret)`` shape.
    :class:`AnthropicTokenExchange`, :class:`OpenAiTokenExchange` and
    :class:`OpenRouterTokenExchange` post the JWT to the provider's token
-   endpoint; :class:`GcpTokenExchange` trades the signed request at Google STS
-   and impersonates a service account with the result.
+   endpoint; :class:`GcpTokenExchange` trades either proof, whichever the
+   secret's ``identity_proof`` names, at Google STS and impersonates a
+   service account with the result.
 
 :class:`TokenMintService` pairs each secret type with its proof and adapter.
 """
@@ -47,6 +48,7 @@ from portunus.exceptions import (
 from portunus.models import (
     AnthropicWifSecret,
     AwsCredentials,
+    GcpIdentityProof,
     GcpWifSecret,
     MintSecretBase,
     OpenAiWifSecret,
@@ -95,6 +97,11 @@ GOOGLE_IAM_CREDENTIALS_URL = (
     "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
     "{service_account}:generateAccessToken"
 )
+# The Google STS subject_token_type for each gcp_wif identity proof.
+GCP_SUBJECT_TOKEN_TYPES: dict[GcpIdentityProof, str] = {
+    "oidc": JWT_TOKEN_TYPE,
+    "aws_sigv4": AWS_SUBJECT_TOKEN_TYPE,
+}
 
 # IAM's character classes are ASCII; re.ASCII keeps \w from admitting more.
 # A path segment is IAM's path charset (printable ASCII) minus the "/"
@@ -688,9 +695,11 @@ class OpenRouterTokenExchange(_HttpTokenExchange):
 class GcpTokenExchange(_HttpTokenExchange):
     """Exchange adapter for Google workload identity federation.
 
-    Two calls: Google STS trades the signed ``GetCallerIdentity`` request for
-    a federated token scoped to the IAM Credentials API, which then issues an
-    access token for the secret's service account.
+    Two calls: Google STS trades the identity proof (an STS web identity
+    token, or a signed ``GetCallerIdentity`` request, as the secret's
+    ``identity_proof`` names) for a federated token scoped to the IAM
+    Credentials API, which then issues an access token for the secret's
+    service account.
     """
 
     timeout = _GCP_HOP_TIMEOUT
@@ -700,8 +709,9 @@ class GcpTokenExchange(_HttpTokenExchange):
         """Obtain an access token for ``secret.service_account``.
 
         Args:
-            proof: The signed ``GetCallerIdentity`` request, serialized as
-                Google's ``aws4_request`` subject token
+            proof: The STS web identity token (``oidc``), or the signed
+                ``GetCallerIdentity`` request serialized as Google's
+                ``aws4_request`` subject token (``aws_sigv4``)
             secret: The ``gcp_wif`` secret
 
         Raises:
@@ -719,7 +729,7 @@ class GcpTokenExchange(_HttpTokenExchange):
                 "audience": secret.audience,
                 "scope": GOOGLE_IAM_SCOPE,
                 "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
-                "subject_token_type": AWS_SUBJECT_TOKEN_TYPE,
+                "subject_token_type": GCP_SUBJECT_TOKEN_TYPES[secret.identity_proof],
                 "subject_token": proof,
             },
         )
@@ -796,7 +806,7 @@ class TokenMintService:
             OpenRouterWifSecret: _MintRoute(
                 self._openrouter_identity_proof, self.openrouter
             ),
-            GcpWifSecret: _MintRoute(self._signed_caller_identity_proof, self.gcp),
+            GcpWifSecret: _MintRoute(self._gcp_identity_proof, self.gcp),
         }
 
     async def aclose(self) -> None:
@@ -831,10 +841,12 @@ class TokenMintService:
         )
         return token.token
 
-    async def _signed_caller_identity_proof(
+    async def _gcp_identity_proof(
         self, identity: FederationIdentity, secret: GcpWifSecret
     ) -> str:
-        return await self.sts.signed_caller_identity(identity, secret.audience)
+        if secret.identity_proof == "aws_sigv4":
+            return await self.sts.signed_caller_identity(identity, secret.audience)
+        return (await self.sts.web_identity_token(identity, secret.audience)).token
 
     @capture_async()
     async def mint(
@@ -852,8 +864,8 @@ class TokenMintService:
                 or an identity field unusable as a session tag.
             UpstreamServiceError: STS or the provider was unavailable, or
                 minting exceeded ``MINT_DEADLINE_SECONDS``.
-            ConfigurationError: The proof needs an AWS region and none is
-                configured.
+            ConfigurationError: The proof (``gcp_wif`` with ``aws_sigv4``)
+                needs an AWS region and none is configured.
         """
         validate_federation_role_arn(
             secret.federation_role_arn,

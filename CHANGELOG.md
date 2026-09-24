@@ -59,11 +59,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   expiry, so Portunus requests a 15-minute STS token; the access token is
   cached for about 14 minutes.
 - The `gcp_wif` secret type mints Google service-account access
-  tokens. Portunus signs an AWS `GetCallerIdentity` request with the
-  federation session's credentials, exchanges it at Google STS for a
-  federated token (workload identity federation), and impersonates the named
-  service account for the secret's `scopes` and `token_lifetime_seconds`.
-  Requires `AWS_DEFAULT_REGION`. Adds a runtime dependency on `google-auth`
+  tokens. Portunus proves the federation session's identity to Google STS,
+  exchanges the proof for a federated token (workload identity federation),
+  and impersonates the named service account for the secret's `scopes` and
+  `token_lifetime_seconds`. `identity_proof` selects the proof: an STS web
+  identity token for the pool provider (`oidc`, the default) or a SigV4-signed
+  AWS `GetCallerIdentity` request (`aws_sigv4`, which requires
+  `AWS_DEFAULT_REGION`). Adds a runtime dependency on `google-auth`
   (request signing).
 - The CLI's default session policy allows `sts:AssumeRole` on every role under
   the federation role path in the caller's account,
