@@ -1006,6 +1006,33 @@ class TestGcpTokenExchange:
         assert "federated-token" not in str(exc_info.value)
         assert "federated-token" not in caplog.text
 
+    @pytest.mark.parametrize(
+        ("responses", "message"),
+        [
+            (
+                {"sts": httpx.Response(400, json={"error": "invalid_grant"})},
+                "Google STS exchange returned HTTP 400",
+            ),
+            (
+                {"iam": httpx.Response(403, json={"error": {"code": 403}})},
+                "Google service-account impersonation returned HTTP 403",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_failures_name_the_service_account_in_the_log_only(
+        self, responses: dict[str, httpx.Response], message: str, caplog
+    ):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        adapter, _ = _gcp_exchange(_google(**responses))
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            await adapter.exchange(PROOF, _gcp_secret())
+
+        assert exc_info.value.message == message
+        assert GCP_SERVICE_ACCOUNT not in exc_info.value.message
+        assert GCP_SERVICE_ACCOUNT in caplog.text
+
     @pytest.mark.asyncio
     async def test_client_timeouts_fit_the_mint_deadline(self):
         adapter = GcpTokenExchange()
