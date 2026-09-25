@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -24,9 +25,11 @@ from portunus.exceptions import (
     UpstreamServiceError,
 )
 from portunus.models import (
+    OPENAI_API_AUDIENCE,
     AnthropicWifSecret,
     AwsCredentials,
     MintSecretBase,
+    OpenAiWifSecret,
     PrincipalInfo,
 )
 from portunus.services import federation_service
@@ -35,9 +38,16 @@ from portunus.services.federation_service import (
     FEDERATION_SESSION_SECONDS,
     IDENTITY_TOKEN_SECONDS,
     JWT_BEARER_GRANT_TYPE,
+    JWT_TOKEN_TYPE,
+    OPENAI_IDENTITY_TOKEN_SECONDS,
+    OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
+    OPENAI_TOKEN_URL,
+    TOKEN_EXCHANGE_GRANT_TYPE,
     AnthropicTokenExchange,
     FederationIdentity,
     MintedToken,
+    OAuthTokenResponse,
+    OpenAiTokenExchange,
     StsFederationService,
     TokenMintService,
     WebIdentityToken,
@@ -87,6 +97,18 @@ def _secret(**overrides: object) -> AnthropicWifSecret:
     }
     data.update(overrides)
     return AnthropicWifSecret.model_validate(data)
+
+
+def _openai_secret(**overrides: object) -> OpenAiWifSecret:
+    data: dict[str, object] = {
+        "type": "openai_wif",
+        "host": "api.openai.com",
+        "federation_role_arn": ROLE_ARN,
+        "identity_provider_id": "idp_example",
+        "service_account_id": "svc_acct_example",
+    }
+    data.update(overrides)
+    return OpenAiWifSecret.model_validate(data)
 
 
 def _identity() -> FederationIdentity:
@@ -452,6 +474,47 @@ class TestStsFederationService:
         )
 
     @pytest.mark.asyncio
+    async def test_web_identity_token_signs_with_the_requested_algorithm(self):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        await service.web_identity_token(_identity(), OPENAI_API_AUDIENCE, "ES384")
+
+        (client,) = clients
+        kwargs = client.get_web_identity_token.await_args.kwargs
+        assert kwargs["Audience"] == [OPENAI_API_AUDIENCE]
+        assert kwargs["SigningAlgorithm"] == "ES384"
+        assert kwargs["DurationSeconds"] == IDENTITY_TOKEN_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_web_identity_token_requests_the_given_duration(self):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        await service.web_identity_token(
+            _identity(), OPENAI_API_AUDIENCE, "ES384", duration_seconds=1800
+        )
+
+        (client,) = clients
+        kwargs = client.get_web_identity_token.await_args.kwargs
+        assert kwargs["DurationSeconds"] == 1800
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("duration_seconds", [59, 3601])
+    async def test_web_identity_token_rejects_durations_outside_sts_bounds(
+        self, duration_seconds: int
+    ):
+        session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        with pytest.raises(ValueError, match="between 60 and 3600"):
+            await service.web_identity_token(
+                _identity(), OPENAI_API_AUDIENCE, duration_seconds=duration_seconds
+            )
+
+        assert clients == []
+
+    @pytest.mark.asyncio
     async def test_web_identity_token_failure_raises_authentication_error(self):
         session, _ = _sts_session(
             get_web_identity_token=_client_error("AccessDenied", "GetWebIdentityToken")
@@ -493,10 +556,10 @@ class TestStsFederationService:
             service.endpoint_url()
 
 
-def _exchange(
+def _recording_client(
     handler: Callable[[httpx.Request], httpx.Response] | Exception,
-) -> tuple[AnthropicTokenExchange, list[httpx.Request]]:
-    """An exchange adapter over an in-memory transport; returns (adapter, requests)."""
+) -> tuple[httpx.AsyncClient, list[httpx.Request]]:
+    """An in-memory HTTP client; returns (client, requests it received)."""
     requests: list[httpx.Request] = []
 
     def transport_handler(request: httpx.Request) -> httpx.Response:
@@ -505,8 +568,23 @@ def _exchange(
             raise handler
         return handler(request)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(transport_handler))
+    return httpx.AsyncClient(transport=httpx.MockTransport(transport_handler)), requests
+
+
+def _exchange(
+    handler: Callable[[httpx.Request], httpx.Response] | Exception,
+) -> tuple[AnthropicTokenExchange, list[httpx.Request]]:
+    """An Anthropic adapter over an in-memory transport; returns (adapter, requests)."""
+    client, requests = _recording_client(handler)
     return AnthropicTokenExchange(http_client=client), requests
+
+
+def _openai_exchange(
+    handler: Callable[[httpx.Request], httpx.Response] | Exception,
+) -> tuple[OpenAiTokenExchange, list[httpx.Request]]:
+    """An OpenAI adapter over an in-memory transport; returns (adapter, requests)."""
+    client, requests = _recording_client(handler)
+    return OpenAiTokenExchange(http_client=client), requests
 
 
 def _token_response(request: httpx.Request) -> httpx.Response:
@@ -574,8 +652,157 @@ class TestAnthropicTokenExchange:
             await adapter.exchange("header.payload.signature", _secret())
 
 
+# The documented response shape; fields other than access_token and
+# expires_in are ignored.
+OPENAI_TOKEN_RESPONSE = {
+    "access_token": "eyJ.openai.example",
+    "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    "token_type": "Bearer",
+    "expires_in": 900,
+    "expires_at": 1767273300,
+    "scope": "api.model.request",
+}
+
+
+def _openai_token_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json=OPENAI_TOKEN_RESPONSE)
+
+
+class TestOpenAiTokenExchange:
+    @pytest.mark.asyncio
+    async def test_posts_a_token_exchange_and_returns_the_access_token(self):
+        adapter, requests = _openai_exchange(_openai_token_response)
+        before = datetime.now(timezone.utc)
+
+        minted = await adapter.exchange("header.payload.signature", _openai_secret())
+
+        (request,) = requests
+        assert request.method == "POST"
+        assert str(request.url) == OPENAI_TOKEN_URL
+        assert request.headers["content-type"] == "application/json"
+        assert "authorization" not in request.headers
+        assert json.loads(request.content) == {
+            "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
+            "subject_token_type": JWT_TOKEN_TYPE,
+            "subject_token": "header.payload.signature",
+            "identity_provider_id": "idp_example",
+            "service_account_id": "svc_acct_example",
+        }
+        assert minted.token == "eyJ.openai.example"
+        assert before + timedelta(seconds=900) <= minted.expires_at
+        assert minted.expires_at <= datetime.now(timezone.utc) + timedelta(seconds=900)
+
+    @pytest.mark.asyncio
+    async def test_exchange_url_does_not_depend_on_the_secret_host(self):
+        adapter, requests = _openai_exchange(_openai_token_response)
+
+        await adapter.exchange(
+            "header.payload.signature", _openai_secret(host="api.example.com")
+        )
+
+        (request,) = requests
+        assert str(request.url) == OPENAI_TOKEN_URL
+
+    @pytest.mark.parametrize("status", [400, 401, 403])
+    @pytest.mark.asyncio
+    async def test_rejection_raises_without_leaking_the_token(
+        self, status: int, caplog
+    ):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        adapter, _ = _openai_exchange(
+            lambda request: httpx.Response(status, json={"error": "invalid_grant"})
+        )
+
+        with pytest.raises(AuthenticationError, match=f"HTTP {status}") as exc_info:
+            await adapter.exchange("secret.jwt.value", _openai_secret())
+
+        assert "invalid_grant" in caplog.text
+        assert "secret.jwt.value" not in str(exc_info.value)
+        assert "secret.jwt.value" not in caplog.text
+
+    @pytest.mark.parametrize("status", [500, 503, 429])
+    @pytest.mark.asyncio
+    async def test_server_errors_and_rate_limits_raise_upstream_service_error(
+        self, status: int
+    ):
+        adapter, _ = _openai_exchange(
+            lambda request: httpx.Response(status, text="busy")
+        )
+
+        with pytest.raises(UpstreamServiceError, match=f"HTTP {status}"):
+            await adapter.exchange("header.payload.signature", _openai_secret())
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_raises_upstream_service_error(self, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        adapter, _ = _openai_exchange(httpx.ConnectError("connection refused"))
+
+        with pytest.raises(UpstreamServiceError, match="unavailable") as exc_info:
+            await adapter.exchange("secret.jwt.value", _openai_secret())
+
+        assert exc_info.value.__cause__ is None
+        assert "ConnectError: connection refused" in caplog.text
+        assert "secret.jwt.value" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"ok": 1},
+            {"expires_in": 900},
+            {"access_token": "", "expires_in": 900},
+            {"access_token": "eyJ.openai.example"},
+            {"access_token": "eyJ.openai.example", "expires_in": "soon"},
+            {"access_token": "eyJ.openai.example", "expires_in": 0},
+            {"access_token": "eyJ.openai.example", "expires_in": -900},
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_response_without_a_usable_token_raises(self, body: dict, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        adapter, _ = _openai_exchange(lambda request: httpx.Response(200, json=body))
+
+        with pytest.raises(AuthenticationError, match="malformed"):
+            await adapter.exchange("header.payload.signature", _openai_secret())
+
+        assert "malformed body" in caplog.text
+        assert "eyJ.openai.example" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_non_json_success_body_raises(self):
+        adapter, _ = _openai_exchange(
+            lambda request: httpx.Response(200, content=b"<html>upstream</html>")
+        )
+
+        with pytest.raises(AuthenticationError, match="malformed"):
+            await adapter.exchange("header.payload.signature", _openai_secret())
+
+
+class TestOAuthTokenResponse:
+    def test_ignores_fields_beyond_the_token_and_its_lifetime(self):
+        parsed = OAuthTokenResponse.model_validate(OPENAI_TOKEN_RESPONSE)
+
+        assert parsed.access_token == "eyJ.openai.example"
+        assert parsed.expires_in == 900
+
+    def test_accepts_a_numeric_string_lifetime(self):
+        parsed = OAuthTokenResponse.model_validate(
+            {"access_token": "token", "expires_in": "900"}
+        )
+
+        assert parsed.expires_in == 900
+
+    def test_minted_token_expires_relative_to_the_request_time(self):
+        parsed = OAuthTokenResponse.model_validate(
+            {"access_token": "token", "expires_in": 900}
+        )
+
+        assert parsed.minted_token(NOW) == MintedToken(
+            token="token", expires_at=NOW + timedelta(seconds=900)
+        )
+
+
 class TestTokenMintService:
-    def _service(self) -> tuple[TokenMintService, MagicMock, MagicMock]:
+    def _service(self) -> tuple[TokenMintService, MagicMock, MagicMock, MagicMock]:
         sts = MagicMock()
         sts.assume_federation_role = AsyncMock(return_value=_identity())
         tokens = iter(["jwt-1", "jwt-2", "jwt-3"])
@@ -586,17 +813,41 @@ class TestTokenMintService:
         )
         anthropic = MagicMock()
         anthropic.exchange = AsyncMock(
-            side_effect=lambda assertion, secret: MintedToken(
-                token=f"token-for-{assertion}", expires_at=NOW + timedelta(hours=1)
+            side_effect=lambda proof, secret: MintedToken(
+                token=f"token-for-{proof}", expires_at=NOW + timedelta(hours=1)
+            )
+        )
+        openai = MagicMock()
+        openai.exchange = AsyncMock(
+            side_effect=lambda proof, secret: MintedToken(
+                token=f"openai-token-for-{proof}", expires_at=NOW + timedelta(hours=1)
             )
         )
         return (
             TokenMintService(
-                sts=sts, anthropic=anthropic, federation_config=FEDERATION_CONFIG
+                sts=sts,
+                anthropic=anthropic,
+                openai=openai,
+                federation_config=FEDERATION_CONFIG,
             ),
             sts,
             anthropic,
+            openai,
         )
+
+    @pytest.mark.asyncio
+    async def test_aclose_closes_every_adapter_client(self):
+        service = TokenMintService(
+            boto_session=MagicMock(), federation_config=FEDERATION_CONFIG
+        )
+        clients = [
+            service.anthropic.http_client,
+            service.openai.http_client,
+        ]
+
+        await service.aclose()
+
+        assert all(client.is_closed for client in clients)
 
     def test_boto_session_is_shared_with_the_sts_service(self):
         session = MagicMock()
@@ -609,7 +860,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_mint_sequences_proof_and_exchange(self):
-        service, sts, anthropic = self._service()
+        service, sts, anthropic, _ = self._service()
         secret = _secret()
 
         minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
@@ -625,7 +876,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_mint_stops_at_the_deadline(self, monkeypatch):
-        service, sts, anthropic = self._service()
+        service, sts, anthropic, _ = self._service()
 
         async def slow_assume(*args, **kwargs):
             await asyncio.sleep(1)
@@ -641,8 +892,105 @@ class TestTokenMintService:
         anthropic.exchange.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_openai_mint_requests_an_es384_token_for_the_openai_audience(
+        self,
+    ):
+        service, sts, anthropic, openai = self._service()
+        secret = _openai_secret()
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
+
+        sts.assume_federation_role.assert_awaited_once_with(
+            CALLER_CREDENTIALS, CALLER, ROLE_ARN
+        )
+        sts.web_identity_token.assert_awaited_once_with(
+            _identity(),
+            OPENAI_API_AUDIENCE,
+            OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
+            OPENAI_IDENTITY_TOKEN_SECONDS,
+        )
+        assert OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM == "ES384"
+        assert OPENAI_IDENTITY_TOKEN_SECONDS == 1800
+        openai.exchange.assert_awaited_once_with("jwt-1", secret)
+        anthropic.exchange.assert_not_awaited()
+        assert minted.token == "openai-token-for-jwt-1"
+
+    @pytest.mark.asyncio
+    async def test_openai_audience_comes_from_the_secret(self):
+        service, sts, _, _ = self._service()
+
+        await service.mint(
+            CALLER_CREDENTIALS, CALLER, _openai_secret(audience="https://example.com")
+        )
+
+        sts.web_identity_token.assert_awaited_once_with(
+            _identity(), "https://example.com", "ES384", 1800
+        )
+
+    @pytest.mark.asyncio
+    async def test_anthropic_mint_end_to_end(self):
+        session, clients = _sts_session(
+            assume_role=ASSUME_ROLE_RESPONSE,
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        anthropic, requests = _exchange(_token_response)
+        service = TokenMintService(
+            sts=StsFederationService(session, FEDERATION_CONFIG),
+            anthropic=anthropic,
+            federation_config=FEDERATION_CONFIG,
+        )
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+
+        assume, web_identity = clients
+        assume.assume_role.assert_awaited_once()
+        assert web_identity.create_kwargs["aws_session_token"] == "fed-token"
+        web_identity_kwargs = web_identity.get_web_identity_token.await_args.kwargs
+        assert web_identity_kwargs["SigningAlgorithm"] == "RS256"
+        assert web_identity_kwargs["DurationSeconds"] == IDENTITY_TOKEN_SECONDS
+        (request,) = requests
+        assert json.loads(request.content)["assertion"] == "header.payload.signature"
+        assert minted.token == "sk-ant-oat01-example"
+
+    @pytest.mark.asyncio
+    async def test_openai_mint_end_to_end(self):
+        session, clients = _sts_session(
+            assume_role=ASSUME_ROLE_RESPONSE,
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        openai, requests = _openai_exchange(_openai_token_response)
+        service = TokenMintService(
+            sts=StsFederationService(session, FEDERATION_CONFIG),
+            openai=openai,
+            federation_config=FEDERATION_CONFIG,
+        )
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _openai_secret())
+
+        assume, web_identity = clients
+        assume.assume_role.assert_awaited_once()
+        assert web_identity.create_kwargs["aws_session_token"] == "fed-token"
+        web_identity.get_web_identity_token.assert_awaited_once_with(
+            Audience=[OPENAI_API_AUDIENCE],
+            SigningAlgorithm="ES384",
+            DurationSeconds=OPENAI_IDENTITY_TOKEN_SECONDS,
+            Tags=[
+                {"Key": "portunus:user", "Value": CALLER_ROLE},
+                {"Key": "portunus:principal", "Value": CALLER_ROLE},
+                {"Key": "portunus:session", "Value": "session"},
+                {"Key": "portunus:project", "Value": "example"},
+            ],
+        )
+        (request,) = requests
+        assert str(request.url) == OPENAI_TOKEN_URL
+        assert (
+            json.loads(request.content)["subject_token"] == "header.payload.signature"
+        )
+        assert minted.token == "eyJ.openai.example"
+
+    @pytest.mark.asyncio
     async def test_each_mint_uses_a_fresh_identity_token(self):
-        service, sts, anthropic = self._service()
+        service, sts, anthropic, _ = self._service()
 
         first = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
         second = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
@@ -656,7 +1004,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_disallowed_role_is_rejected_before_any_aws_call(self):
-        service, sts, anthropic = self._service()
+        service, sts, anthropic, openai = self._service()
         secret = _secret(
             federation_role_arn=(
                 f"arn:aws:iam::{OTHER_ACCOUNT}:role/portunus-fed/projects/example/name"
@@ -669,13 +1017,14 @@ class TestTokenMintService:
         sts.assume_federation_role.assert_not_awaited()
         sts.web_identity_token.assert_not_awaited()
         anthropic.exchange.assert_not_awaited()
+        openai.exchange.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_unknown_mint_type_has_no_exchange(self):
         class OtherSecret(MintSecretBase):
             type: Literal["other"] = "other"
 
-        service, sts, anthropic = self._service()
+        service, sts, anthropic, openai = self._service()
         secret = OtherSecret(host="api.example.com", federation_role_arn=ROLE_ARN)
 
         with pytest.raises(AuthenticationError, match="OtherSecret"):
@@ -683,3 +1032,4 @@ class TestTokenMintService:
 
         sts.assume_federation_role.assert_not_awaited()
         anthropic.exchange.assert_not_awaited()
+        openai.exchange.assert_not_awaited()
