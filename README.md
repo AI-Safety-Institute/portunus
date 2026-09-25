@@ -207,7 +207,7 @@ A secret referenced by a payload is one of:
 
 JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key); a typeless object with a `federation_role_arn` is a mint secret missing its `type` and is rejected rather than used as a key. JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
 
-[docs/federation-examples.md](docs/federation-examples.md) works through every minted-token type with one set of example values: a CloudFormation template for the federation role, each provider's configuration, what Portunus sends, and a failure table.
+[docs/federation-examples.md](docs/federation-examples.md) sets up one grant per minted-token type with one set of example values: the federation role as CloudFormation, the lab-side registration, the config secret, and a request through the proxy.
 
 #### `anthropic_wif`
 
