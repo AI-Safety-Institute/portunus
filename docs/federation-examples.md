@@ -60,7 +60,7 @@ The template's three policies do the following:
 - **Trust policy:** only the caller roles can assume the role, and only through
   the STS VPC endpoint, so only Portunus can mint.
 - **Inline policy:** the role can request identity tokens for its one audience,
-  tagged with the four caller tags Portunus sends.
+  tagged with the four caller tags and the attribution tag Portunus sends.
 - **Permissions boundary:** the role can never do anything else.
 
 The deployer also needs IAM permissions on the bare name
@@ -142,6 +142,7 @@ Resources:
                       - 'portunus:principal'
                       - 'portunus:session'
                       - 'portunus:project'
+                      - 'portunus:attributed_to'
 
 Outputs:
   FederationRoleArn:
@@ -184,9 +185,13 @@ Tokens last up to 30 minutes, capped at twice the JWT's remaining life.
   "federation_rule_id": "fdrl_01J8ZQ2M9K3N4P5R6S7T8V9W0X",
   "organization_id": "3f1c9d2e-7b4a-4c6d-9e8f-0a1b2c3d4e5f",
   "service_account_id": "svac_01J8ZQ2M9K3N4P5R6S7T8V9W0Y",
-  "workspace_id": "wrkspc_01J8ZQ2M9K3N4P5R6S7T8V9W0Z"
+  "workspace_id": "wrkspc_01J8ZQ2M9K3N4P5R6S7T8V9W0Z",
+  "attribution": "full"
 }
 ```
+
+`attribution` works in every lab's secret. [Attribution](#attribution) covers
+the modes.
 
 </details>
 
@@ -312,6 +317,26 @@ curl "https://vertex.proxy.example.org/v1/projects/example-project/locations/glo
   -H "authorization: Bearer $PAYLOAD" -H "content-type: application/json" \
   -d '{"contents": [{"role": "user", "parts": [{"text": "ping"}]}]}'
 ```
+
+## Attribution
+
+A config secret's `attribution` sets what the identity token's tags say about
+the caller:
+
+- `full` (the default) sends the four caller tags.
+- `pseudonymous` sends one `portunus:attributed_to` tag. Its value is an HMAC
+  of the role ARN and the user, keyed by `FEDERATION_ATTRIBUTION_KEY`. It is
+  stable for one caller within a grant and unlinkable across grants. For user
+  `UserProfile_example_example-project` and key
+  `example-attribution-key-0123456789abcdef`, it is
+  `caf25aecec46a3862e83a35fb1c0bb8ab7e5c86d07503a02d75719f3fb4ad004`.
+- `none` sends no tags.
+
+In every mode the JWT's `sub` is still the role ARN, which names the scope.
+
+**Correlating a lab's records.** Portunus logs one line per mint with the
+JWT's `jti`, the handle and the cleartext caller. A lab report that quotes
+either the `jti` or the handle maps to a caller.
 
 ## Reference
 
