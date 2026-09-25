@@ -15,7 +15,7 @@ It consists of two main components:
     - Secrets can be stored in three formats (see [Secret formats](#secret-formats)):
       - **Plaintext**: `"sk-1234567890abcdef"` (works with any proxy target)
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
-      - **Minted token**: `{"type":"anthropic_wif", ...}` or `{"type":"openai_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
+      - **Minted token**: `{"type":"anthropic_wif", ...}`, `{"type":"openai_wif", ...}` or `{"type":"gcp_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
   - If successful, Portunus returns the real API key to the Envoy instance
   - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default), removing the `API_KEY_HEADER` header when the two differ, before allowing the request to proceed. Every other header is forwarded untouched
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
@@ -203,7 +203,7 @@ A secret referenced by a payload is one of:
 |---|---|---|
 | Plaintext | `sk-1234567890abcdef` | Used as the key for any target |
 | Stored key with target check | `{"secret": "sk-...", "host": "api.example.com"}` | Used only when the proxy's target matches `host` |
-| Minted token | `{"type": "anthropic_wif", ...}` or `{"type": "openai_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
+| Minted token | `{"type": "anthropic_wif", ...}`, `{"type": "openai_wif", ...}` or `{"type": "gcp_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
 
 JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key); a typeless object with a `federation_role_arn` is a mint secret missing its `type` and is rejected rather than used as a key. JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
 
@@ -253,6 +253,28 @@ Every exchange uses a freshly issued STS token.
 OpenAI issues the access token for at most an hour and never beyond the STS token's expiry, so Portunus requests a 30-minute STS token here (`anthropic_wif` requests 15 minutes, which Anthropic doubles) and the access token lives about 30 minutes and is cached for about 29. As for `anthropic_wif`, an unreachable endpoint, a 5xx/429 answer or a missed 6 s deadline returns 503.
 
 On the OpenAI side, all deployment concerns: the federation role's account must have outbound web identity federation enabled, and the workload identity provider's OIDC issuer is that account's STS issuer URL, with `audience` as its audience. The service account mapping matches the token's `sub`, which is the federation role's IAM ARN (`federation_role_arn`). The four Portunus tags arrive as `request_tags` under the `https://sts.amazonaws.com/` claim and can be matched through a CEL attribute transformation such as `assertion["https://sts.amazonaws.com/"]["request_tags"]["portunus:user"]`. The federation role's identity policy must allow `sts:GetWebIdentityToken` for `audience` with `sts:DurationSeconds` of at least 1800; OpenAI's example policy caps it at 300.
+
+#### `gcp_wif`
+
+```json
+{
+  "type": "gcp_wif",
+  "host": "aiplatform.googleapis.com",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example",
+  "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/providers/example-provider",
+  "service_account": "example-sa@example-project.iam.gserviceaccount.com",
+  "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+  "token_lifetime_seconds": 3600
+}
+```
+
+`scopes` (default shown) and `token_lifetime_seconds` (600–3600, default 3600) are optional. `audience` must be a pool provider resource name in the form shown and `service_account` an email address. Steps 1–3 are as for `anthropic_wif`, with the STS token (RS256, 15 minutes) requested for `audience`; then Portunus:
+
+4. Exchanges the token at `https://sts.googleapis.com/v1/token` (RFC 8693 token exchange; form-encoded body with `grant_type` `urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token_type` `urn:ietf:params:oauth:token-type:jwt`, `subject_token`, `audience`, `scope` `https://www.googleapis.com/auth/iam` and `requested_token_type` `urn:ietf:params:oauth:token-type:access_token`) for a federated token, then calls `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/<service_account>:generateAccessToken` with `scopes` and `token_lifetime_seconds`. The access token is returned with `output_header: "authorization"` and `output_prefix: "Bearer "`. Expiry comes from `expireTime`.
+
+As for `anthropic_wif`, an unreachable Google endpoint, a 5xx/429 answer or a missed 6 s deadline returns 503.
+
+On the Google side, all deployment concerns: the workload identity pool provider is an OIDC provider whose issuer is the federation role's account's STS issuer URL and whose allowed audience is the provider's own resource name, the secret's `audience`. The token's `sub` is the federation role's IAM ARN including its path (`federation_role_arn`), so the attribute mapping derives `google.subject` from `assertion.sub` with an `extract` that keeps it within Google's 127-character subject limit, and the attribute condition matches the role path prefix. The four Portunus tags arrive as `request_tags` under the `https://sts.amazonaws.com/` claim and are available to the attribute mapping, e.g. `assertion['https://sts.amazonaws.com/']['request_tags']['portunus:user']`. The service account must grant `roles/iam.workloadIdentityUser` to the pool principal the mapping produces. The federation role's identity policy must allow `sts:GetWebIdentityToken` for `audience` and `sts:TagGetWebIdentityToken` for the four tag keys, as for the other minted types.
 
 #### Caching and the federation role
 

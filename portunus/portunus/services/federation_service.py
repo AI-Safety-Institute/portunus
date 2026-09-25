@@ -9,9 +9,10 @@ Minting has two independent parts:
    is the federation role and whose tags carry the user, the caller's role
    name, its session name and the project.
 2. Exchange: trade the JWT for a provider bearer token. Each provider has an
-   adapter with the same ``exchange(proof, secret)`` shape:
+   adapter with the same ``exchange(proof, secret)`` shape.
    :class:`AnthropicTokenExchange` and :class:`OpenAiTokenExchange` post the
-   JWT to the provider's token endpoint.
+   JWT to the provider's token endpoint; :class:`GcpTokenExchange` trades it
+   at Google STS and impersonates a service account with the result.
 
 :class:`TokenMintService` pairs each secret type with its proof and adapter.
 """
@@ -19,6 +20,7 @@ Minting has two independent parts:
 import asyncio
 import logging
 import re
+import urllib.parse
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,7 +30,7 @@ import httpx
 from aiobotocore.config import AioConfig
 from aiobotocore.session import AioSession, get_session
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
 from portunus.config import FederationConfig, config
 from portunus.exceptions import (
@@ -40,6 +42,7 @@ from portunus.exceptions import (
 from portunus.models import (
     AnthropicWifSecret,
     AwsCredentials,
+    GcpWifSecret,
     MintSecretBase,
     OpenAiWifSecret,
     PrincipalInfo,
@@ -67,6 +70,14 @@ IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "RS256"
 # OpenAI: "Use ES384 unless your environment requires RS256 compatibility."
 OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM: SigningAlgorithm = "ES384"
 OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
+GOOGLE_STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
+GOOGLE_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+# The only scope the federated token needs: calling generateAccessToken.
+GOOGLE_IAM_SCOPE = "https://www.googleapis.com/auth/iam"
+GOOGLE_IAM_CREDENTIALS_URL = (
+    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+    "{service_account}:generateAccessToken"
+)
 
 # IAM's character classes are ASCII; re.ASCII keeps \w from admitting more.
 # A path segment is IAM's path charset (printable ASCII) minus the "/"
@@ -92,6 +103,9 @@ _STS_CLIENT_CONFIG = AioConfig(
     retries={"max_attempts": 1, "mode": "standard"},
 )
 _EXCHANGE_TIMEOUT = httpx.Timeout(4.0)
+# Two hops per mint (Google STS, then IAM Credentials) that, after AssumeRole,
+# must fit inside MINT_DEADLINE_SECONDS.
+_GCP_HOP_TIMEOUT = httpx.Timeout(3.0, connect=1.0)
 
 
 @dataclass(frozen=True)
@@ -417,8 +431,9 @@ class _HttpTokenExchange:
     ) -> dict[str, object]:
         """POST a form or JSON body and return the JSON object in a 200 response.
 
-        ``step`` names the call in messages and logs, which carry the response
-        status and (truncated) body but never the request.
+        ``step`` names the call in messages and logs. Messages reach the
+        client, so ``step`` must not carry secret fields; logs carry the
+        response status and (truncated) body but never the request.
 
         Raises:
             UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
@@ -493,6 +508,24 @@ def _parse_response[M: BaseModel](model: type[M], body: object, step: str) -> M:
         raise AuthenticationError(f"{step} returned a malformed response") from e
 
 
+class GoogleAccessTokenResponse(BaseModel):
+    """The fields of an IAM Credentials ``generateAccessToken`` response.
+
+    ``expireTime`` is a Google ``Timestamp`` (RFC 3339 in UTC). Its
+    nanoseconds are truncated to microseconds, never rounded up, so the
+    expiry is never later than Google's.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    accessToken: str = Field(min_length=1)
+    expireTime: AwareDatetime
+
+    def minted_token(self) -> MintedToken:
+        """The token and Google's expiry."""
+        return MintedToken(token=self.accessToken, expires_at=self.expireTime)
+
+
 class AnthropicTokenExchange(_HttpTokenExchange):
     """Exchange adapter for Anthropic's RFC 7523 JWT-bearer token endpoint."""
 
@@ -554,6 +587,69 @@ class OpenAiTokenExchange(_HttpTokenExchange):
         return token.minted_token(requested_at)
 
 
+class GcpTokenExchange(_HttpTokenExchange):
+    """Exchange adapter for Google workload identity federation.
+
+    Two calls: Google STS trades the STS web identity token (RFC 8693 token
+    exchange, the JWT as an OIDC subject token) for a federated token scoped
+    to the IAM Credentials API, which then issues an access token for the
+    secret's service account.
+    """
+
+    timeout = _GCP_HOP_TIMEOUT
+
+    @capture_async(name="gcp_exchange")
+    async def exchange(self, proof: str, secret: GcpWifSecret) -> MintedToken:
+        """Obtain an access token for ``secret.service_account``.
+
+        Args:
+            proof: The STS web identity token issued for ``secret.audience``
+            secret: The ``gcp_wif`` secret
+
+        Raises:
+            UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
+                response, from either call.
+            AuthenticationError: Google STS or IAM Credentials refused, or a
+                response was malformed.
+        """
+        exchange = "Google STS exchange"
+        impersonation = "Google service-account impersonation"
+        try:
+            federated = await self._post_json(
+                exchange,
+                GOOGLE_STS_TOKEN_URL,
+                data={
+                    "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
+                    "audience": secret.audience,
+                    "scope": GOOGLE_IAM_SCOPE,
+                    "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
+                    "subject_token_type": JWT_TOKEN_TYPE,
+                    "subject_token": proof,
+                },
+            )
+            federated_token = _parse_response(OAuthTokenResponse, federated, exchange)
+            access = await self._post_json(
+                impersonation,
+                GOOGLE_IAM_CREDENTIALS_URL.format(
+                    service_account=urllib.parse.quote(secret.service_account, safe="@")
+                ),
+                headers={"Authorization": f"Bearer {federated_token.access_token}"},
+                json_body={
+                    "scope": secret.scopes,
+                    "lifetime": f"{secret.token_lifetime_seconds}s",
+                },
+            )
+            token = _parse_response(GoogleAccessTokenResponse, access, impersonation)
+        except (AuthenticationError, UpstreamServiceError) as e:
+            # The step names reach the client in the message, so the service
+            # account is named only here.
+            logger.error(
+                f"GCP exchange for {secret.service_account} failed: {e.message}"
+            )
+            raise
+        return token.minted_token()
+
+
 class _TokenExchange[S: MintSecretBase](Protocol):
     """The shape every exchange adapter exposes, for its own secret type."""
 
@@ -587,6 +683,7 @@ class TokenMintService:
         self,
         sts: Optional[StsFederationService] = None,
         anthropic: Optional[AnthropicTokenExchange] = None,
+        gcp: Optional[GcpTokenExchange] = None,
         openai: Optional[OpenAiTokenExchange] = None,
         federation_config: Optional[FederationConfig] = None,
         boto_session: Optional[AioSession] = None,
@@ -596,12 +693,14 @@ class TokenMintService:
             boto_session=boto_session, federation_config=self.federation_config
         )
         self.anthropic = anthropic or AnthropicTokenExchange()
+        self.gcp = gcp or GcpTokenExchange()
         self.openai = openai or OpenAiTokenExchange()
         # Each route is typed for its own secret class, which the dict cannot
         # express; mint() looks a route up by the secret's exact type.
         self._routes: dict[type[MintSecretBase], _MintRoute[Any]] = {
             AnthropicWifSecret: _MintRoute(self._web_identity_proof, self.anthropic),
             OpenAiWifSecret: _MintRoute(self._openai_identity_proof, self.openai),
+            GcpWifSecret: _MintRoute(self._web_identity_proof, self.gcp),
         }
 
     async def aclose(self) -> None:
@@ -610,7 +709,7 @@ class TokenMintService:
             await route.adapter.aclose()
 
     async def _web_identity_proof(
-        self, identity: FederationIdentity, secret: AnthropicWifSecret
+        self, identity: FederationIdentity, secret: AnthropicWifSecret | GcpWifSecret
     ) -> str:
         return (await self.sts.web_identity_token(identity, secret.audience)).token
 

@@ -36,8 +36,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   one minute before the token expires; concurrent misses for one payload and
   target share a mint per process.
 - `/authorise` returns 503 (`UpstreamServiceError`) when STS or a provider's
-  token endpoint (Anthropic's or OpenAI's) cannot be reached or answers
-  5xx/429, or when minting exceeds its 6 s deadline.
+  token endpoint (Anthropic's, OpenAI's, or Google STS and IAM Credentials)
+  cannot be reached or answers 5xx/429, or when minting exceeds its 6 s
+  deadline.
 - The `openai_wif` secret type mints OpenAI access tokens. The federation
   session's STS web identity token, signed with ES384 for the secret's
   `audience` (default `https://api.openai.com/v1`), is exchanged at
@@ -48,6 +49,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   15 minutes, which Anthropic doubles); the access token is valid for about
   30 minutes. The federation role's policy must allow `sts:DurationSeconds`
   up to 1800.
+- The `gcp_wif` secret type mints Google service-account access
+  tokens. The federation session's STS web identity token, signed with RS256
+  for the secret's `audience` (a workload identity pool provider resource
+  name), is exchanged at Google STS (RFC 8693 token exchange, the JWT as an
+  OIDC subject token) for a federated token, which impersonates the named
+  service account for the secret's `scopes` and `token_lifetime_seconds`.
+  The pool provider is an OIDC provider trusting the AWS account's STS token
+  issuer.
 - The CLI's default session policy allows `sts:AssumeRole` on every role under
   the federation role path in the caller's account,
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
