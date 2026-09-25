@@ -1,7 +1,6 @@
 -- Import proxy utilities library
 local proxy_utils = require("proxy_utils")
 local utils = proxy_utils.utils
-local request_signing = proxy_utils.request_signing
 local logging = proxy_utils.logging
 
 -- Configuration object populated by environment variables during startup (via envsubst)
@@ -72,13 +71,11 @@ function envoy_on_request(request_handle)
 	-- Main function that processes incoming requests
 	-- 1. Handles /ping health check requests
 	-- 2. Buffers full request body
-	-- 3. Computes content digest for request signing
-	-- 4. Extracts authorization payload from headers
-	-- 5. Calls Portunus service to retrieve real API key
-	-- 6. Handles errors from Portunus service
-	-- 7. Sets the upstream auth header to the real credential and removes the header the payload arrived in
-	-- 8. Adds Content-Digest and Signature headers if applicable
-	-- 9. Logs request body, headers, and trailers
+	-- 3. Extracts authorization payload from headers
+	-- 4. Calls Portunus service to retrieve real API key
+	-- 5. Handles errors from Portunus service
+	-- 6. Sets the upstream auth header to the real credential and removes the header the payload arrived in
+	-- 7. Logs request body, headers, and trailers
 
 	-- Handle /ping health check requests without authorization
 	if request_handle:headers():get(":path") == "/ping" then
@@ -126,7 +123,6 @@ function envoy_on_request(request_handle)
 		-- TODO: It would be nice if we could buffer for only as long as authorisation takes,
 		-- but Envoy Lua filter doesn't support async body reading.
 		local full_request_body = utils.get_full_request_body(request_handle)
-		local content_digest = request_signing.compute_content_digest(request_handle, full_request_body)
 
 		-- Note on header modification timing:
 		-- From Envoy docs: Headers can be modified only after an httpCall() or body() returns.
@@ -134,8 +130,6 @@ function envoy_on_request(request_handle)
 		-- The script will fail if headers are modified at other times.
 
 		-- Set scheme based on USE_TLS environment variable.
-		-- The url (scheme, authority, path) must be finalised before request signing
-		-- (if used), because the url is part of the signature.
 		if config.target_host_use_tls == "true" then
 			request_handle:headers():replace(":scheme", "https")
 			request_handle:headers():replace(":authority", config.target_host)
@@ -151,7 +145,7 @@ function envoy_on_request(request_handle)
 		end
 
 		-- Make synchronous call to Portunus service to get the real API key
-		local headers, body = portunus:authorise(request_handle, auth_payload, content_digest)
+		local headers, body = portunus:authorise(request_handle, auth_payload)
 
 		-- If headers are nil, then there was some kind of network error
 		if not headers then
@@ -182,13 +176,6 @@ function envoy_on_request(request_handle)
 			:set("envoy.filters.http.lua", "request_id", auth_response.request_id)
 
 		local upstream_auth_header = portunus:apply_upstream_auth(request_handle, auth_response)
-
-		-- Add Content-Digest and Signature headers if present
-		request_handle:headers():replace("Content-Digest", content_digest)
-		if auth_response.signature and auth_response.signature_input then
-			request_handle:headers():replace("Signature", auth_response.signature)
-			request_handle:headers():replace("Signature-Input", auth_response.signature_input)
-		end
 
 		-- Log the request body
 		portunus:log_request_body(request_handle, auth_response.request_id, full_request_body)

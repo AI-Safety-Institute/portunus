@@ -14,7 +14,7 @@ from typing import Optional
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
 from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from portunus.config import config  # noqa: E402 — also used by XRayService
 from portunus.exceptions import (
@@ -35,11 +35,6 @@ from portunus.relay.logger import start_log_queue, stop_log_queue
 from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.publish_service import PublishService
-from portunus.services.signing_service import (
-    SignableRequest,
-    SignatureHeaders,
-    sign_request,
-)
 from portunus.services.state_service import StateService
 from portunus.services.xray_service import XRayService
 from portunus.util import (
@@ -78,8 +73,6 @@ class AuthorizationResponse(BaseModel):
     Attributes:
         api_key: The API key to use for upstream requests
         request_id: Unique request ID for correlation
-        signature: Signature header value, when the secret carries a signing key
-        signature_input: Signature-Input header value, when signing
         output_header: Upstream header that should carry the credential. When
             None the proxy uses its configured API_KEY_HEADER.
         output_prefix: Prefix for the credential value. When None the proxy uses
@@ -88,8 +81,6 @@ class AuthorizationResponse(BaseModel):
 
     api_key: str
     request_id: str
-    signature: Optional[str] = None
-    signature_input: Optional[str] = None
     output_header: Optional[str] = Field(default=None, min_length=1)
     output_prefix: Optional[str] = None
 
@@ -151,31 +142,6 @@ async def authorise(
                 payload, trace_id, target_host
             )
 
-            # If needed by provider, sign request
-            signature_headers: Optional[SignatureHeaders] = None
-            try:
-                signable_request_raw = body.get("signable_request", None)
-                signable_request = SignableRequest.model_validate(signable_request_raw)
-                if auth_result.signing_key is not None:
-                    signature_headers = sign_request(
-                        signable_request,
-                        auth_result.signing_key,
-                        auth_result.api_key,
-                        payload.credentials,
-                    )
-                    logger.info(
-                        f"Signed request for '{signable_request.type}' provider"
-                    )
-            except ValidationError as e:
-                # this should only happen if the Envoy proxy is passing invalid
-                # parameters
-                response.status_code = 500
-                segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
-                return ErrorResponse(
-                    message=f"Invalid request signing parameters passed by proxy: {e}",
-                    debug_id=trace_id,
-                )
-
             # Store principal info metadata and publish to Kinesis
             timestamp = generate_iso_timestamp()
             principal_info = auth_result.principal_info.to_dict()
@@ -212,10 +178,6 @@ async def authorise(
             return AuthorizationResponse(
                 api_key=auth_result.api_key,
                 request_id=trace_id,
-                signature=signature_headers["Signature"] if signature_headers else None,
-                signature_input=signature_headers["Signature-Input"]
-                if signature_headers
-                else None,
                 output_header=auth_result.output_header,
                 output_prefix=auth_result.output_prefix,
             )

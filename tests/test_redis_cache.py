@@ -160,10 +160,7 @@ async def test_cache_api_key(docker_setup, monkeypatch, request):
     request.addfinalizer(cleanup)
 
     # Cache the API key
-    signing_key = None
-    result = await _cache_service.cache_api_key(
-        payload, api_key, signing_key, principal_info
-    )
+    result = await _cache_service.cache_api_key(payload, api_key, principal_info)
     assert result is True, "Failed to cache API key"
 
     # Get a fresh Redis client for verification
@@ -191,20 +188,13 @@ async def test_cache_api_key(docker_setup, monkeypatch, request):
 
 
 @pytest.mark.asyncio
-async def test_cache_and_retrieve_with_none_signing_key(docker_setup, request):
-    """Regression test for None signing_key cache retrieval.
-
-    Tests bug where retrieving cached auth with None signing_key would fail
-    with 'NoneType' object is not subscriptable. This is the common case
-    where API keys don't require request signing.
-    """
-    # Create test data with None signing_key (the common case)
-    payload = f"test-payload-none-signing-{uuid.uuid4()}"
-    api_key = "sk-test-api-key-no-signing"
-    signing_key = None  # Most API keys don't require signing
+async def test_cache_and_retrieve_auth_result(docker_setup, request):
+    """A cached auth response round-trips through Redis as an AuthResult."""
+    payload = f"test-payload-roundtrip-{uuid.uuid4()}"
+    api_key = "sk-test-api-key-roundtrip"
     principal_info = PrincipalInfo(
         account_id="123456789012",
-        principal="test-principal-no-signing",
+        principal="test-principal-roundtrip",
         session_name="test-session",
     )
 
@@ -218,47 +208,28 @@ async def test_cache_and_retrieve_with_none_signing_key(docker_setup, request):
 
     request.addfinalizer(cleanup)
 
-    # Cache the auth response with None signing_key
-    result = await _cache_service.cache_auth_response(
-        payload, api_key, signing_key, principal_info
-    )
+    result = await _cache_service.cache_auth_response(payload, api_key, principal_info)
     assert result is True, "Failed to cache auth response"
 
-    # Now retrieve it - this is where the bug was occurring
     cached_response = await _cache_service.get_cached_auth_result(payload)
 
-    # Verify we got the data back without error
     assert cached_response is not None, "Failed to retrieve cached auth response"
-    retrieved_api_key = cached_response.api_key
-    retrieved_principal_info = cached_response.principal_info
-    retrieved_signing_key = cached_response.signing_key
-
-    # Verify the data is correct
-    assert retrieved_api_key == api_key, "Retrieved API key doesn't match"
-    assert retrieved_signing_key is None, "signing_key should be None"
-    assert retrieved_principal_info.account_id == principal_info.account_id
-    assert retrieved_principal_info.principal == principal_info.principal
+    assert cached_response.api_key == api_key, "Retrieved API key doesn't match"
+    assert cached_response.principal_info.account_id == principal_info.account_id
+    assert cached_response.principal_info.principal == principal_info.principal
 
 
 @pytest.mark.asyncio
-async def test_cache_and_retrieve_with_signing_key(docker_setup, request):
-    """Test caching and retrieving auth with signing_key present.
+async def test_cache_entry_with_legacy_signing_key_loads(docker_setup, request):
+    """Entries written before request signing was removed still load.
 
-    Tests the less common case where API keys require request signing
-    (e.g., certain labs + models).
+    Those entries carry a populated signing_key field, which is now ignored.
     """
-    from portunus.models import SigningKey
-
-    # Create test data with a signing_key
-    payload = f"test-payload-with-signing-{uuid.uuid4()}"
-    api_key = "sk-test-api-key-with-signing"
-    signing_key = SigningKey(
-        provider_id="signingkey_test123",
-        kms_key_arn="arn:aws:kms:us-east-1:123456789012:key/test-key-id",
-    )
+    payload = f"test-payload-legacy-signing-{uuid.uuid4()}"
+    api_key = "sk-test-api-key-legacy-signing"
     principal_info = PrincipalInfo(
         account_id="123456789012",
-        principal="test-principal-with-signing",
+        principal="test-principal-legacy-signing",
         session_name="test-session",
     )
 
@@ -272,28 +243,25 @@ async def test_cache_and_retrieve_with_signing_key(docker_setup, request):
 
     request.addfinalizer(cleanup)
 
-    # Cache the auth response with signing_key
-    result = await _cache_service.cache_auth_response(
-        payload, api_key, signing_key, principal_info
-    )
-    assert result is True, "Failed to cache auth response"
+    legacy_entry = {
+        "api_key": api_key,
+        "principal_info": principal_info.to_dict(),
+        "signing_key": {
+            "provider_id": "signingkey_test123",
+            "kms_key_arn": "arn:aws:kms:us-east-1:123456789012:key/test-key-id",
+        },
+    }
+    async with await get_test_redis_client() as client:
+        await client.set(
+            _cache_service.generate_cache_key(payload), json.dumps(legacy_entry)
+        )
 
-    # Retrieve it
     cached_response = await _cache_service.get_cached_auth_result(payload)
 
-    # Verify we got the data back
     assert cached_response is not None, "Failed to retrieve cached auth response"
-    retrieved_api_key = cached_response.api_key
-    retrieved_principal_info = cached_response.principal_info
-    retrieved_signing_key = cached_response.signing_key
-
-    # Verify the data is correct
-    assert retrieved_api_key == api_key, "Retrieved API key doesn't match"
-    assert retrieved_signing_key is not None, "signing_key should not be None"
-    assert retrieved_signing_key.provider_id == signing_key.provider_id
-    assert retrieved_signing_key.kms_key_arn == signing_key.kms_key_arn
-    assert retrieved_principal_info.account_id == principal_info.account_id
-    assert retrieved_principal_info.principal == principal_info.principal
+    assert cached_response.api_key == api_key, "Retrieved API key doesn't match"
+    assert cached_response.principal_info.account_id == principal_info.account_id
+    assert cached_response.principal_info.principal == principal_info.principal
 
 
 @pytest.mark.asyncio

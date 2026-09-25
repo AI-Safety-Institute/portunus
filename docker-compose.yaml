@@ -34,7 +34,7 @@ services:
     environment:
       # LocalStack configuration: https://docs.localstack.cloud/references/configuration/
       - DEBUG=${DEBUG:-0}
-      - SERVICES=glue,kms,kinesis,firehose,s3,dynamodb,sts,secretsmanager
+      - SERVICES=glue,kinesis,firehose,s3,dynamodb,sts,secretsmanager
       # test credentials to force the same account to be used by default
       - AWS_ACCESS_KEY_ID=000000000000
       - AWS_SECRET_ACCESS_KEY=test

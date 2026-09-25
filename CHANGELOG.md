@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Removed
+- RFC 9421 request signing (the `signing_key` field on JSON secrets, the
+  `Content-Digest`, `Signature` and `Signature-Input` upstream headers, and the
+  `signable_request` / `signature*` fields on `/authorise`). Anthropic has
+  deprecated the check and confirmed it can be turned off. Secrets that still
+  carry a `signing_key` field keep working; the field is ignored. The `portunus`
+  CLI's default session policy no longer grants `kms:Sign`, and LocalStack no
+  longer starts KMS.
+
 ### Added
 - `/authorise` responses may carry `output_header` and `output_prefix`, letting
   the backend choose which upstream header receives the credential and with

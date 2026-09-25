@@ -1,7 +1,6 @@
 -- Portunus API client for API Key Proxy
 -- Handles all HTTP communication with the Portunus service
 local dkjson = require("dkjson")
-local request_signing = require("proxy_utils.request_signing")
 local utils = require("proxy_utils.utils")
 
 local portunus = {}
@@ -22,9 +21,6 @@ function portunus.new(config)
 		request_api_key_prefix = config.api_key_prefix,
 		credential_headers = utils.parse_header_set(config.known_auth_headers),
 		target_host = config.target_host,
-		-- Request signing config
-		signing_key_id = config.signing_key_id,
-		kms_key_arn = config.kms_key_arn,
 		-- Header prefix for proxy-specific response headers
 		header_prefix = config.header_prefix,
 	}
@@ -82,25 +78,11 @@ end
 --- Makes a synchronous call to Portunus /authorise endpoint
 -- @param handle Request handle
 -- @param auth_payload The authorization payload extracted from the request
--- @param content_digest The content digest for request signing
 -- @return headers, body Response headers and body from Portunus
-function portunus_client:authorise(handle, auth_payload, content_digest)
-	-- Build the request body
+function portunus_client:authorise(handle, auth_payload)
 	local request_body = {
 		payload = auth_payload,
 		target_host = self.target_host,
-		-- Request signing inputs will be ignored by the authorise endpoint
-		-- unless the api key secret includes a signing key to use.
-		signable_request = {
-			type = "anthropic",
-			content_digest = content_digest,
-			content_type = handle:headers():get("content-type") or "",
-			method = handle:headers():get(":method"),
-			url = handle:headers():get(":scheme")
-				.. "://"
-				.. handle:headers():get(":authority")
-				.. handle:headers():get(":path"),
-		}
 	}
 
 	return handle:httpCall(
@@ -244,8 +226,6 @@ end
 -- {
 --   "api_key": "The real API key retrieved from Secrets Manager",
 --   "request_id": "Trace or request ID for logging correlation",
---   "signature": "Optional signature header value",
---   "signature_input": "Optional signature-input header value",
 --   "output_header": "Optional upstream header to carry the credential",
 --   "output_prefix": "Optional prefix for the credential value"
 -- }

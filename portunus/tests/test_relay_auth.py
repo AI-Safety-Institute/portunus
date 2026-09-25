@@ -147,7 +147,6 @@ class TestAuthenticateWs:
 
         auth_result = AuthResult(
             api_key="sk-test-123",
-            signing_key=None,
             principal_info=PrincipalInfo(
                 arn="arn:aws:sts::123456:assumed-role/TestRole/session",
                 account_id="123456",
@@ -176,7 +175,6 @@ class TestAuthenticateWs:
 
         auth_result = AuthResult(
             api_key="sk-test",
-            signing_key=None,
             principal_info=PrincipalInfo(),
         )
 
