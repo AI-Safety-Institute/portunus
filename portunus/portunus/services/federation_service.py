@@ -431,8 +431,9 @@ class _HttpTokenExchange:
     ) -> dict[str, object]:
         """POST a form or JSON body and return the JSON object in a 200 response.
 
-        ``step`` names the call in messages and logs, which carry the response
-        status and (truncated) body but never the request.
+        ``step`` names the call in messages and logs. Messages reach the
+        client, so ``step`` must not carry secret fields; logs carry the
+        response status and (truncated) body but never the request.
 
         Raises:
             UpstreamServiceError: Transport failure, or an HTTP 5xx or 429
@@ -611,34 +612,41 @@ class GcpTokenExchange(_HttpTokenExchange):
             AuthenticationError: Google STS or IAM Credentials refused, or a
                 response was malformed.
         """
-        exchange = f"Google STS exchange for {secret.service_account}"
-        federated = await self._post_json(
-            exchange,
-            GOOGLE_STS_TOKEN_URL,
-            data={
-                "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
-                "audience": secret.audience,
-                "scope": GOOGLE_IAM_SCOPE,
-                "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
-                "subject_token_type": JWT_TOKEN_TYPE,
-                "subject_token": proof,
-            },
-        )
-        federated_token = _parse_response(OAuthTokenResponse, federated, exchange)
-
-        impersonation = f"Impersonation of {secret.service_account}"
-        access = await self._post_json(
-            impersonation,
-            GOOGLE_IAM_CREDENTIALS_URL.format(
-                service_account=urllib.parse.quote(secret.service_account, safe="@")
-            ),
-            headers={"Authorization": f"Bearer {federated_token.access_token}"},
-            json_body={
-                "scope": secret.scopes,
-                "lifetime": f"{secret.token_lifetime_seconds}s",
-            },
-        )
-        token = _parse_response(GoogleAccessTokenResponse, access, impersonation)
+        exchange = "Google STS exchange"
+        impersonation = "Google service-account impersonation"
+        try:
+            federated = await self._post_json(
+                exchange,
+                GOOGLE_STS_TOKEN_URL,
+                data={
+                    "grant_type": TOKEN_EXCHANGE_GRANT_TYPE,
+                    "audience": secret.audience,
+                    "scope": GOOGLE_IAM_SCOPE,
+                    "requested_token_type": GOOGLE_ACCESS_TOKEN_TYPE,
+                    "subject_token_type": JWT_TOKEN_TYPE,
+                    "subject_token": proof,
+                },
+            )
+            federated_token = _parse_response(OAuthTokenResponse, federated, exchange)
+            access = await self._post_json(
+                impersonation,
+                GOOGLE_IAM_CREDENTIALS_URL.format(
+                    service_account=urllib.parse.quote(secret.service_account, safe="@")
+                ),
+                headers={"Authorization": f"Bearer {federated_token.access_token}"},
+                json_body={
+                    "scope": secret.scopes,
+                    "lifetime": f"{secret.token_lifetime_seconds}s",
+                },
+            )
+            token = _parse_response(GoogleAccessTokenResponse, access, impersonation)
+        except (AuthenticationError, UpstreamServiceError) as e:
+            # The step names reach the client in the message, so the service
+            # account is named only here.
+            logger.error(
+                f"GCP exchange for {secret.service_account} failed: {e.message}"
+            )
+            raise
         return token.minted_token()
 
 
