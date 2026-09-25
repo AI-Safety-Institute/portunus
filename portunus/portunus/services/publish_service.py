@@ -113,6 +113,8 @@ class PublishService:
         timestamp: str,
         principal_info: Dict[str, Any],
         secret_arn: Optional[str] = None,
+        identity_token_id: Optional[str] = None,
+        attribution_handle: Optional[str] = None,
     ) -> bool:
         """Publish metadata to Kinesis stream with ISO-8601 timestamps.
 
@@ -121,6 +123,10 @@ class PublishService:
             timestamp: ISO-8601 formatted timestamp
             principal_info: Principal information dictionary
             secret_arn: Full ARN of the secret used for API key (for usage tracking)
+            identity_token_id: ``jti`` of the identity token a minted
+                credential was exchanged for; None for stored keys
+            attribution_handle: Handle a ``pseudonymous`` identity token
+                carried; None otherwise
         """
         if not config.kinesis.metadata_stream_name:
             logger.warning("Metadata stream not configured, skipping publish")
@@ -136,6 +142,8 @@ class PublishService:
             project=principal_info.get("project"),
             session_name=principal_info.get("session_name"),
             secret_arn=secret_arn,
+            identity_token_id=identity_token_id,
+            attribution_handle=attribution_handle,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream

@@ -1,6 +1,7 @@
 """Tests for minting short-lived upstream tokens via federation roles."""
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -57,7 +58,6 @@ from portunus.services.federation_service import (
     OPENROUTER_IDENTITY_TOKEN_SECONDS,
     OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM,
     OPENROUTER_TOKEN_URL,
-    PSEUDONYM_HEX_LENGTH,
     TOKEN_EXCHANGE_GRANT_TYPE,
     AnthropicTokenExchange,
     FederationIdentity,
@@ -69,12 +69,13 @@ from portunus.services.federation_service import (
     StsFederationService,
     TokenMintService,
     WebIdentityToken,
+    attribution_handle,
     caller_project,
     caller_role_name,
     caller_session,
     caller_user,
+    identity_token_id,
     identity_token_tags,
-    pseudonym,
     validate_federation_role_arn,
 )
 
@@ -108,7 +109,17 @@ PSEUDONYMOUS_CONFIG = FederationConfig(
     sts_endpoint_url=STS_ENDPOINT,
     attribution_key=ATTRIBUTION_KEY,
 )
-HEX16 = re.compile(r"^[0-9a-f]{16}$")
+OTHER_ROLE_ARN = (
+    f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/other/"
+    "other-grant@projects.other"
+)
+NAMED_TAG_KEYS = {
+    "portunus:user",
+    "portunus:principal",
+    "portunus:session",
+    "portunus:project",
+}
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 GCP_AUDIENCE = (
     "//iam.googleapis.com/projects/123456789/locations/global/"
@@ -121,6 +132,19 @@ GCP_IAM_URL = (
 )
 # Stands in for the STS web identity token in adapter tests.
 PROOF = "header.payload.signature"
+
+
+def _jwt(claims: dict[str, object]) -> str:
+    """An unsigned JWT-shaped token whose payload is ``claims``."""
+
+    def segment(data: dict[str, object]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b"=").decode()
+
+    return f"{segment({'alg': 'RS256', 'kid': 'example'})}.{segment(claims)}.sig"
+
+
+IDENTITY_TOKEN_ID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+IDENTITY_TOKEN = _jwt({"sub": ROLE_ARN, "jti": IDENTITY_TOKEN_ID, "exp": 1767268800})
 
 
 def _secret(**overrides: object) -> AnthropicWifSecret:
@@ -180,6 +204,7 @@ def _identity() -> FederationIdentity:
             session_token="fed-token",
             expiration=NOW + timedelta(minutes=15),
         ),
+        role_arn=ROLE_ARN,
         user=CALLER_ROLE,
         principal=CALLER_ROLE,
         session="session",
@@ -326,50 +351,87 @@ class TestCallerIdentityFields:
             caller_user(CALLER_ROLE, "some,one")
 
 
-class TestPseudonym:
-    def test_is_sixteen_hex_characters(self):
-        value = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
+class TestAttributionHandle:
+    def test_is_a_full_sha256_hex_digest(self):
+        handle = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
 
-        assert PSEUDONYM_HEX_LENGTH == 16
-        assert HEX16.fullmatch(value)
+        assert HEX64.fullmatch(handle)
 
-    def test_is_hmac_sha256_over_the_tag_key_and_value(self):
+    def test_is_hmac_sha256_over_the_role_arn_and_user(self):
         expected = hmac.new(
             ATTRIBUTION_KEY.encode(),
-            f"portunus:user:{SOURCE_IDENTITY}".encode(),
+            f"{ROLE_ARN}\n{SOURCE_IDENTITY}".encode(),
             hashlib.sha256,
-        ).hexdigest()[:16]
+        ).hexdigest()
 
-        assert pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY) == expected
+        assert (
+            attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY) == expected
+        )
 
     def test_is_deterministic(self):
-        first = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
-        second = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
+        first = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
+        second = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
 
         assert first == second
 
     def test_depends_on_the_key(self):
-        under_key = pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY)
-        under_other = pseudonym(
-            "another-key-0123456789abcdef0123", "portunus:user", SOURCE_IDENTITY
+        under_key = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
+        under_other = attribution_handle(
+            "another-key-0123456789abcdef0123", ROLE_ARN, SOURCE_IDENTITY
         )
 
         assert under_key != under_other
 
-    def test_depends_on_the_tag_key(self):
-        as_user = pseudonym(ATTRIBUTION_KEY, "portunus:user", "example")
-        as_project = pseudonym(ATTRIBUTION_KEY, "portunus:project", "example")
-
-        assert as_user != as_project
-
-    def test_depends_on_the_value(self):
-        one = pseudonym(ATTRIBUTION_KEY, "portunus:user", "one")
-        other = pseudonym(ATTRIBUTION_KEY, "portunus:user", "other")
+    def test_same_user_under_two_grants_gets_two_handles(self):
+        one = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
+        other = attribution_handle(ATTRIBUTION_KEY, OTHER_ROLE_ARN, SOURCE_IDENTITY)
 
         assert one != other
 
-    def test_empty_value_stays_empty(self):
-        assert pseudonym(ATTRIBUTION_KEY, "portunus:project", "") == ""
+    def test_depends_on_the_user(self):
+        one = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, "one@example.com")
+        other = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, "other@example.com")
+
+        assert one != other
+
+    def test_does_not_reveal_its_inputs(self):
+        handle = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
+
+        assert SOURCE_IDENTITY not in handle
+        assert "example-grant" not in handle
+
+
+class TestIdentityTokenId:
+    def test_reads_the_jti_claim(self):
+        assert identity_token_id(IDENTITY_TOKEN) == IDENTITY_TOKEN_ID
+
+    def test_tolerates_an_unpadded_payload(self):
+        # A payload whose base64url length is not a multiple of four.
+        token = _jwt({"jti": "xy"})
+
+        assert len(token.split(".")[1]) % 4 != 0
+        assert identity_token_id(token) == "xy"
+
+    def test_missing_claim_is_none(self):
+        assert identity_token_id(_jwt({"sub": ROLE_ARN})) is None
+
+    @pytest.mark.parametrize("jti", [7, None, ["x"], {"id": "x"}])
+    def test_non_string_claim_is_none(self, jti: object):
+        assert identity_token_id(_jwt({"jti": jti})) is None
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "",
+            "opaque-token",
+            PROOF,
+            "a.!!!.c",
+            "a." + base64.urlsafe_b64encode(b"[1, 2]").decode() + ".c",
+            "a." + base64.urlsafe_b64encode(b"\xff\xfe").decode() + ".c",
+        ],
+    )
+    def test_anything_but_a_jwt_with_a_json_object_payload_is_none(self, token: str):
+        assert identity_token_id(token) is None
 
 
 class TestIdentityTokenTags:
@@ -395,57 +457,67 @@ class TestIdentityTokenTags:
         assert identity_token_tags(_identity(), FEDERATION_CONFIG, "none") is None
         assert identity_token_tags(_identity(), PSEUDONYMOUS_CONFIG, "none") is None
 
-    def test_pseudonymous_replaces_every_value(self):
+    def test_pseudonymous_sends_one_tag_holding_the_handle(self):
         identity = replace(_identity(), user=SOURCE_IDENTITY)
 
         tags = identity_token_tags(identity, PSEUDONYMOUS_CONFIG, "pseudonymous")
 
         assert tags == [
             {
-                "Key": "portunus:user",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY),
-            },
-            {
-                "Key": "portunus:principal",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:principal", CALLER_ROLE),
-            },
-            {
-                "Key": "portunus:session",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:session", "session"),
-            },
-            {
-                "Key": "portunus:project",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:project", "example"),
-            },
+                "Key": "portunus:attributed_to",
+                "Value": attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY),
+            }
         ]
-        values = {tag["Value"] for tag in tags}
-        assert all(HEX16.fullmatch(value) for value in values)
-        assert values.isdisjoint({SOURCE_IDENTITY, CALLER_ROLE, "session", "example"})
-
-    def test_pseudonymous_keeps_an_empty_project_empty(self):
-        identity = replace(_identity(), project="")
-
-        tags = identity_token_tags(identity, PSEUDONYMOUS_CONFIG, "pseudonymous")
-
-        assert tags is not None
-        assert tags[3] == {"Key": "portunus:project", "Value": ""}
-
-    def test_pseudonyms_are_separated_by_the_configured_tag_key(self):
-        federation_config = PSEUDONYMOUS_CONFIG.model_copy(
-            update={"user_tag_key": "example:user"}
-        )
-        identity = replace(_identity(), user=SOURCE_IDENTITY)
-
-        tags = identity_token_tags(identity, federation_config, "pseudonymous")
-
-        assert tags is not None
-        assert tags[0] == {
-            "Key": "example:user",
-            "Value": pseudonym(ATTRIBUTION_KEY, "example:user", SOURCE_IDENTITY),
+        assert HEX64.fullmatch(tags[0]["Value"])
+        assert NAMED_TAG_KEYS.isdisjoint(tag["Key"] for tag in tags)
+        assert tags[0]["Value"] not in {
+            SOURCE_IDENTITY,
+            CALLER_ROLE,
+            "session",
+            "example",
         }
-        assert tags[0]["Value"] != pseudonym(
-            ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY
+
+    def test_pseudonymous_handle_is_stable_across_sessions_and_projects(self):
+        base = replace(_identity(), user=SOURCE_IDENTITY)
+        varied = replace(
+            base, principal="OtherRole", session="other-session", project="other"
         )
+
+        assert identity_token_tags(
+            base, PSEUDONYMOUS_CONFIG, "pseudonymous"
+        ) == identity_token_tags(varied, PSEUDONYMOUS_CONFIG, "pseudonymous")
+
+    def test_pseudonymous_handle_changes_with_the_federation_role(self):
+        base = replace(_identity(), user=SOURCE_IDENTITY)
+        other_grant = replace(base, role_arn=OTHER_ROLE_ARN)
+
+        assert identity_token_tags(
+            base, PSEUDONYMOUS_CONFIG, "pseudonymous"
+        ) != identity_token_tags(other_grant, PSEUDONYMOUS_CONFIG, "pseudonymous")
+
+    def test_pseudonymous_handle_changes_with_the_user(self):
+        one = replace(_identity(), user="one@example.com")
+        other = replace(_identity(), user="other@example.com")
+
+        assert identity_token_tags(
+            one, PSEUDONYMOUS_CONFIG, "pseudonymous"
+        ) != identity_token_tags(other, PSEUDONYMOUS_CONFIG, "pseudonymous")
+
+    def test_pseudonymous_uses_the_configured_attribution_tag_key(self):
+        federation_config = PSEUDONYMOUS_CONFIG.model_copy(
+            update={"attribution_tag_key": "example:attributed_to"}
+        )
+
+        tags = identity_token_tags(_identity(), federation_config, "pseudonymous")
+
+        assert tags is not None
+        assert [tag["Key"] for tag in tags] == ["example:attributed_to"]
+        assert tags[0]["Value"] == attribution_handle(
+            ATTRIBUTION_KEY, ROLE_ARN, CALLER_ROLE
+        )
+
+    def test_attribution_tag_key_defaults_to_portunus_attributed_to(self):
+        assert FederationConfig().attribution_tag_key == "portunus:attributed_to"
 
     def test_pseudonymous_without_a_key_is_a_configuration_error(self, caplog):
         caplog.set_level(logging.ERROR, logger="api.access")
@@ -713,9 +785,7 @@ class TestStsFederationService:
         )
 
     @pytest.mark.asyncio
-    async def test_web_identity_token_sends_pseudonyms_for_pseudonymous_attribution(
-        self,
-    ):
+    async def test_web_identity_token_sends_one_handle_tag_for_pseudonymous(self):
         session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
         service = StsFederationService(session, PSEUDONYMOUS_CONFIG)
         identity = replace(_identity(), user=SOURCE_IDENTITY)
@@ -725,13 +795,19 @@ class TestStsFederationService:
         )
 
         (client,) = clients
-        tags = client.get_web_identity_token.await_args.kwargs["Tags"]
-        assert tags == identity_token_tags(
-            identity, PSEUDONYMOUS_CONFIG, "pseudonymous"
+        client.get_web_identity_token.assert_awaited_once_with(
+            Audience=["https://api.example.com"],
+            SigningAlgorithm="RS256",
+            DurationSeconds=IDENTITY_TOKEN_SECONDS,
+            Tags=[
+                {
+                    "Key": "portunus:attributed_to",
+                    "Value": attribution_handle(
+                        ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY
+                    ),
+                }
+            ],
         )
-        values = {tag["Value"] for tag in tags}
-        assert all(HEX16.fullmatch(value) for value in values)
-        assert values.isdisjoint({SOURCE_IDENTITY, CALLER_ROLE, "session", "example"})
 
     @pytest.mark.asyncio
     async def test_web_identity_token_pseudonymous_without_a_key_fails_before_sts(
@@ -1970,7 +2046,9 @@ class TestTokenMintService:
         assert minted.token == "sk-ant-oat01-example"
 
     @pytest.mark.asyncio
-    async def test_pseudonymous_mint_sends_pseudonyms_and_never_the_values(self):
+    async def test_pseudonymous_mint_sends_one_handle_tag_and_never_the_values(
+        self,
+    ):
         session, clients = _sts_session(
             assume_role={**ASSUME_ROLE_RESPONSE, "SourceIdentity": SOURCE_IDENTITY},
             get_web_identity_token=WEB_IDENTITY_RESPONSE,
@@ -1988,25 +2066,108 @@ class TestTokenMintService:
 
         _, web_identity = clients
         tags = web_identity.get_web_identity_token.await_args.kwargs["Tags"]
-        assert tags == [
-            {
-                "Key": "portunus:user",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:user", SOURCE_IDENTITY),
-            },
-            {
-                "Key": "portunus:principal",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:principal", CALLER_ROLE),
-            },
-            {
-                "Key": "portunus:session",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:session", "session"),
-            },
-            {
-                "Key": "portunus:project",
-                "Value": pseudonym(ATTRIBUTION_KEY, "portunus:project", "example"),
-            },
-        ]
-        values = {tag["Value"] for tag in tags}
-        assert all(HEX16.fullmatch(value) for value in values)
-        assert values.isdisjoint({SOURCE_IDENTITY, CALLER_ROLE, "session", "example"})
+        handle = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
+        assert tags == [{"Key": "portunus:attributed_to", "Value": handle}]
+        assert NAMED_TAG_KEYS.isdisjoint(tag["Key"] for tag in tags)
+        assert handle not in {SOURCE_IDENTITY, CALLER_ROLE, "session", "example"}
         assert minted.token == "sk-ant-oat01-example"
+        assert minted.attribution_handle == handle
+
+    @pytest.mark.asyncio
+    async def test_pseudonymous_mint_logs_the_handle_with_the_cleartext_values(
+        self, caplog
+    ):
+        caplog.set_level(logging.INFO, logger="api.access")
+        service, sts, _, _, _, _ = self._service(PSEUDONYMOUS_CONFIG)
+        sts.assume_federation_role.return_value = replace(
+            _identity(), user=SOURCE_IDENTITY
+        )
+        sts.web_identity_token.side_effect = None
+        sts.web_identity_token.return_value = WebIdentityToken(
+            token=IDENTITY_TOKEN, expires_at=NOW + timedelta(minutes=15)
+        )
+        handle = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
+
+        minted = await service.mint(
+            CALLER_CREDENTIALS, CALLER, _secret(attribution="pseudonymous")
+        )
+
+        (record,) = [r for r in caplog.records if r.getMessage().startswith("Minted")]
+        assert record.levelno == logging.INFO
+        assert record.getMessage() == (
+            f"Minted AnthropicWifSecret token: jti={IDENTITY_TOKEN_ID} "
+            f"attributed_to={handle} role={ROLE_ARN} user={SOURCE_IDENTITY} "
+            f"principal={CALLER_ROLE} session=session project=example"
+        )
+        # The structured formatter emits these ``extra`` fields as JSON keys.
+        fields = vars(record)
+        assert fields["identity_token_id"] == IDENTITY_TOKEN_ID
+        assert fields["attribution"] == "pseudonymous"
+        assert fields["attribution_handle"] == handle
+        assert fields["federation_role_arn"] == ROLE_ARN
+        assert fields["user"] == SOURCE_IDENTITY
+        assert fields["principal"] == CALLER_ROLE
+        assert fields["session"] == "session"
+        assert fields["project"] == "example"
+        assert ATTRIBUTION_KEY not in caplog.text
+        assert IDENTITY_TOKEN not in caplog.text
+        assert minted.identity_token_id == IDENTITY_TOKEN_ID
+        assert minted.attribution_handle == handle
+
+    @pytest.mark.asyncio
+    async def test_pseudonymous_handle_changes_with_the_federation_role(self):
+        service, sts, _, _, _, _ = self._service(PSEUDONYMOUS_CONFIG)
+        sts.assume_federation_role.side_effect = lambda credentials, principal, arn: (
+            replace(_identity(), role_arn=arn)
+        )
+
+        one = await service.mint(
+            CALLER_CREDENTIALS, CALLER, _secret(attribution="pseudonymous")
+        )
+        other = await service.mint(
+            CALLER_CREDENTIALS,
+            CALLER,
+            _secret(attribution="pseudonymous", federation_role_arn=OTHER_ROLE_ARN),
+        )
+
+        assert one.attribution_handle is not None
+        assert other.attribution_handle is not None
+        assert one.attribution_handle != other.attribution_handle
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("attribution", ["full", "none"])
+    async def test_every_mint_logs_the_identity_token_id(
+        self, attribution: str, caplog
+    ):
+        caplog.set_level(logging.INFO, logger="api.access")
+        service, sts, _, _, _, _ = self._service()
+        sts.web_identity_token.side_effect = None
+        sts.web_identity_token.return_value = WebIdentityToken(
+            token=IDENTITY_TOKEN, expires_at=NOW + timedelta(minutes=15)
+        )
+
+        minted = await service.mint(
+            CALLER_CREDENTIALS, CALLER, _secret(attribution=attribution)
+        )
+
+        (record,) = [r for r in caplog.records if r.getMessage().startswith("Minted")]
+        assert record.getMessage() == (
+            f"Minted AnthropicWifSecret token: jti={IDENTITY_TOKEN_ID} "
+            f"role={ROLE_ARN} user={CALLER_ROLE} principal={CALLER_ROLE} "
+            "session=session project=example"
+        )
+        assert vars(record)["attribution"] == attribution
+        assert vars(record)["attribution_handle"] is None
+        assert IDENTITY_TOKEN not in caplog.text
+        assert minted.identity_token_id == IDENTITY_TOKEN_ID
+        assert minted.attribution_handle is None
+
+    @pytest.mark.asyncio
+    async def test_identity_token_without_a_jti_mints_and_logs_a_dash(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
+        service, _, _, _, _, _ = self._service()
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+
+        assert minted.identity_token_id is None
+        assert "Minted AnthropicWifSecret token: jti=- role=" in caplog.text
