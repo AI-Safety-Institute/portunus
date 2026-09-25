@@ -7,8 +7,8 @@ Minting has two independent parts:
    credentials, assume the secret's federation role, then have that session
    request an STS web identity token. The result is a signed JWT whose subject
    is the federation role and whose tags carry the user, the caller's role
-   name, its session name and the project, as they are, pseudonymised or not
-   at all, per the secret's ``attribution``.
+   name, its session name and the project, or one opaque attribution handle,
+   or nothing, per the secret's ``attribution``.
 2. Exchange: trade the JWT for a provider bearer token. Each provider has an
    adapter with the same ``exchange(proof, secret)`` shape.
    :class:`AnthropicTokenExchange`, :class:`OpenAiTokenExchange` and
@@ -20,13 +20,15 @@ Minting has two independent parts:
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
+import json
 import logging
 import re
 import urllib.parse
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Protocol, Sequence
 
@@ -106,7 +108,6 @@ _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
 # and source identities may also contain ",", so a valid one is not always a
 # valid tag value.
 _SESSION_TAG_VALUE = re.compile(r"^[\w .:/=+\-@]*$")
-PSEUDONYM_HEX_LENGTH = 16
 # /authorise has a 9 s budget (app.py), and the caller's identity check and
 # secret fetch run before minting starts. The per-call limits below add up to
 # more than that, so mint() also has an overall deadline.
@@ -128,6 +129,7 @@ class FederationIdentity:
 
     Attributes:
         credentials: The federation session's credentials
+        role_arn: The federation role the session assumed
         user: The caller's STS source identity, or its IAM role name when its
             session carries none
         principal: The caller's IAM role name (also the federation session's
@@ -137,6 +139,7 @@ class FederationIdentity:
     """
 
     credentials: AwsCredentials
+    role_arn: str
     user: str
     principal: str
     session: str
@@ -153,10 +156,22 @@ class WebIdentityToken:
 
 @dataclass(frozen=True)
 class MintedToken:
-    """A provider bearer token and when it stops being valid."""
+    """A provider bearer token and when it stops being valid.
+
+    Attributes:
+        token: The bearer token
+        expires_at: When the provider stops accepting it
+        identity_token_id: ``jti`` of the identity token it was exchanged for,
+            or None when that token carried none. Adapters leave it unset;
+            :meth:`TokenMintService.mint` fills it in.
+        attribution_handle: The handle a ``pseudonymous`` identity token
+            carried; None in the other modes. Filled in as above.
+    """
 
     token: str
     expires_at: datetime
+    identity_token_id: Optional[str] = None
+    attribution_handle: Optional[str] = None
 
 
 def validate_federation_role_arn(
@@ -253,17 +268,36 @@ def caller_project(principal: PrincipalInfo) -> str:
     return project
 
 
-def pseudonym(key: str, tag_key: str, value: str) -> str:
-    """A keyed pseudonym for one tag value; an empty value stays empty.
+def attribution_handle(key: str, role_arn: str, user: str) -> str:
+    """The opaque handle a ``pseudonymous`` identity token carries for a caller.
 
-    The first ``PSEUDONYM_HEX_LENGTH`` hex characters of HMAC-SHA256 over
-    ``<tag_key>:<value>`` under ``key``. The tag key is part of the input so
-    one value carried under two tags gets two unrelated pseudonyms.
+    The hex digest of HMAC-SHA256 over ``role_arn``, a newline and ``user``
+    under ``key``. Stable for one caller within one grant, so a provider can
+    aggregate a caller's usage without learning who they are; the role ARN in
+    the input gives the same caller an unrelated handle under another grant.
+    Only Portunus can resolve it: :func:`_log_mint` pairs it with the
+    cleartext values.
     """
-    if not value:
-        return ""
-    digest = hmac.new(key.encode(), f"{tag_key}:{value}".encode(), hashlib.sha256)
-    return digest.hexdigest()[:PSEUDONYM_HEX_LENGTH]
+    message = "\n".join([role_arn, user]).encode()
+    return hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
+
+
+def identity_token_id(token: str) -> Optional[str]:
+    """The ``jti`` of a JWT, read from its payload without verification.
+
+    Providers record the ``jti`` of the identity token they exchange, so it
+    is the correlation id between their records and Portunus's. None when
+    ``token`` is not a JWT or its payload carries no string ``jti``.
+    """
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(
+            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        )
+    except (IndexError, ValueError):
+        return None
+    jti = claims.get("jti") if isinstance(claims, dict) else None
+    return jti if isinstance(jti, str) else None
 
 
 def require_attribution_key(federation_config: FederationConfig) -> str:
@@ -293,8 +327,9 @@ def identity_token_tags(
     """The ``Tags`` for GetWebIdentityToken, or None to send none.
 
     ``full`` carries the identity's user, principal, session and project under
-    the configured tag keys; ``pseudonymous`` carries a :func:`pseudonym` of
-    each, with an empty project staying empty; ``none`` returns None.
+    the configured tag keys; ``pseudonymous`` carries one tag, the
+    :func:`attribution_handle` under ``attribution_tag_key``; ``none``
+    returns None.
 
     Raises:
         ConfigurationError: ``pseudonymous`` without
@@ -302,16 +337,16 @@ def identity_token_tags(
     """
     if attribution == "none":
         return None
-    tags = [
-        (federation_config.user_tag_key, identity.user),
-        (federation_config.principal_tag_key, identity.principal),
-        (federation_config.session_tag_key, identity.session),
-        (federation_config.project_tag_key, identity.project),
-    ]
     if attribution == "pseudonymous":
         key = require_attribution_key(federation_config)
-        tags = [(tag_key, pseudonym(key, tag_key, value)) for tag_key, value in tags]
-    return [{"Key": tag_key, "Value": value} for tag_key, value in tags]
+        handle = attribution_handle(key, identity.role_arn, identity.user)
+        return [{"Key": federation_config.attribution_tag_key, "Value": handle}]
+    return [
+        {"Key": federation_config.user_tag_key, "Value": identity.user},
+        {"Key": federation_config.principal_tag_key, "Value": identity.principal},
+        {"Key": federation_config.session_tag_key, "Value": identity.session},
+        {"Key": federation_config.project_tag_key, "Value": identity.project},
+    ]
 
 
 def _client_error_code(error: ClientError) -> str:
@@ -401,6 +436,7 @@ class StsFederationService:
                 session_token=issued["SessionToken"],
                 expiration=issued["Expiration"],
             ),
+            role_arn=role_arn,
             user=caller_user(role_name, response.get("SourceIdentity")),
             principal=role_name,
             session=session,
@@ -879,15 +915,56 @@ class TokenMintService:
                 f"No token exchange for secret type {type(secret).__name__}"
             )
         # identity_token_tags() would also raise, but only after AssumeRole.
-        if secret.attribution == "pseudonymous":
+        key = (
             require_attribution_key(self.federation_config)
+            if secret.attribution == "pseudonymous"
+            else None
+        )
         try:
             async with asyncio.timeout(MINT_DEADLINE_SECONDS):
                 identity = await self.sts.assume_federation_role(
                     credentials, principal, secret.federation_role_arn
                 )
                 proof = await route.prove(identity, secret)
-                return await route.adapter.exchange(proof, secret)
+                minted = await route.adapter.exchange(proof, secret)
         except TimeoutError as e:
             logger.error(f"Token minting exceeded {MINT_DEADLINE_SECONDS} s")
             raise UpstreamServiceError("Token minting timed out") from e
+        token_id = identity_token_id(proof)
+        handle = (
+            attribution_handle(key, identity.role_arn, identity.user) if key else None
+        )
+        _log_mint(secret, identity, token_id, handle)
+        return replace(minted, identity_token_id=token_id, attribution_handle=handle)
+
+
+def _log_mint(
+    secret: MintSecretBase,
+    identity: FederationIdentity,
+    token_id: Optional[str],
+    handle: Optional[str],
+) -> None:
+    """One line per mint pairing the token's ``jti`` with who it was minted for.
+
+    In ``pseudonymous`` mode this is the only place the handle meets the
+    cleartext values, so it is what resolves a provider's report. The token
+    and the attribution key are never logged.
+    """
+    fields = {
+        "identity_token_id": token_id,
+        "attribution": secret.attribution,
+        "attribution_handle": handle,
+        "federation_role_arn": identity.role_arn,
+        "user": identity.user,
+        "principal": identity.principal,
+        "session": identity.session,
+        "project": identity.project,
+    }
+    attributed = f" attributed_to={handle}" if handle else ""
+    logger.info(
+        f"Minted {type(secret).__name__} token: jti={token_id or '-'}"
+        f"{attributed} role={identity.role_arn} user={identity.user} "
+        f"principal={identity.principal} session={identity.session} "
+        f"project={identity.project}",
+        extra=fields,
+    )

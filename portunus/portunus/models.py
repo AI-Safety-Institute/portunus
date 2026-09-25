@@ -574,8 +574,9 @@ class MintSecretBase(BaseModel):
             in an allowed account and under the deployment's federation role
             path.
         attribution: What the identity token's request tags carry. ``full``
-            sends the four request tags as they are; ``pseudonymous`` replaces
-            each tag value with a keyed pseudonym; ``none`` sends no tags.
+            sends the four request tags as they are; ``pseudonymous`` sends
+            one tag holding an opaque handle only Portunus can resolve;
+            ``none`` sends no tags.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -718,6 +719,11 @@ class AuthResult:
             configured prefix; an empty string means no prefix.
         expires_at: When a minted credential stops being valid. None for
             stored keys.
+        identity_token_id: The ``jti`` of the STS identity token a minted
+            credential was exchanged for, the correlation id providers record
+            at exchange time. None for stored keys or when the token had none.
+        attribution_handle: The opaque handle the identity token carried for a
+            secret with ``attribution: pseudonymous``. None otherwise.
     """
 
     api_key: str
@@ -725,6 +731,8 @@ class AuthResult:
     output_header: Optional[str] = None
     output_prefix: Optional[str] = None
     expires_at: Optional[datetime] = None
+    identity_token_id: Optional[str] = None
+    attribution_handle: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AuthResult":
@@ -746,6 +754,8 @@ class AuthResult:
             output_header=data.get("output_header"),
             output_prefix=data.get("output_prefix"),
             expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
+            identity_token_id=data.get("identity_token_id"),
+            attribution_handle=data.get("attribution_handle"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -838,6 +848,11 @@ class MetadataRecord:
         secret_arn: Full ARN of the AWS Secrets Manager secret used for the API
             key. None if not available. Downstream consumers parse the name
             from the ARN when needed.
+        identity_token_id: ``jti`` of the STS identity token the request's
+            minted credential was exchanged for; providers record it at
+            exchange time. None for stored keys.
+        attribution_handle: Opaque handle the identity token carried for a
+            secret with ``attribution: pseudonymous``. None otherwise.
     """
 
     request_id: str
@@ -849,6 +864,8 @@ class MetadataRecord:
     project: Optional[str] = None
     session_name: Optional[str] = None
     secret_arn: Optional[str] = None
+    identity_token_id: Optional[str] = None
+    attribution_handle: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -863,6 +880,8 @@ class MetadataRecord:
             "project": self.project,
             "session_name": self.session_name,
             "secret_arn": self.secret_arn,
+            "identity_token_id": self.identity_token_id,
+            "attribution_handle": self.attribution_handle,
         }
 
     @classmethod
@@ -879,6 +898,8 @@ class MetadataRecord:
             {"name": "project", "type": "string"},
             {"name": "session_name", "type": "string"},
             {"name": "secret_arn", "type": "string"},
+            {"name": "identity_token_id", "type": "string"},
+            {"name": "attribution_handle", "type": "string"},
         ]
 
 
@@ -1311,6 +1332,8 @@ class JoinedLogRecord:
     metadata_project: Optional[str]
     metadata_session_name: Optional[str]
     metadata_secret_arn: Optional[str]
+    metadata_identity_token_id: Optional[str]
+    metadata_attribution_handle: Optional[str]
 
     # Request headers (from RequestHeadersRecord with request_headers_ prefix)
     request_headers_raw_headers: Union[Dict[str, str], RowLike]
@@ -1431,6 +1454,8 @@ class JoinedLogRecord:
             {"name": "metadata_project", "type": "string"},
             {"name": "metadata_session_name", "type": "string"},
             {"name": "metadata_secret_arn", "type": "string"},
+            {"name": "metadata_identity_token_id", "type": "string"},
+            {"name": "metadata_attribution_handle", "type": "string"},
             # Request headers data
             {"name": "request_headers_raw_headers", "type": "map<string,string>"},
             {"name": "request_headers_decoded", "type": "map<string,string>"},

@@ -156,6 +156,8 @@ Portunus captures **full request and response data** — bodies, headers, and tr
 - **Request and response bodies are stored verbatim**, including prompts, completions, and any data (personal, commercial, or otherwise sensitive) that clients send or receive.
 - **Headers and URLs are stored verbatim**, except the headers that can carry a credential: the provider API key header (`API_KEY_HEADER`), the header the real upstream credential is injected into, and every name in `KNOWN_AUTH_HEADERS`. These are dropped before logging. No other headers are filtered — secrets carried in any *other* header, or embedded in a URL or body, **will be captured**.
 
+For minted tokens, the `jti` of the STS identity token (which providers record when they exchange it) and, for `pseudonymous` secrets, the attribution handle are written to the metadata record, the X-Ray trace and the mint log line, so a provider-side record can be matched to Portunus's; the tokens themselves are not logged.
+
 Portunus does **not** attempt to redact secrets or sensitive content from what it logs. If you need redaction, filtering, or access tiering, do it downstream of the Kinesis streams (e.g. in the ETL/query layer that consumes the logs) and restrict who can read the raw stream output. Treat the raw log storage as containing everything your clients send and receive.
 
 ## Configuration
@@ -194,7 +196,8 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `FEDERATION_PRINCIPAL_TAG_KEY` | Session tag key carrying the caller's IAM role name on identity tokens | `portunus:principal` |
 | `FEDERATION_SESSION_TAG_KEY` | Session tag key carrying the caller's role session name on identity tokens | `portunus:session` |
 | `FEDERATION_PROJECT_TAG_KEY` | Session tag key carrying the caller's project on identity tokens | `portunus:project` |
-| `FEDERATION_ATTRIBUTION_KEY` | HMAC key for secrets with `attribution: pseudonymous`: a random secret of at least 32 bytes. Needed only when a secret uses `pseudonymous`; rotating it changes every pseudonym | - |
+| `FEDERATION_ATTRIBUTION_TAG_KEY` | Session tag key carrying the attribution handle on identity tokens for secrets with `attribution: pseudonymous` | `portunus:attributed_to` |
+| `FEDERATION_ATTRIBUTION_KEY` | HMAC key the attribution handle is computed under: a random secret of at least 32 bytes. Needed only when a secret uses `pseudonymous`; rotating it changes every handle | - |
 
 ### Secret formats
 
@@ -210,7 +213,7 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
 
 [docs/federation-examples.md](docs/federation-examples.md) sets up one grant per minted-token type with one set of example values: the federation role as CloudFormation, the lab-side registration, the config secret, and a request through the proxy.
 
-Every minted-token type also accepts `attribution`, which controls what the identity token's request tags carry. `full` (the default) sends the four tags as they are. `pseudonymous` replaces each tag value with a keyed pseudonym, the first 16 hex characters of HMAC-SHA256 over `<tag key>:<value>` under `FEDERATION_ATTRIBUTION_KEY`, so a caller keeps one pseudonym per tag across requests while the provider cannot recover the value; on a deployment without the key, every mint for such a secret fails with 500 until it is set. `none` sends no tags, so the federation role needs no `sts:TagGetWebIdentityToken` permission. In every mode the token's `sub` is the federation role ARN, which names the grant's scope, so a scope slug is visible to the provider regardless of this setting.
+Every minted-token type also accepts `attribution`, which controls what the identity token's request tags carry. `full` (the default) sends the four tags as they are. `pseudonymous` sends one tag, `FEDERATION_ATTRIBUTION_TAG_KEY` (default `portunus:attributed_to`), holding an opaque handle: the hex digest of HMAC-SHA256 over the federation role ARN and the user value under `FEDERATION_ATTRIBUTION_KEY`. The handle is stable for a given caller and grant and different for the same caller under another grant, so a provider can aggregate one caller's usage without learning who they are; only Portunus can resolve it, from the mint log line that pairs it with the cleartext values. On a deployment without the key, every mint for such a secret fails with 500 until it is set. `none` sends no tags, so the federation role needs no `sts:TagGetWebIdentityToken` permission. In every mode the token's `sub` is the federation role ARN, which names the grant's scope, so a scope slug is visible to the provider regardless of this setting.
 
 #### `anthropic_wif`
 
@@ -305,7 +308,7 @@ On the Google side, all deployment concerns: the workload identity pool provider
 
 Unlike stored keys, which are cached for `CACHE_DURATION`, a minted token is cached until the earlier of `CACHE_DURATION` and one minute before the token expires. Concurrent cache misses for one payload and target share a single mint per Portunus process.
 
-The federation role itself (trust policy, identity policy, who may assume it) is a deployment concern, as is how roles under the prefix are named. The secret names the role; Portunus checks the account and prefix and assumes exactly that role. To issue the identity token, the role's identity policy must allow `sts:GetWebIdentityToken` for the secret's `audience` (`sts:IdentityTokenAudience`) and, unless the secret's `attribution` is `none`, `sts:TagGetWebIdentityToken` with `aws:TagKeys` covering the four configured tag keys (`FEDERATION_*_TAG_KEY`). The CLI's default session policy allows `sts:AssumeRole` on the whole prefix, `arn:aws:iam::<caller account>:role/portunus-fed/*`, so which roles a caller can actually assume is bounded by the caller's own identity policy and each role's trust policy. Pass `--federation-role-path` if the deployment uses a different path. The CLI assumes the caller's own role with `RoleSessionName` `portunus`; pass `--session-name` when that role's trust policy only admits a particular session name.
+The federation role itself (trust policy, identity policy, who may assume it) is a deployment concern, as is how roles under the prefix are named. The secret names the role; Portunus checks the account and prefix and assumes exactly that role. To issue the identity token, the role's identity policy must allow `sts:GetWebIdentityToken` for the secret's `audience` (`sts:IdentityTokenAudience`) and, unless the secret's `attribution` is `none`, `sts:TagGetWebIdentityToken` with `aws:TagKeys` covering the tag keys Portunus sends: the four `FEDERATION_*_TAG_KEY` values for `full`, `FEDERATION_ATTRIBUTION_TAG_KEY` for `pseudonymous`. The CLI's default session policy allows `sts:AssumeRole` on the whole prefix, `arn:aws:iam::<caller account>:role/portunus-fed/*`, so which roles a caller can actually assume is bounded by the caller's own identity policy and each role's trust policy. Pass `--federation-role-path` if the deployment uses a different path. The CLI assumes the caller's own role with `RoleSessionName` `portunus`; pass `--session-name` when that role's trust policy only admits a particular session name.
 
 ## Local Development
 

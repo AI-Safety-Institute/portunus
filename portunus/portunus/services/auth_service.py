@@ -224,6 +224,8 @@ class AuthService:
                 output_header=MINTED_TOKEN_HEADER,
                 output_prefix=MINTED_TOKEN_PREFIX,
                 expires_at=minted.expires_at,
+                identity_token_id=minted.identity_token_id,
+                attribution_handle=minted.attribution_handle,
             )
             await self._write_cache(payload, target_host, auth_result)
             return auth_result
