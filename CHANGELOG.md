@@ -91,9 +91,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   every mint with 500 until the key is set. The token's `sub` is the
   federation role ARN in every mode. Every mint logs one INFO line pairing
   the identity token's `jti` (and the handle) with the cleartext role, user,
-  principal, session and project; the `jti` and handle also travel with the
-  cached result into the metadata record (new `identity_token_id` and
-  `attribution_handle` columns) and onto the X-Ray trace as annotations.
+  principal, session and project, which is how a provider's record is
+  matched to a caller.
 
 ### Changed
 - Cached authorization results are keyed by the payload and the proxy's

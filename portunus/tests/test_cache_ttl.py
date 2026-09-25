@@ -1,7 +1,6 @@
 """Tests for cache TTL derivation and the expires_at round trip."""
 
 import json
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -121,65 +120,4 @@ class TestExpiresAtRoundTrips:
         data = _minted_result().to_dict()
 
         assert data["expires_at"] == "2026-01-01T13:00:00+00:00"
-        assert AuthResult.from_dict(data) == _minted_result()
-
-
-IDENTITY_TOKEN_ID = "0f8fad5b-d9cb-469f-a165-70867728950e"
-ATTRIBUTION_HANDLE = "e3" * 32
-
-
-def _attributed_result() -> AuthResult:
-    return replace(
-        _minted_result(),
-        identity_token_id=IDENTITY_TOKEN_ID,
-        attribution_handle=ATTRIBUTION_HANDLE,
-    )
-
-
-class TestIdentityTokenIdRoundTrips:
-    @pytest.mark.asyncio
-    async def test_identity_token_id_and_handle_survive_the_cache(self, fake_redis):
-        cache = _cache_backed_by(fake_redis)
-
-        assert await cache.cache_auth_result(
-            "payload", "api.example.com", _attributed_result(), 60
-        )
-        cached = await cache.get_cached_auth_result("payload", "api.example.com")
-
-        assert cached == _attributed_result()
-
-    @pytest.mark.asyncio
-    async def test_entry_written_before_the_fields_existed_loads_as_none(
-        self, fake_redis
-    ):
-        cache = _cache_backed_by(fake_redis)
-        older = {
-            "api_key": "sk-ant-oat01-example",
-            "principal_info": _minted_result().principal_info.to_dict(),
-            "output_header": "authorization",
-            "output_prefix": "Bearer ",
-            "expires_at": "2026-01-01T13:00:00+00:00",
-        }
-        await fake_redis.set(
-            cache.generate_cache_key("payload", "api.example.com"), json.dumps(older)
-        )
-
-        cached = await cache.get_cached_auth_result("payload", "api.example.com")
-
-        assert cached == _minted_result()
-        assert cached.identity_token_id is None
-        assert cached.attribution_handle is None
-
-    def test_auth_result_dict_round_trip(self):
-        data = _attributed_result().to_dict()
-
-        assert data["identity_token_id"] == IDENTITY_TOKEN_ID
-        assert data["attribution_handle"] == ATTRIBUTION_HANDLE
-        assert AuthResult.from_dict(data) == _attributed_result()
-
-    def test_auth_result_from_dict_without_the_fields(self):
-        data = _minted_result().to_dict()
-        del data["identity_token_id"]
-        del data["attribution_handle"]
-
         assert AuthResult.from_dict(data) == _minted_result()

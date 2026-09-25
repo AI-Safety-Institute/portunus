@@ -313,47 +313,6 @@ class TestPublishConnectionMetadata:
         assert "x-custom-token" not in logged_headers
         assert logged_headers["user-agent"] == "test-client"
 
-    @pytest.mark.asyncio
-    async def test_metadata_carries_the_identity_token_id_and_handle(
-        self, mock_websocket, mock_publish_service, ws_auth_result
-    ):
-        """A minted credential's correlation ids reach the metadata record."""
-        ws_auth_result.auth_result.identity_token_id = "jti-example"
-        ws_auth_result.auth_result.attribution_handle = "ab" * 32
-        mock_websocket.headers = {}
-
-        with patch("portunus.relay.handler.log_ws_headers", new=AsyncMock()):
-            await _publish_connection_metadata(
-                mock_publish_service,
-                mock_websocket,
-                ws_auth_result,
-                "test-req",
-                "upstream.example.com",
-            )
-
-        kwargs = mock_publish_service.publish_metadata.await_args.kwargs
-        assert kwargs["identity_token_id"] == "jti-example"
-        assert kwargs["attribution_handle"] == "ab" * 32
-
-    @pytest.mark.asyncio
-    async def test_metadata_for_a_stored_key_has_no_correlation_ids(
-        self, mock_websocket, mock_publish_service, ws_auth_result
-    ):
-        mock_websocket.headers = {}
-
-        with patch("portunus.relay.handler.log_ws_headers", new=AsyncMock()):
-            await _publish_connection_metadata(
-                mock_publish_service,
-                mock_websocket,
-                ws_auth_result,
-                "test-req",
-                "upstream.example.com",
-            )
-
-        kwargs = mock_publish_service.publish_metadata.await_args.kwargs
-        assert kwargs["identity_token_id"] is None
-        assert kwargs["attribution_handle"] is None
-
 
 class TestUpstreamConnectHeaders:
     """The headers handed to the upstream connect call come from the auth result."""

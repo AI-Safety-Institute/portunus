@@ -211,8 +211,6 @@ async def _publish_connection_metadata(
             timestamp=generate_iso_timestamp(),
             principal_info=ws_auth.auth_result.principal_info.to_dict(),
             secret_arn=ws_auth.secret_arn,
-            identity_token_id=ws_auth.auth_result.identity_token_id,
-            attribution_handle=ws_auth.auth_result.attribution_handle,
         )
     except Exception as e:
         logger.error(f"WS {request_id}: Failed to publish metadata: {e}")

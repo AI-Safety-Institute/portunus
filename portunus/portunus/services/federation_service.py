@@ -28,7 +28,7 @@ import logging
 import re
 import urllib.parse
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Protocol, Sequence
 
@@ -156,22 +156,10 @@ class WebIdentityToken:
 
 @dataclass(frozen=True)
 class MintedToken:
-    """A provider bearer token and when it stops being valid.
-
-    Attributes:
-        token: The bearer token
-        expires_at: When the provider stops accepting it
-        identity_token_id: ``jti`` of the identity token it was exchanged for,
-            or None when that token carried none. Adapters leave it unset;
-            :meth:`TokenMintService.mint` fills it in.
-        attribution_handle: The handle a ``pseudonymous`` identity token
-            carried; None in the other modes. Filled in as above.
-    """
+    """A provider bearer token and when it stops being valid."""
 
     token: str
     expires_at: datetime
-    identity_token_id: Optional[str] = None
-    attribution_handle: Optional[str] = None
 
 
 def validate_federation_role_arn(
@@ -935,7 +923,7 @@ class TokenMintService:
             attribution_handle(key, identity.role_arn, identity.user) if key else None
         )
         _log_mint(secret, identity, token_id, handle)
-        return replace(minted, identity_token_id=token_id, attribution_handle=handle)
+        return minted
 
 
 def _log_mint(
@@ -946,9 +934,12 @@ def _log_mint(
 ) -> None:
     """One line per mint pairing the token's ``jti`` with who it was minted for.
 
-    In ``pseudonymous`` mode this is the only place the handle meets the
-    cleartext values, so it is what resolves a provider's report. The token
-    and the attribution key are never logged.
+    This is the only record that pairs a token with its caller: a provider's
+    report quotes the ``jti`` or the handle, this line names the caller and
+    the time, and the caller's requests in the token's lifetime are found
+    through the per-request logs. The handle is constant for one caller under
+    one grant and recomputable from the key, so nothing is kept per request.
+    The token and the attribution key are never logged.
     """
     fields = {
         "identity_token_id": token_id,

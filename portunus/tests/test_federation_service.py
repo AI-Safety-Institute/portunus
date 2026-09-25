@@ -2071,7 +2071,6 @@ class TestTokenMintService:
         assert NAMED_TAG_KEYS.isdisjoint(tag["Key"] for tag in tags)
         assert handle not in {SOURCE_IDENTITY, CALLER_ROLE, "session", "example"}
         assert minted.token == "sk-ant-oat01-example"
-        assert minted.attribution_handle == handle
 
     @pytest.mark.asyncio
     async def test_pseudonymous_mint_logs_the_handle_with_the_cleartext_values(
@@ -2088,7 +2087,7 @@ class TestTokenMintService:
         )
         handle = attribution_handle(ATTRIBUTION_KEY, ROLE_ARN, SOURCE_IDENTITY)
 
-        minted = await service.mint(
+        await service.mint(
             CALLER_CREDENTIALS, CALLER, _secret(attribution="pseudonymous")
         )
 
@@ -2111,28 +2110,32 @@ class TestTokenMintService:
         assert fields["project"] == "example"
         assert ATTRIBUTION_KEY not in caplog.text
         assert IDENTITY_TOKEN not in caplog.text
-        assert minted.identity_token_id == IDENTITY_TOKEN_ID
-        assert minted.attribution_handle == handle
 
     @pytest.mark.asyncio
-    async def test_pseudonymous_handle_changes_with_the_federation_role(self):
+    async def test_pseudonymous_handle_changes_with_the_federation_role(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
         service, sts, _, _, _, _ = self._service(PSEUDONYMOUS_CONFIG)
         sts.assume_federation_role.side_effect = lambda credentials, principal, arn: (
             replace(_identity(), role_arn=arn)
         )
 
-        one = await service.mint(
+        await service.mint(
             CALLER_CREDENTIALS, CALLER, _secret(attribution="pseudonymous")
         )
-        other = await service.mint(
+        await service.mint(
             CALLER_CREDENTIALS,
             CALLER,
             _secret(attribution="pseudonymous", federation_role_arn=OTHER_ROLE_ARN),
         )
 
-        assert one.attribution_handle is not None
-        assert other.attribution_handle is not None
-        assert one.attribution_handle != other.attribution_handle
+        one, other = [
+            vars(r)["attribution_handle"]
+            for r in caplog.records
+            if r.getMessage().startswith("Minted")
+        ]
+        assert one is not None
+        assert other is not None
+        assert one != other
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("attribution", ["full", "none"])
@@ -2146,9 +2149,7 @@ class TestTokenMintService:
             token=IDENTITY_TOKEN, expires_at=NOW + timedelta(minutes=15)
         )
 
-        minted = await service.mint(
-            CALLER_CREDENTIALS, CALLER, _secret(attribution=attribution)
-        )
+        await service.mint(CALLER_CREDENTIALS, CALLER, _secret(attribution=attribution))
 
         (record,) = [r for r in caplog.records if r.getMessage().startswith("Minted")]
         assert record.getMessage() == (
@@ -2159,15 +2160,12 @@ class TestTokenMintService:
         assert vars(record)["attribution"] == attribution
         assert vars(record)["attribution_handle"] is None
         assert IDENTITY_TOKEN not in caplog.text
-        assert minted.identity_token_id == IDENTITY_TOKEN_ID
-        assert minted.attribution_handle is None
 
     @pytest.mark.asyncio
     async def test_identity_token_without_a_jti_mints_and_logs_a_dash(self, caplog):
         caplog.set_level(logging.INFO, logger="api.access")
         service, _, _, _, _, _ = self._service()
 
-        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+        await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
 
-        assert minted.identity_token_id is None
         assert "Minted AnthropicWifSecret token: jti=- role=" in caplog.text
