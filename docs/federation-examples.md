@@ -11,7 +11,7 @@ A federation grant is an IAM role plus a Secrets Manager secret. The role (the *
 | STS issuer URL | `https://<uuid>.tokens.sts.global.api.aws` |
 | Proxy hostnames | `<provider>.proxy.example.org` |
 
-Portunus runs at its defaults (`FEDERATION_ROLE_PATH_PREFIX=/portunus-fed/`, tag keys `portunus:user`, `portunus:principal`, `portunus:session` and `portunus:project`, `API_KEY_HEADER=authorization`, `API_KEY_PREFIX="Bearer "`) with `FEDERATION_ALLOWED_ACCOUNT_IDS=123456789012` and `FEDERATION_STS_ENDPOINT_URL` set to the interface endpoint.
+Portunus runs at its defaults (`FEDERATION_ROLE_PATH_PREFIX=/portunus-fed/`, tag keys `portunus:user`, `portunus:principal`, `portunus:session`, `portunus:project` and `portunus:attributed_to`, `API_KEY_HEADER=authorization`, `API_KEY_PREFIX="Bearer "`) with `FEDERATION_ALLOWED_ACCOUNT_IDS=123456789012` and `FEDERATION_STS_ENDPOINT_URL` set to the interface endpoint.
 
 Each grant takes five steps: create the federation role, register it with the lab, write the config secret, encode a payload from a caller role, make a request through the proxy. On a request, Portunus assumes the role with the caller's credentials, has STS issue an identity token (a JWT whose `sub` is the role ARN and whose tags describe the caller), exchanges it at the lab for a provider token and injects that as `authorization: Bearer …`. Caching, the 403/503 mapping and each type's exchange sequence are in the README under [Secret formats](../README.md#secret-formats).
 
@@ -40,7 +40,7 @@ Each grant takes five steps: create the federation role, register it with the la
 Deploy the template below with `ProviderAudience=https://api.anthropic.com`. The same template serves every provider; only the audience changes. It creates the role and three policy documents:
 
 - Trust policy: roles matching `CallerRoleArnPattern` may assume it, and only through `StsVpcEndpointId`. Drop the `aws:SourceVpce` condition if Portunus reaches STS over the public endpoint.
-- Inline policy: `sts:GetWebIdentityToken` for `ProviderAudience` only and for at most 1800 s, plus `sts:TagGetWebIdentityToken` for the four tag keys Portunus sends. Substitute the deployment's `FEDERATION_*_TAG_KEY` values if they differ.
+- Inline policy: `sts:GetWebIdentityToken` for `ProviderAudience` only and for at most 1800 s, plus `sts:TagGetWebIdentityToken` for the five tag keys Portunus may send. Substitute the deployment's `FEDERATION_*_TAG_KEY` values if they differ.
 - Permissions boundary: those two actions and nothing else, so the role cannot be widened later.
 
 Note: whatever deploys the template needs its IAM role permissions on `arn:aws:iam::123456789012:role/portunus-fed-*` as well as `…:role/portunus-fed/*`. IAM authorises calls on a role that does not exist yet (`GetRole` before create, `DeleteRole` on rollback) by bare name, without the path.
@@ -123,6 +123,7 @@ Resources:
                       - 'portunus:principal'
                       - 'portunus:session'
                       - 'portunus:project'
+                      - 'portunus:attributed_to'
 
 Outputs:
   FederationRoleArn:
@@ -148,7 +149,7 @@ Claude Console → Settings → Workload identity → Connect workload → AWS. 
 
 ### 3. Write the config secret
 
-The four ids are required; `audience` defaults to `https://api.anthropic.com`.
+The four ids are required; `audience` defaults to `https://api.anthropic.com`. `attribution` (`full` here, the default) is accepted by every provider's secret and chooses what the lab learns about the caller; see [Attribution](#attribution).
 
 <details><summary>Secret: anthropic_wif</summary>
 
@@ -161,7 +162,8 @@ The four ids are required; `audience` defaults to `https://api.anthropic.com`.
   "organization_id": "3f1c9d2e-7b4a-4c6d-9e8f-0a1b2c3d4e5f",
   "service_account_id": "svac_01J8ZQ2M9K3N4P5R6S7T8V9W0Y",
   "workspace_id": "wrkspc_01J8ZQ2M9K3N4P5R6S7T8V9W0Z",
-  "audience": "https://api.anthropic.com"
+  "audience": "https://api.anthropic.com",
+  "attribution": "full"
 }
 ```
 
@@ -368,6 +370,33 @@ curl -sS "https://vertex.proxy.example.org/v1/projects/example-project/locations
 ```
 
 200 from Vertex AI, served with a `ya29.…` access token for `example-sa`.
+
+## Attribution
+
+Every config secret accepts `attribution`, which decides what the identity token's tags say about the caller. For a payload encoded from role `UserProfile_example_example-project` (no source identity, session `portunus`, project `example-project`), the lab sees under `request_tags`:
+
+| `attribution` | Tags |
+|---|---|
+| `full` (default) | `portunus:user` = `UserProfile_example_example-project`<br>`portunus:principal` = `UserProfile_example_example-project`<br>`portunus:session` = `portunus`<br>`portunus:project` = `example-project` |
+| `pseudonymous` | `portunus:attributed_to` = `caf25aecec46a3862e83a35fb1c0bb8ab7e5c86d07503a02d75719f3fb4ad004` |
+| `none` | *(no tags)* |
+
+The `pseudonymous` handle is the hex digest of HMAC-SHA256 over the federation role ARN, a newline and the user value, keyed by `FEDERATION_ATTRIBUTION_KEY` (`example-attribution-key-0123456789abcdef` in the row above); the tag key is `FEDERATION_ATTRIBUTION_TAG_KEY`.
+
+- It is stable for one caller under one grant, so the lab can aggregate that caller's usage or condition on the handle, and different for the same caller under another grant. The principal, session and project are not in the input and not sent.
+- Only Portunus can resolve it, from the mint log line below. Rotating the key changes every handle.
+- A `pseudonymous` secret on a deployment without the key fails every mint with 500 until the key is set.
+- `none` passes no `Tags` to `GetWebIdentityToken`, so the federation role needs no `sts:TagGetWebIdentityToken`.
+- In every mode the JWT's `sub` is the federation role ARN, so `teams/example-team` and `portunus-fed-example-grant` are visible to the lab.
+- A lab-side mapping or condition that reads `portunus:user`, `portunus:principal`, `portunus:session` or `portunus:project` fails or maps to nothing for a `pseudonymous` grant. Use `portunus:attributed_to`, or `sub`, for such grants.
+
+### Correlating a lab's records
+
+Labs treat the identity token's `jti` as single-use and record it when they exchange it, so it is the correlation id for incident reports in every `attribution` mode. Portunus reads the `jti` from the token it minted and writes one log line per mint: `Minted AnthropicWifSecret token: jti=<jti> attributed_to=<handle> role=<arn> user=<user> principal=<principal> session=<session> project=<project>`, with the same values as structured fields `identity_token_id`, `attribution`, `attribution_handle`, `federation_role_arn`, `user`, `principal`, `session` and `project`. `attributed_to` is omitted unless `pseudonymous`.
+
+A lab's report quotes a `jti` or a handle. The mint line names the caller and the time; the caller's requests for the token's lifetime are then found through the per-request logs, whose `metadata` records carry the principal, session and project. Nothing is recorded per request for this: the `jti` identifies one mint, and the handle is constant for one caller under one grant and recomputable from the key.
+
+Neither the token nor `FEDERATION_ATTRIBUTION_KEY` is logged.
 
 ## Reference
 

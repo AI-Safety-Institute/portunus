@@ -555,6 +555,11 @@ class SecretsManagerAuthPayload(BaseModel):
     host: Optional[str] = None
 
 
+Attribution = Literal["full", "pseudonymous", "none"]
+"""What a minted token's identity proof says about the caller; see
+``MintSecretBase.attribution``."""
+
+
 class MintSecretBase(BaseModel):
     """Common fields of secrets that mint a token instead of storing one.
 
@@ -568,12 +573,17 @@ class MintSecretBase(BaseModel):
         federation_role_arn: IAM role whose trust policy admits the caller,
             in an allowed account and under the deployment's federation role
             path.
+        attribution: What the identity token's request tags carry. ``full``
+            sends the four request tags as they are; ``pseudonymous`` sends
+            one tag holding an opaque handle only Portunus can resolve;
+            ``none`` sends no tags.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     host: str = Field(min_length=1)
     federation_role_arn: str = Field(min_length=1)
+    attribution: Attribution = "full"
 
 
 class AnthropicWifSecret(MintSecretBase):
