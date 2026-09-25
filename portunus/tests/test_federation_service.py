@@ -29,11 +29,13 @@ from portunus.exceptions import (
 from portunus.models import (
     GCP_CLOUD_PLATFORM_SCOPE,
     OPENAI_API_AUDIENCE,
+    OPENROUTER_API_AUDIENCE,
     AnthropicWifSecret,
     AwsCredentials,
     GcpWifSecret,
     MintSecretBase,
     OpenAiWifSecret,
+    OpenRouterWifSecret,
     PrincipalInfo,
 )
 from portunus.services import federation_service
@@ -49,6 +51,9 @@ from portunus.services.federation_service import (
     OPENAI_IDENTITY_TOKEN_SECONDS,
     OPENAI_IDENTITY_TOKEN_SIGNING_ALGORITHM,
     OPENAI_TOKEN_URL,
+    OPENROUTER_IDENTITY_TOKEN_SECONDS,
+    OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM,
+    OPENROUTER_TOKEN_URL,
     TOKEN_EXCHANGE_GRANT_TYPE,
     AnthropicTokenExchange,
     FederationIdentity,
@@ -56,6 +61,7 @@ from portunus.services.federation_service import (
     MintedToken,
     OAuthTokenResponse,
     OpenAiTokenExchange,
+    OpenRouterTokenExchange,
     StsFederationService,
     TokenMintService,
     WebIdentityToken,
@@ -140,6 +146,17 @@ def _openai_secret(**overrides: object) -> OpenAiWifSecret:
     }
     data.update(overrides)
     return OpenAiWifSecret.model_validate(data)
+
+
+def _openrouter_secret(**overrides: object) -> OpenRouterWifSecret:
+    data: dict[str, object] = {
+        "type": "openrouter_wif",
+        "host": "openrouter.ai",
+        "federation_role_arn": ROLE_ARN,
+        "federation_policy_id": "fedpol_example",
+    }
+    data.update(overrides)
+    return OpenRouterWifSecret.model_validate(data)
 
 
 def _identity() -> FederationIdentity:
@@ -618,6 +635,14 @@ def _openai_exchange(
     return OpenAiTokenExchange(http_client=client), requests
 
 
+def _openrouter_exchange(
+    handler: Callable[[httpx.Request], httpx.Response] | Exception,
+) -> tuple[OpenRouterTokenExchange, list[httpx.Request]]:
+    """An OpenRouter adapter over an in-memory transport."""
+    client, requests = _recording_client(handler)
+    return OpenRouterTokenExchange(http_client=client), requests
+
+
 def _token_response(request: httpx.Request) -> httpx.Response:
     return httpx.Response(
         200, json={"access_token": "sk-ant-oat01-example", "expires_in": 3600}
@@ -830,6 +855,114 @@ class TestOAuthTokenResponse:
         assert parsed.minted_token(NOW) == MintedToken(
             token="token", expires_at=NOW + timedelta(seconds=900)
         )
+
+
+# The documented response shape; fields other than access_token and
+# expires_in are ignored.
+OPENROUTER_TOKEN_RESPONSE = {
+    "access_token": "eyJ.openrouter.example",
+    "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+    "token_type": "Bearer",
+    "expires_in": 900,
+    "scope": "inference",
+}
+
+
+def _openrouter_token_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json=OPENROUTER_TOKEN_RESPONSE)
+
+
+def _form_fields(request: httpx.Request) -> dict[str, list[str]]:
+    return urllib.parse.parse_qs(request.content.decode(), strict_parsing=True)
+
+
+class TestOpenRouterTokenExchange:
+    @pytest.mark.asyncio
+    async def test_posts_a_form_token_exchange_and_returns_the_access_token(self):
+        adapter, requests = _openrouter_exchange(_openrouter_token_response)
+        before = datetime.now(timezone.utc)
+
+        minted = await adapter.exchange(
+            "header.payload.signature", _openrouter_secret()
+        )
+
+        (request,) = requests
+        assert request.method == "POST"
+        assert str(request.url) == OPENROUTER_TOKEN_URL
+        assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+        assert "authorization" not in request.headers
+        assert _form_fields(request) == {
+            "grant_type": [TOKEN_EXCHANGE_GRANT_TYPE],
+            "subject_token_type": [JWT_TOKEN_TYPE],
+            "subject_token": ["header.payload.signature"],
+            "federation_policy_id": ["fedpol_example"],
+        }
+        assert minted.token == "eyJ.openrouter.example"
+        assert before + timedelta(seconds=900) <= minted.expires_at
+        assert minted.expires_at <= datetime.now(timezone.utc) + timedelta(seconds=900)
+
+    @pytest.mark.asyncio
+    async def test_exchange_url_does_not_depend_on_the_secret_host(self):
+        adapter, requests = _openrouter_exchange(_openrouter_token_response)
+
+        await adapter.exchange(
+            "header.payload.signature", _openrouter_secret(host="api.example.com")
+        )
+
+        (request,) = requests
+        assert str(request.url) == OPENROUTER_TOKEN_URL
+
+    @pytest.mark.parametrize("status", [400, 401, 403])
+    @pytest.mark.asyncio
+    async def test_rejection_raises_without_leaking_the_token(
+        self, status: int, caplog
+    ):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        adapter, _ = _openrouter_exchange(
+            lambda request: httpx.Response(status, json={"error": "invalid_grant"})
+        )
+
+        with pytest.raises(AuthenticationError, match=f"HTTP {status}") as exc_info:
+            await adapter.exchange("secret.jwt.value", _openrouter_secret())
+
+        assert "invalid_grant" in caplog.text
+        assert "secret.jwt.value" not in str(exc_info.value)
+        assert "secret.jwt.value" not in caplog.text
+
+    @pytest.mark.parametrize("status", [500, 503, 429])
+    @pytest.mark.asyncio
+    async def test_server_errors_and_rate_limits_raise_upstream_service_error(
+        self, status: int
+    ):
+        adapter, _ = _openrouter_exchange(
+            lambda request: httpx.Response(
+                status, headers={"Retry-After": "1"}, json={"error": "invalid_request"}
+            )
+        )
+
+        with pytest.raises(UpstreamServiceError, match=f"HTTP {status}"):
+            await adapter.exchange("header.payload.signature", _openrouter_secret())
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_raises_upstream_service_error(self, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        adapter, _ = _openrouter_exchange(httpx.ConnectError("connection refused"))
+
+        with pytest.raises(UpstreamServiceError, match="unavailable") as exc_info:
+            await adapter.exchange("secret.jwt.value", _openrouter_secret())
+
+        assert exc_info.value.__cause__ is None
+        assert "ConnectError: connection refused" in caplog.text
+        assert "secret.jwt.value" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_response_without_a_usable_token_raises(self):
+        adapter, _ = _openrouter_exchange(
+            lambda request: httpx.Response(200, json={"token_type": "Bearer"})
+        )
+
+        with pytest.raises(AuthenticationError, match="malformed"):
+            await adapter.exchange("header.payload.signature", _openrouter_secret())
 
 
 GOOGLE_STS_RESPONSE = {
@@ -1133,7 +1266,7 @@ class TestGcpTokenExchange:
 class TestTokenMintService:
     def _service(
         self,
-    ) -> tuple[TokenMintService, MagicMock, MagicMock, MagicMock, MagicMock]:
+    ) -> tuple[TokenMintService, MagicMock, MagicMock, MagicMock, MagicMock, MagicMock]:
         sts = MagicMock()
         sts.assume_federation_role = AsyncMock(return_value=_identity())
         tokens = iter(["jwt-1", "jwt-2", "jwt-3"])
@@ -1160,18 +1293,27 @@ class TestTokenMintService:
                 token=f"openai-token-for-{proof}", expires_at=NOW + timedelta(hours=1)
             )
         )
+        openrouter = MagicMock()
+        openrouter.exchange = AsyncMock(
+            side_effect=lambda proof, secret: MintedToken(
+                token=f"openrouter-token-for-{proof}",
+                expires_at=NOW + timedelta(minutes=15),
+            )
+        )
         return (
             TokenMintService(
                 sts=sts,
                 anthropic=anthropic,
                 gcp=gcp,
                 openai=openai,
+                openrouter=openrouter,
                 federation_config=FEDERATION_CONFIG,
             ),
             sts,
             anthropic,
             gcp,
             openai,
+            openrouter,
         )
 
     @pytest.mark.asyncio
@@ -1183,6 +1325,7 @@ class TestTokenMintService:
             service.anthropic.http_client,
             service.openai.http_client,
             service.gcp.http_client,
+            service.openrouter.http_client,
         ]
 
         await service.aclose()
@@ -1200,7 +1343,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_mint_sequences_proof_and_exchange(self):
-        service, sts, anthropic, _, _ = self._service()
+        service, sts, anthropic, _, _, _ = self._service()
         secret = _secret()
 
         minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
@@ -1216,7 +1359,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_mint_stops_at_the_deadline(self, monkeypatch):
-        service, sts, anthropic, gcp, _ = self._service()
+        service, sts, anthropic, gcp, _, _ = self._service()
 
         async def slow_assume(*args, **kwargs):
             await asyncio.sleep(1)
@@ -1234,7 +1377,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_gcp_mint_requests_an_rs256_token_for_the_pool_provider(self):
-        service, sts, anthropic, gcp, _ = self._service()
+        service, sts, anthropic, gcp, _, _ = self._service()
         secret = _gcp_secret()
 
         minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
@@ -1252,7 +1395,7 @@ class TestTokenMintService:
     async def test_openai_mint_requests_an_es384_token_for_the_openai_audience(
         self,
     ):
-        service, sts, anthropic, gcp, openai = self._service()
+        service, sts, anthropic, gcp, openai, openrouter = self._service()
         secret = _openai_secret()
 
         minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
@@ -1271,11 +1414,12 @@ class TestTokenMintService:
         openai.exchange.assert_awaited_once_with("jwt-1", secret)
         anthropic.exchange.assert_not_awaited()
         gcp.exchange.assert_not_awaited()
+        openrouter.exchange.assert_not_awaited()
         assert minted.token == "openai-token-for-jwt-1"
 
     @pytest.mark.asyncio
     async def test_openai_audience_comes_from_the_secret(self):
-        service, sts, _, _, _ = self._service()
+        service, sts, _, _, _, _ = self._service()
 
         await service.mint(
             CALLER_CREDENTIALS, CALLER, _openai_secret(audience="https://example.com")
@@ -1283,6 +1427,46 @@ class TestTokenMintService:
 
         sts.web_identity_token.assert_awaited_once_with(
             _identity(), "https://example.com", "ES384", 1800
+        )
+
+    @pytest.mark.asyncio
+    async def test_openrouter_mint_requests_an_rs256_token_for_the_openrouter_audience(
+        self,
+    ):
+        service, sts, anthropic, gcp, openai, openrouter = self._service()
+        secret = _openrouter_secret()
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
+
+        sts.assume_federation_role.assert_awaited_once_with(
+            CALLER_CREDENTIALS, CALLER, ROLE_ARN
+        )
+        sts.web_identity_token.assert_awaited_once_with(
+            _identity(),
+            OPENROUTER_API_AUDIENCE,
+            OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM,
+            OPENROUTER_IDENTITY_TOKEN_SECONDS,
+        )
+        assert OPENROUTER_IDENTITY_TOKEN_SIGNING_ALGORITHM == "RS256"
+        assert OPENROUTER_IDENTITY_TOKEN_SECONDS == 900
+        openrouter.exchange.assert_awaited_once_with("jwt-1", secret)
+        anthropic.exchange.assert_not_awaited()
+        gcp.exchange.assert_not_awaited()
+        openai.exchange.assert_not_awaited()
+        assert minted.token == "openrouter-token-for-jwt-1"
+
+    @pytest.mark.asyncio
+    async def test_openrouter_audience_comes_from_the_secret(self):
+        service, sts, _, _, _, _ = self._service()
+
+        await service.mint(
+            CALLER_CREDENTIALS,
+            CALLER,
+            _openrouter_secret(audience="https://example.com"),
+        )
+
+        sts.web_identity_token.assert_awaited_once_with(
+            _identity(), "https://example.com", "RS256", 900
         )
 
     @pytest.mark.asyncio
@@ -1345,6 +1529,40 @@ class TestTokenMintService:
             json.loads(request.content)["subject_token"] == "header.payload.signature"
         )
         assert minted.token == "eyJ.openai.example"
+
+    @pytest.mark.asyncio
+    async def test_openrouter_mint_end_to_end(self):
+        session, clients = _sts_session(
+            assume_role=ASSUME_ROLE_RESPONSE,
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        openrouter, requests = _openrouter_exchange(_openrouter_token_response)
+        service = TokenMintService(
+            sts=StsFederationService(session, FEDERATION_CONFIG),
+            openrouter=openrouter,
+            federation_config=FEDERATION_CONFIG,
+        )
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _openrouter_secret())
+
+        assume, web_identity = clients
+        assume.assume_role.assert_awaited_once()
+        assert web_identity.create_kwargs["aws_session_token"] == "fed-token"
+        web_identity.get_web_identity_token.assert_awaited_once_with(
+            Audience=[OPENROUTER_API_AUDIENCE],
+            SigningAlgorithm="RS256",
+            DurationSeconds=OPENROUTER_IDENTITY_TOKEN_SECONDS,
+            Tags=[
+                {"Key": "portunus:user", "Value": CALLER_ROLE},
+                {"Key": "portunus:principal", "Value": CALLER_ROLE},
+                {"Key": "portunus:session", "Value": "session"},
+                {"Key": "portunus:project", "Value": "example"},
+            ],
+        )
+        (request,) = requests
+        assert str(request.url) == OPENROUTER_TOKEN_URL
+        assert _form_fields(request)["subject_token"] == ["header.payload.signature"]
+        assert minted.token == "eyJ.openrouter.example"
 
     @pytest.mark.asyncio
     async def test_gcp_mint_end_to_end(self):
@@ -1428,7 +1646,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_each_mint_uses_a_fresh_identity_token(self):
-        service, sts, anthropic, _, _ = self._service()
+        service, sts, anthropic, _, _, _ = self._service()
 
         first = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
         second = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
@@ -1442,7 +1660,7 @@ class TestTokenMintService:
 
     @pytest.mark.asyncio
     async def test_disallowed_role_is_rejected_before_any_aws_call(self):
-        service, sts, anthropic, gcp, openai = self._service()
+        service, sts, anthropic, gcp, openai, openrouter = self._service()
         secret = _secret(
             federation_role_arn=(
                 f"arn:aws:iam::{OTHER_ACCOUNT}:role/portunus-fed/projects/example/name"
@@ -1457,13 +1675,14 @@ class TestTokenMintService:
         anthropic.exchange.assert_not_awaited()
         gcp.exchange.assert_not_awaited()
         openai.exchange.assert_not_awaited()
+        openrouter.exchange.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_unknown_mint_type_has_no_exchange(self):
         class OtherSecret(MintSecretBase):
             type: Literal["other"] = "other"
 
-        service, sts, anthropic, gcp, openai = self._service()
+        service, sts, anthropic, gcp, openai, openrouter = self._service()
         secret = OtherSecret(host="api.example.com", federation_role_arn=ROLE_ARN)
 
         with pytest.raises(AuthenticationError, match="OtherSecret"):
@@ -1473,3 +1692,4 @@ class TestTokenMintService:
         anthropic.exchange.assert_not_awaited()
         gcp.exchange.assert_not_awaited()
         openai.exchange.assert_not_awaited()
+        openrouter.exchange.assert_not_awaited()

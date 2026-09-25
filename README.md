@@ -15,7 +15,7 @@ It consists of two main components:
     - Secrets can be stored in three formats (see [Secret formats](#secret-formats)):
       - **Plaintext**: `"sk-1234567890abcdef"` (works with any proxy target)
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
-      - **Minted token**: `{"type":"anthropic_wif", ...}`, `{"type":"openai_wif", ...}` or `{"type":"gcp_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
+      - **Minted token**: `{"type":"anthropic_wif", ...}`, `{"type":"openai_wif", ...}`, `{"type":"openrouter_wif", ...}` or `{"type":"gcp_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
   - If successful, Portunus returns the real API key to the Envoy instance
   - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default), removing the `API_KEY_HEADER` header when the two differ, before allowing the request to proceed. Every other header is forwarded untouched
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
@@ -203,7 +203,7 @@ A secret referenced by a payload is one of:
 |---|---|---|
 | Plaintext | `sk-1234567890abcdef` | Used as the key for any target |
 | Stored key with target check | `{"secret": "sk-...", "host": "api.example.com"}` | Used only when the proxy's target matches `host` |
-| Minted token | `{"type": "anthropic_wif", ...}`, `{"type": "openai_wif", ...}` or `{"type": "gcp_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
+| Minted token | `{"type": "anthropic_wif", ...}`, `{"type": "openai_wif", ...}`, `{"type": "openrouter_wif", ...}` or `{"type": "gcp_wif", ...}` (below) | No key is stored; a short-lived token is minted per caller |
 
 JSON without a `type` is treated as a stored key (and, if it does not match that schema, used verbatim as the key); a typeless object with a `federation_role_arn` is a mint secret missing its `type` and is rejected rather than used as a key. JSON with a `type` must validate as that type; `static` names the stored-key form explicitly.
 
@@ -253,6 +253,26 @@ Every exchange uses a freshly issued STS token.
 OpenAI issues the access token for at most an hour and never beyond the STS token's expiry, so Portunus requests a 30-minute STS token here (`anthropic_wif` requests 15 minutes, which Anthropic doubles) and the access token lives about 30 minutes and is cached for about 29. As for `anthropic_wif`, an unreachable endpoint, a 5xx/429 answer or a missed 6 s deadline returns 503.
 
 On the OpenAI side, all deployment concerns: the federation role's account must have outbound web identity federation enabled, and the workload identity provider's OIDC issuer is that account's STS issuer URL, with `audience` as its audience. The service account mapping matches the token's `sub`, which is the federation role's IAM ARN (`federation_role_arn`). The four Portunus tags arrive as `request_tags` under the `https://sts.amazonaws.com/` claim and can be matched through a CEL attribute transformation such as `assertion["https://sts.amazonaws.com/"]["request_tags"]["portunus:user"]`. The federation role's identity policy must allow `sts:GetWebIdentityToken` for `audience` with `sts:DurationSeconds` of at least 1800; OpenAI's example policy caps it at 300.
+
+#### `openrouter_wif`
+
+```json
+{
+  "type": "openrouter_wif",
+  "host": "openrouter.ai",
+  "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example",
+  "federation_policy_id": "00000000-0000-4000-8000-000000000000",
+  "audience": "https://openrouter.ai/api/v1"
+}
+```
+
+`audience` (default shown) is optional and must equal the audience configured on the OpenRouter federation policy `federation_policy_id` (the policy's UUID). Steps 1–3 are as for `anthropic_wif`, with the STS token signed with RS256 (OpenRouter accepts RS256 or ES256, and STS signs RS256 or ES384); then Portunus:
+
+4. Exchanges the token at `https://openrouter.ai/api/v1/oauth/token` (RFC 8693 token exchange; form-encoded body with `grant_type` `urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token_type` `urn:ietf:params:oauth:token-type:jwt`, `subject_token` and `federation_policy_id`) and returns `access_token` with `output_header: "authorization"` and `output_prefix: "Bearer "`. Expiry comes from `expires_in`.
+
+OpenRouter issues the access token for at most 15 minutes and never beyond the STS token's expiry, so Portunus requests a 15-minute STS token here; the access token lives about 15 minutes and is cached for about 14. As for `anthropic_wif`, an unreachable endpoint, a 5xx/429 answer or a missed 6 s deadline returns 503.
+
+On the OpenRouter side, all deployment concerns: workload identity federation is available on OpenRouter's Business and Enterprise plans. The federation policy's issuer is the federation role's account's STS issuer URL, its subject is the token's `sub`, the federation role's IAM ARN (`federation_role_arn`), and its audience is `audience`. The API key the policy acts as receives the usage. The access token carries that `sub` together with `federation_policy_id` and `federation_issuer_id`. The federation role's identity policy must allow `sts:GetWebIdentityToken` for `audience`.
 
 #### `gcp_wif`
 
