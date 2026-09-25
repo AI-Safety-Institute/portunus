@@ -320,51 +320,13 @@ def _service_for(raw_secret: str, cache: CacheService, mint: AsyncMock) -> AuthS
     )
 
 
-def _minted(
-    token: str = "sk-ant-oat01-example",
-    identity_token_id: str | None = None,
-    attribution_handle: str | None = None,
-) -> MintedToken:
+def _minted(token: str = "sk-ant-oat01-example") -> MintedToken:
     return MintedToken(
-        token=token,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
-        identity_token_id=identity_token_id,
-        attribution_handle=attribution_handle,
+        token=token, expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
     )
 
 
 class TestAuthenticateWithMintSecrets:
-    @pytest.mark.asyncio
-    async def test_minted_result_carries_the_identity_token_id_and_handle(
-        self, fake_redis
-    ):
-        cache = _cache_backed_by(fake_redis)
-        minted = _minted(identity_token_id="jti-example", attribution_handle="ab" * 32)
-        service = _service_for(WIF_SECRET, cache, AsyncMock(return_value=minted))
-        payload = _payload()
-
-        result = await service.authenticate(payload, "req", "api.example.com")
-        cached = await cache.get_cached_auth_result(payload.raw, "api.example.com")
-
-        assert result.identity_token_id == "jti-example"
-        assert result.attribution_handle == "ab" * 32
-        assert cached is not None
-        assert cached.identity_token_id == "jti-example"
-        assert cached.attribution_handle == "ab" * 32
-
-    @pytest.mark.asyncio
-    async def test_minted_result_without_correlation_ids_leaves_them_none(
-        self, fake_redis
-    ):
-        cache = _cache_backed_by(fake_redis)
-        mint = AsyncMock(return_value=_minted())
-        service = _service_for(WIF_SECRET, cache, mint)
-
-        result = await service.authenticate(_payload(), "req", "api.example.com")
-
-        assert result.identity_token_id is None
-        assert result.attribution_handle is None
-
     @pytest.mark.asyncio
     async def test_mint_secret_yields_a_bearer_result(self, fake_redis):
         cache = _cache_backed_by(fake_redis)

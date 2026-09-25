@@ -98,9 +98,8 @@ class CacheService:
             target_host: The proxy's target host the payload was authorised for.
 
         Returns:
-            AuthResult if found, None otherwise. Entries written before a
-            field existed (output_header/output_prefix, expires_at,
-            identity_token_id/attribution_handle) load with it set to None;
+            AuthResult if found, None otherwise. Entries written before
+            output_header/output_prefix existed load with both set to None;
             a legacy signing_key entry is ignored.
 
         Raises:
@@ -133,8 +132,6 @@ class CacheService:
                     expires_at=(
                         datetime.fromisoformat(expires_at) if expires_at else None
                     ),
-                    identity_token_id=auth_response.get("identity_token_id"),
-                    attribution_handle=auth_response.get("attribution_handle"),
                 )
 
             logger.info(f"Cache miss for key {cache_key[:8]}...")
@@ -159,8 +156,6 @@ class CacheService:
         output_header: Optional[str] = None,
         output_prefix: Optional[str] = None,
         expires_at: Optional[datetime] = None,
-        identity_token_id: Optional[str] = None,
-        attribution_handle: Optional[str] = None,
     ) -> bool:
         """
         Cache an authentication response including API key and principal info.
@@ -174,10 +169,6 @@ class CacheService:
             output_header: Upstream header that should carry the credential
             output_prefix: Prefix for the credential value
             expires_at: When a minted credential expires
-            identity_token_id: ``jti`` of the identity token a minted
-                credential was exchanged for
-            attribution_handle: Handle a ``pseudonymous`` identity token
-                carried
 
         Returns:
             True if successfully cached, False otherwise.
@@ -212,8 +203,6 @@ class CacheService:
                 "output_header": output_header,
                 "output_prefix": output_prefix,
                 "expires_at": expires_at.isoformat() if expires_at else None,
-                "identity_token_id": identity_token_id,
-                "attribution_handle": attribution_handle,
             }
 
             result = await client.setex(
@@ -260,8 +249,6 @@ class CacheService:
             output_header=auth_result.output_header,
             output_prefix=auth_result.output_prefix,
             expires_at=auth_result.expires_at,
-            identity_token_id=auth_result.identity_token_id,
-            attribution_handle=auth_result.attribution_handle,
         )
 
     @capture_async()

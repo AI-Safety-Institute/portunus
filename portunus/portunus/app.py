@@ -148,18 +148,6 @@ async def authorise(
             timestamp = generate_iso_timestamp()
             principal_info = auth_result.principal_info.to_dict()
 
-            # Indexed on the trace so a provider's exchange record can be
-            # matched to every request served from that token.
-            if segment is not None:
-                if auth_result.identity_token_id:
-                    segment.put_annotation(
-                        "identity_token_id", auth_result.identity_token_id
-                    )
-                if auth_result.attribution_handle:
-                    segment.put_annotation(
-                        "attribution_handle", auth_result.attribution_handle
-                    )
-
             # Publish to Kinesis for long-term storage
             try:
                 async with asyncio.timeout(3):
@@ -168,8 +156,6 @@ async def authorise(
                         timestamp=timestamp,
                         principal_info=principal_info,
                         secret_arn=payload.secret_arn,
-                        identity_token_id=auth_result.identity_token_id,
-                        attribution_handle=auth_result.attribution_handle,
                     )
             # There are some synchronous actions happening which can succeed even
             # if the timeout is hit

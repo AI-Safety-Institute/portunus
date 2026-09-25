@@ -40,8 +40,6 @@ class TestSourceRecordSchemas:
             project="test-project",
             session_name="test-session",
             secret_arn="arn:aws:secretsmanager:eu-west-2:123456789012:secret:projects/test-project/api-key-aB3xY1",
-            identity_token_id="0f8fad5b-d9cb-469f-a165-70867728950e",
-            attribution_handle="e3" * 32,
         )
 
         dict_keys = set(record.to_dict().keys())
