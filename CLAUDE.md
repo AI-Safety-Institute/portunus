@@ -100,6 +100,9 @@ Logging captures full request/response bodies, headers, and trailers verbatim â€
 ## Development
 - Root project includes all dependencies: `uv sync`
 - Run tests: `uv run pytest`
+- Run `uv sync --locked`, `uv run pytest` and `uv run mypy portunus/ tests/` from the repo root, as CI does. The root `uv.lock` is the lockfile CI checks; the root dev group also carries deps that `portunus/pyproject.toml` does not list (`types-aiobotocore`, `types-aws-xray-sdk`, `freezegun`). Inside `portunus/`, `uv run` rewrites `portunus/uv.lock` (revert it before committing) and mypy reports spurious missing-stub errors.
+- Use Python 3.12. The root `requires-python` (`<3.13`) makes uv pick it, but `portunus/pyproject.toml` (`~=3.12`, i.e. `>=3.12,<4`) does not, so a venv created inside `portunus/` gets the newest installed interpreter and pytest collection fails with `RuntimeError: There is no current event loop` (aws_xray_sdk's `AsyncContext` at import). If a `.venv` is on the wrong interpreter, recreate it: `uv venv --python 3.12`.
+- `ci.yml` runs on `pull_request` only for PRs whose base is `main`. A PR based on another branch gets CI once it is in a GitHub Stack.
 - Local testing with docker-compose: `docker compose up --build --wait`
 
 ## Important Files
