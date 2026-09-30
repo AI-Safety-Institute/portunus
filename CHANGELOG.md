@@ -26,7 +26,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   is any further path plus the role name, e.g.
   `arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example`.
   The identity token carries no request tags; the federation role needs only
-  `sts:GetWebIdentityToken`. `FEDERATION_STS_ENDPOINT_URL` is also new. Mint secrets reject unknown
+  `sts:GetWebIdentityToken`. Every mint logs one INFO line pairing the
+  identity token's `jti` with the federation role ARN and the caller's user,
+  principal, session and project, which is how a provider's record is
+  matched to a caller. `FEDERATION_STS_ENDPOINT_URL` is also new. Mint secrets reject unknown
   fields. Minted results are cached until the earlier of `CACHE_DURATION` and
   one minute before the token expires; concurrent misses for one payload and
   target share a mint per process.

@@ -14,6 +14,8 @@ Minting has two independent parts:
 """
 
 import asyncio
+import base64
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -187,6 +189,24 @@ def caller_project(principal: PrincipalInfo) -> str:
     if project is None or project == "unknown":
         return ""
     return project
+
+
+def identity_token_id(token: str) -> Optional[str]:
+    """The ``jti`` of a JWT, read from its payload without verification.
+
+    Providers record the ``jti`` of the identity token they exchange, so it
+    is the correlation id between their records and Portunus's. None when
+    ``token`` is not a JWT or its payload carries no string ``jti``.
+    """
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(
+            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        )
+    except (IndexError, ValueError):
+        return None
+    jti = claims.get("jti") if isinstance(claims, dict) else None
+    return jti if isinstance(jti, str) else None
 
 
 def _client_error_code(error: ClientError) -> str:
@@ -449,7 +469,35 @@ class TokenMintService:
                     credentials, principal, secret.federation_role_arn
                 )
                 proof = await self.sts.web_identity_token(identity, secret.audience)
-                return await self.anthropic.exchange(proof.token, secret)
+                minted = await self.anthropic.exchange(proof.token, secret)
         except TimeoutError as e:
             logger.error(f"Token minting exceeded {MINT_DEADLINE_SECONDS} s")
             raise UpstreamServiceError("Token minting timed out") from e
+        _log_mint(secret, identity, identity_token_id(proof.token))
+        return minted
+
+
+def _log_mint(
+    secret: MintSecretBase, identity: FederationIdentity, token_id: Optional[str]
+) -> None:
+    """One line per mint pairing the identity token's ``jti`` with its caller.
+
+    A provider's report quotes the ``jti``; this line names the caller and the
+    time, and the caller's requests in the token's lifetime are found through
+    the per-request logs. The token itself is never logged.
+    """
+    fields = {
+        "identity_token_id": token_id,
+        "federation_role_arn": identity.role_arn,
+        "user": identity.user,
+        "principal": identity.principal,
+        "session": identity.session,
+        "project": identity.project,
+    }
+    logger.info(
+        f"Minted {type(secret).__name__} token: jti={token_id or '-'} "
+        f"role={identity.role_arn} user={identity.user} "
+        f"principal={identity.principal} session={identity.session} "
+        f"project={identity.project}",
+        extra=fields,
+    )

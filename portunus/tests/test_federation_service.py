@@ -1,7 +1,9 @@
 """Tests for minting short-lived upstream tokens via federation roles."""
 
 import asyncio
+import base64
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -45,6 +47,7 @@ from portunus.services.federation_service import (
     caller_role_name,
     caller_session,
     caller_user,
+    identity_token_id,
     validate_federation_role_arn,
 )
 
@@ -73,6 +76,19 @@ FEDERATION_CONFIG = FederationConfig(
     allowed_account_ids=[ACCOUNT], sts_endpoint_url=STS_ENDPOINT
 )
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _jwt(claims: dict[str, object]) -> str:
+    """An unsigned JWT-shaped token whose payload is ``claims``."""
+
+    def segment(data: dict[str, object]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(data).encode()).rstrip(b"=").decode()
+
+    return f"{segment({'alg': 'RS256', 'kid': 'example'})}.{segment(claims)}.sig"
+
+
+IDENTITY_TOKEN_ID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+IDENTITY_TOKEN = _jwt({"sub": ROLE_ARN, "jti": IDENTITY_TOKEN_ID, "exp": 1767268800})
 
 
 def _secret(**overrides: object) -> AnthropicWifSecret:
@@ -226,6 +242,39 @@ class TestCallerIdentityFields:
     @pytest.mark.parametrize("source_identity", [None, ""])
     def test_user_falls_back_to_the_role_name(self, source_identity: str | None):
         assert caller_user(CALLER_ROLE, source_identity) == CALLER_ROLE
+
+
+class TestIdentityTokenId:
+    def test_reads_the_jti_claim(self):
+        assert identity_token_id(IDENTITY_TOKEN) == IDENTITY_TOKEN_ID
+
+    def test_tolerates_an_unpadded_payload(self):
+        # A payload whose base64url length is not a multiple of four.
+        token = _jwt({"jti": "xy"})
+
+        assert len(token.split(".")[1]) % 4 != 0
+        assert identity_token_id(token) == "xy"
+
+    def test_missing_claim_is_none(self):
+        assert identity_token_id(_jwt({"sub": ROLE_ARN})) is None
+
+    @pytest.mark.parametrize("jti", [7, None, ["x"], {"id": "x"}])
+    def test_non_string_claim_is_none(self, jti: object):
+        assert identity_token_id(_jwt({"jti": jti})) is None
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "",
+            "opaque-token",
+            "header.payload.signature",
+            "a.!!!.c",
+            "a." + base64.urlsafe_b64encode(b"[1, 2]").decode() + ".c",
+            "a." + base64.urlsafe_b64encode(b"\xff\xfe").decode() + ".c",
+        ],
+    )
+    def test_anything_but_a_jwt_with_a_json_object_payload_is_none(self, token: str):
+        assert identity_token_id(token) is None
 
 
 def _sts_session(
@@ -563,6 +612,59 @@ class TestTokenMintService:
         )
         anthropic.exchange.assert_awaited_once_with("jwt-1", secret)
         assert minted.token == "token-for-jwt-1"
+
+    @pytest.mark.asyncio
+    async def test_mint_logs_the_identity_token_id_and_the_caller(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
+        service, sts, _ = self._service()
+        sts.web_identity_token.side_effect = None
+        sts.web_identity_token.return_value = WebIdentityToken(
+            token=IDENTITY_TOKEN, expires_at=NOW + timedelta(minutes=15)
+        )
+        sts.assume_federation_role.return_value = replace(
+            _identity(), user=SOURCE_IDENTITY
+        )
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+
+        (record,) = [r for r in caplog.records if r.getMessage().startswith("Minted")]
+        assert record.levelno == logging.INFO
+        assert record.getMessage() == (
+            f"Minted AnthropicWifSecret token: jti={IDENTITY_TOKEN_ID} "
+            f"role={ROLE_ARN} user={SOURCE_IDENTITY} principal={CALLER_ROLE} "
+            "session=session project=example"
+        )
+        fields = vars(record)
+        assert fields["identity_token_id"] == IDENTITY_TOKEN_ID
+        assert fields["federation_role_arn"] == ROLE_ARN
+        assert fields["user"] == SOURCE_IDENTITY
+        assert fields["principal"] == CALLER_ROLE
+        assert fields["session"] == "session"
+        assert fields["project"] == "example"
+        assert IDENTITY_TOKEN not in caplog.text
+        assert minted.token not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_identity_token_without_a_jti_mints_and_logs_a_dash(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
+        service, _, _ = self._service()
+
+        await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+
+        (record,) = [r for r in caplog.records if r.getMessage().startswith("Minted")]
+        assert "Minted AnthropicWifSecret token: jti=- role=" in record.getMessage()
+        assert vars(record)["identity_token_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_failed_exchange_logs_no_mint(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
+        service, _, anthropic = self._service()
+        anthropic.exchange.side_effect = AuthenticationError("refused")
+
+        with pytest.raises(AuthenticationError):
+            await service.mint(CALLER_CREDENTIALS, CALLER, _secret())
+
+        assert not [r for r in caplog.records if r.getMessage().startswith("Minted")]
 
     @pytest.mark.asyncio
     async def test_mint_stops_at_the_deadline(self, monkeypatch):
