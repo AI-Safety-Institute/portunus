@@ -59,8 +59,8 @@ The template's three policies do the following:
 
 - **Trust policy:** only the caller roles can assume the role, and only through
   the STS VPC endpoint, so only Portunus can mint.
-- **Inline policy:** the role can request identity tokens for its one audience,
-  tagged with the four caller tags Portunus sends.
+- **Inline policy:** the role can request identity tokens for its one audience.
+  Portunus sends no request tags, so no tag permission is needed.
 - **Permissions boundary:** the role can never do anything else.
 
 The deployer also needs IAM permissions on the bare name
@@ -96,9 +96,7 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Action:
-              - sts:GetWebIdentityToken
-              - sts:TagGetWebIdentityToken
+            Action: sts:GetWebIdentityToken
             Resource: '*'
 
   FederationRole:
@@ -132,16 +130,6 @@ Resources:
                   'ForAllValues:StringEquals':
                     'sts:IdentityTokenAudience':
                       - !Ref ProviderAudience
-              - Effect: Allow
-                Action: sts:TagGetWebIdentityToken
-                Resource: '*'
-                Condition:
-                  'ForAllValues:StringEquals':
-                    'aws:TagKeys':
-                      - 'portunus:user'
-                      - 'portunus:principal'
-                      - 'portunus:session'
-                      - 'portunus:project'
 
 Outputs:
   FederationRoleArn:
@@ -240,7 +228,7 @@ Settings → Workload identity:
   `https://openrouter.ai/api/v1`, and a workspace API key to act as. Usage is
   billed to that key.
 
-Tokens last up to 15 minutes. OpenRouter can't read the caller tags.
+Tokens last up to 15 minutes.
 
 <details><summary>Config secret</summary>
 
@@ -320,4 +308,3 @@ curl "https://vertex.proxy.example.org/v1/projects/example-project/locations/glo
 | JWT | RS256, 900 s | ES384, 1800 s | RS256, 900 s | RS256, 900 s |
 | Lab-side object | Federation rule | Provider + `sub` mapping | Issuer + policy | Pool provider + service account binding |
 | Token lifetime | ≤ 30 min | 30 min | ≤ 15 min | 10–60 min |
-| Caller tags visible to lab | Yes | Yes, via CEL | No | Yes, via attribute mapping |
