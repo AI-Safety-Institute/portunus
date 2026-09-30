@@ -6,8 +6,7 @@ Minting has two independent parts:
 1. Identity proof (:class:`StsFederationService`): with the caller's own
    credentials, assume the secret's federation role, then have that session
    request an STS web identity token. The result is a signed JWT whose subject
-   is the federation role and whose tags carry the user, the caller's role
-   name, its session name and the project.
+   is the federation role.
 2. Exchange (:class:`AnthropicTokenExchange`): trade the JWT for a provider
    bearer token. Each provider gets its own adapter.
 
@@ -64,10 +63,6 @@ _IAM_ROLE_ARN = re.compile(
     re.ASCII,
 )
 _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
-# STS tag values are [\p{L}\p{Z}\p{N}_.:/=+\-@]*. Role names, session names
-# and source identities may also contain ",", so a valid one is not always a
-# valid tag value.
-_SESSION_TAG_VALUE = re.compile(r"^[\w .:/=+\-@]*$")
 # /authorise has a 9 s budget (app.py), and the caller's identity check and
 # secret fetch run before minting starts. The per-call limits below add up to
 # more than that, so mint() also has an overall deadline.
@@ -86,6 +81,7 @@ class FederationIdentity:
 
     Attributes:
         credentials: The federation session's credentials
+        role_arn: The federation role the session assumed
         user: The caller's STS source identity, or its IAM role name when its
             session carries none
         principal: The caller's IAM role name (also the federation session's
@@ -95,6 +91,7 @@ class FederationIdentity:
     """
 
     credentials: AwsCredentials
+    role_arn: str
     user: str
     principal: str
     session: str
@@ -152,11 +149,11 @@ def validate_federation_role_arn(
 
 
 def caller_role_name(principal: PrincipalInfo) -> str:
-    """The caller's IAM role name: the principal tag and federation RoleSessionName.
+    """The caller's IAM role name, used as the federation RoleSessionName.
 
     Raises:
         CredentialsError: The caller is not an assumed role, or its role name
-            is not usable as a session name and tag value.
+            is not usable as a session name.
     """
     prefix = "assumed-role/"
     if not principal.principal or not principal.principal.startswith(prefix):
@@ -164,50 +161,31 @@ def caller_role_name(principal: PrincipalInfo) -> str:
     name = principal.principal[len(prefix) :]
     if not _ROLE_SESSION_NAME.fullmatch(name):
         raise CredentialsError("Caller role name is not a valid session name")
-    if not _SESSION_TAG_VALUE.fullmatch(name):
-        raise CredentialsError("Caller role name cannot be used as a session tag")
     return name
 
 
 def caller_session(principal: PrincipalInfo) -> str:
-    """The caller's own RoleSessionName: the session tag.
+    """The caller's own RoleSessionName.
 
     Raises:
-        CredentialsError: The caller is not an assumed role, or its session
-            name is not usable as a tag value.
+        CredentialsError: The caller is not an assumed role.
     """
     if not principal.session_name:
         raise CredentialsError("Token minting requires an assumed-role caller")
-    if not _SESSION_TAG_VALUE.fullmatch(principal.session_name):
-        raise CredentialsError("Caller session name cannot be used as a session tag")
     return principal.session_name
 
 
 def caller_user(role_name: str, source_identity: Optional[str]) -> str:
-    """The user tag: the caller's STS source identity, else its IAM role name.
-
-    Raises:
-        CredentialsError: The source identity is not usable as a tag value.
-    """
-    if not source_identity:
-        return role_name
-    if not _SESSION_TAG_VALUE.fullmatch(source_identity):
-        raise CredentialsError("Caller source identity cannot be used as a session tag")
-    return source_identity
+    """The user: the caller's STS source identity, else its IAM role name."""
+    return source_identity or role_name
 
 
 def caller_project(principal: PrincipalInfo) -> str:
-    """The caller's project for the session tag, or "" when unknown.
-
-    Raises:
-        CredentialsError: The project is not usable as a tag value.
-    """
+    """The caller's project, or "" when unknown."""
     project = principal.project
     # parse_identity_from_arn() reports a missing project as "unknown".
     if project is None or project == "unknown":
         return ""
-    if not _SESSION_TAG_VALUE.fullmatch(project):
-        raise CredentialsError("Caller project cannot be used as a session tag")
     return project
 
 
@@ -254,9 +232,8 @@ class StsFederationService:
         """Assume ``role_arn`` with the caller's credentials.
 
         Raises:
-            CredentialsError: Caller credentials expired, the caller has no
-                session name, or its role name, session name, source identity
-                or project cannot be used as a session tag.
+            CredentialsError: Caller credentials expired, the caller is not an
+                assumed role, or its role name is not a valid session name.
             AuthenticationError: STS refused the assumption.
             UpstreamServiceError: STS could not be reached.
         """
@@ -298,6 +275,7 @@ class StsFederationService:
                 session_token=issued["SessionToken"],
                 expiration=issued["Expiration"],
             ),
+            role_arn=role_arn,
             user=caller_user(role_name, response.get("SourceIdentity")),
             principal=role_name,
             session=session,
@@ -317,15 +295,6 @@ class StsFederationService:
             AuthenticationError: STS refused to issue the token.
             UpstreamServiceError: STS could not be reached.
         """
-        tags = [
-            {"Key": self.federation_config.user_tag_key, "Value": identity.user},
-            {
-                "Key": self.federation_config.principal_tag_key,
-                "Value": identity.principal,
-            },
-            {"Key": self.federation_config.session_tag_key, "Value": identity.session},
-            {"Key": self.federation_config.project_tag_key, "Value": identity.project},
-        ]
         try:
             async with self.boto_session.create_client(
                 "sts",
@@ -339,7 +308,6 @@ class StsFederationService:
                     Audience=[audience],
                     SigningAlgorithm=IDENTITY_TOKEN_SIGNING_ALGORITHM,
                     DurationSeconds=IDENTITY_TOKEN_SECONDS,
-                    Tags=tags,
                 )
         except ClientError as e:
             code = _client_error_code(e)
@@ -462,7 +430,7 @@ class TokenMintService:
             AuthenticationError: Role not allowed, STS refused, or the
                 exchange failed.
             CredentialsError: Caller credentials expired, not an assumed role,
-                or an identity field unusable as a session tag.
+                or its role name is not a valid session name.
             UpstreamServiceError: STS or the provider was unavailable, or
                 minting exceeded ``MINT_DEADLINE_SECONDS``.
         """

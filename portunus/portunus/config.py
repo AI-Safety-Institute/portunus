@@ -195,11 +195,6 @@ class FederationConfig(BaseModel):
         role_path_prefix: IAM path every federation role ARN must start with
         sts_endpoint_url: STS endpoint for AssumeRole and GetWebIdentityToken.
             None means AWS_ENDPOINT_URL if set, else the regional endpoint.
-        user_tag_key: Session tag key carrying the user: the caller's STS
-            source identity, else its IAM role name
-        principal_tag_key: Session tag key carrying the caller's IAM role name
-        session_tag_key: Session tag key carrying the caller's role session name
-        project_tag_key: Session tag key carrying the caller's project
     """
 
     allowed_account_ids: list[str] = Field(
@@ -213,22 +208,6 @@ class FederationConfig(BaseModel):
     sts_endpoint_url: Optional[str] = Field(
         default=None,
         description="STS endpoint for federation calls (default: regional)",
-    )
-    user_tag_key: str = Field(
-        default="portunus:user",
-        description="Session tag key for the user (source identity or role name)",
-    )
-    principal_tag_key: str = Field(
-        default="portunus:principal",
-        description="Session tag key for the caller's IAM role name",
-    )
-    session_tag_key: str = Field(
-        default="portunus:session",
-        description="Session tag key for the caller's role session name",
-    )
-    project_tag_key: str = Field(
-        default="portunus:project",
-        description="Session tag key for the caller's project",
     )
 
     @field_validator("allowed_account_ids")
@@ -381,16 +360,6 @@ def get_config() -> PortunusConfig:
             "FEDERATION_ROLE_PATH_PREFIX", DEFAULT_FEDERATION_ROLE_PATH_PREFIX
         ),
         sts_endpoint_url=os.environ.get("FEDERATION_STS_ENDPOINT_URL", None),
-        user_tag_key=os.environ.get("FEDERATION_USER_TAG_KEY", "portunus:user"),
-        principal_tag_key=os.environ.get(
-            "FEDERATION_PRINCIPAL_TAG_KEY", "portunus:principal"
-        ),
-        session_tag_key=os.environ.get(
-            "FEDERATION_SESSION_TAG_KEY", "portunus:session"
-        ),
-        project_tag_key=os.environ.get(
-            "FEDERATION_PROJECT_TAG_KEY", "portunus:project"
-        ),
     )
 
     return PortunusConfig(

@@ -190,10 +190,6 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `FEDERATION_ALLOWED_ACCOUNT_IDS` | Comma-separated AWS account IDs whose federation roles a secret may name. Unset disables token minting | - |
 | `FEDERATION_ROLE_PATH_PREFIX` | IAM path federation role ARNs must start with | `/portunus-fed/` |
 | `FEDERATION_STS_ENDPOINT_URL` | STS endpoint for federation calls. Defaults to `AWS_ENDPOINT_URL` if set, else `https://sts.<region>.amazonaws.com` | - |
-| `FEDERATION_USER_TAG_KEY` | Session tag key carrying the user on identity tokens: the caller's STS source identity, or its IAM role name when the session has none | `portunus:user` |
-| `FEDERATION_PRINCIPAL_TAG_KEY` | Session tag key carrying the caller's IAM role name on identity tokens | `portunus:principal` |
-| `FEDERATION_SESSION_TAG_KEY` | Session tag key carrying the caller's role session name on identity tokens | `portunus:session` |
-| `FEDERATION_PROJECT_TAG_KEY` | Session tag key carrying the caller's project on identity tokens | `portunus:project` |
 
 ### Secret formats
 
@@ -226,14 +222,14 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
 
 1. Verifies the caller with STS and fetches the secret, as for stored keys.
 2. Checks `federation_role_arn` is `arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><name>` with `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS`; `<name>` is any further IAM path plus the role name. Nothing else is called if this fails.
-3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`, tagged with the user (`FEDERATION_USER_TAG_KEY`: the caller's STS source identity if its session carries one, else its IAM role name), the caller's IAM role name (`FEDERATION_PRINCIPAL_TAG_KEY`), its role session name (`FEDERATION_SESSION_TAG_KEY`) and its project (`FEDERATION_PROJECT_TAG_KEY`). A service acting for a user sets `SourceIdentity` when assuming its own role, so the user tag names that user while the principal tag names the service's role and the session tag its acting session.
+3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`. The token carries no request tags.
 4. Exchanges the token at `https://api.anthropic.com/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
 If STS or the token endpoint cannot be reached or answers 5xx/429, or steps 3–4 take longer than 6 s, `/authorise` returns 503 rather than 403.
 
 Unlike stored keys, which are cached for `CACHE_DURATION`, a minted token is cached until the earlier of `CACHE_DURATION` and one minute before the token expires. Concurrent cache misses for one payload and target share a single mint per Portunus process. Every exchange uses a freshly issued STS token.
 
-The federation role itself (trust policy, identity policy, who may assume it) is a deployment concern, as is how roles under the prefix are named. The secret names the role; Portunus checks the account and prefix and assumes exactly that role. To issue the identity token, the role's identity policy must allow `sts:GetWebIdentityToken` for the secret's `audience` (`sts:IdentityTokenAudience`) and, because Portunus always passes `Tags`, `sts:TagGetWebIdentityToken` with `aws:TagKeys` covering the four configured tag keys (`FEDERATION_*_TAG_KEY`). The CLI's default session policy allows `sts:AssumeRole` on the whole prefix, `arn:aws:iam::<caller account>:role/portunus-fed/*`, so which roles a caller can actually assume is bounded by the caller's own identity policy and each role's trust policy. Pass `--federation-role-path` if the deployment uses a different path. The CLI assumes the caller's own role with `RoleSessionName` `portunus`; pass `--session-name` when that role's trust policy only admits a particular session name.
+The federation role itself (trust policy, identity policy, who may assume it) is a deployment concern, as is how roles under the prefix are named. The secret names the role; Portunus checks the account and prefix and assumes exactly that role. To issue the identity token, the role's identity policy must allow `sts:GetWebIdentityToken` for the secret's `audience` (`sts:IdentityTokenAudience`). The CLI's default session policy allows `sts:AssumeRole` on the whole prefix, `arn:aws:iam::<caller account>:role/portunus-fed/*`, so which roles a caller can actually assume is bounded by the caller's own identity policy and each role's trust policy. Pass `--federation-role-path` if the deployment uses a different path. The CLI assumes the caller's own role with `RoleSessionName` `portunus`; pass `--session-name` when that role's trust policy only admits a particular session name.
 
 ## Local Development
 

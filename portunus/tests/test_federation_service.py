@@ -97,6 +97,7 @@ def _identity() -> FederationIdentity:
             session_token="fed-token",
             expiration=NOW + timedelta(minutes=15),
         ),
+        role_arn=ROLE_ARN,
         user=CALLER_ROLE,
         principal=CALLER_ROLE,
         session="session",
@@ -203,18 +204,10 @@ class TestCallerIdentityFields:
         with pytest.raises(CredentialsError):
             caller_role_name(PrincipalInfo(principal=principal))
 
-    def test_project_tag_is_empty_when_unknown(self):
+    def test_project_is_empty_when_unknown(self):
         assert caller_project(CALLER) == "example"
         assert caller_project(PrincipalInfo(project="unknown")) == ""
         assert caller_project(PrincipalInfo(project=None)) == ""
-
-    def test_principal_with_a_comma_cannot_be_a_session_tag(self):
-        with pytest.raises(CredentialsError, match="session tag"):
-            caller_role_name(PrincipalInfo(principal="assumed-role/role,name"))
-
-    def test_project_with_a_comma_cannot_be_a_session_tag(self):
-        with pytest.raises(CredentialsError, match="session tag"):
-            caller_project(PrincipalInfo(project="team,project"))
 
     def test_session_is_the_callers_session_name(self):
         assert caller_session(CALLER) == "session"
@@ -227,20 +220,12 @@ class TestCallerIdentityFields:
         with pytest.raises(CredentialsError, match="assumed-role"):
             caller_session(principal)
 
-    def test_session_name_with_a_comma_cannot_be_a_session_tag(self):
-        with pytest.raises(CredentialsError, match="session tag"):
-            caller_session(PrincipalInfo(session_name="i-0123,abc"))
-
     def test_user_is_the_source_identity_when_set(self):
         assert caller_user(CALLER_ROLE, SOURCE_IDENTITY) == SOURCE_IDENTITY
 
     @pytest.mark.parametrize("source_identity", [None, ""])
     def test_user_falls_back_to_the_role_name(self, source_identity: str | None):
         assert caller_user(CALLER_ROLE, source_identity) == CALLER_ROLE
-
-    def test_source_identity_with_a_comma_cannot_be_a_session_tag(self):
-        with pytest.raises(CredentialsError, match="session tag"):
-            caller_user(CALLER_ROLE, "some,one")
 
 
 def _sts_session(
@@ -329,16 +314,6 @@ class TestStsFederationService:
         assert identity == replace(_identity(), user=SOURCE_IDENTITY)
 
     @pytest.mark.asyncio
-    async def test_source_identity_unusable_as_a_tag_is_rejected(self):
-        session, _ = _sts_session(
-            assume_role={**ASSUME_ROLE_RESPONSE, "SourceIdentity": "some,one"}
-        )
-        service = StsFederationService(session, FEDERATION_CONFIG)
-
-        with pytest.raises(CredentialsError, match="session tag"):
-            await service.assume_federation_role(CALLER_CREDENTIALS, CALLER, ROLE_ARN)
-
-    @pytest.mark.asyncio
     async def test_non_assumed_role_caller_is_rejected_before_sts(self):
         session, clients = _sts_session(assume_role=ASSUME_ROLE_RESPONSE)
         service = StsFederationService(session, FEDERATION_CONFIG)
@@ -357,27 +332,6 @@ class TestStsFederationService:
         principal = PrincipalInfo(principal=f"assumed-role/{CALLER_ROLE}")
 
         with pytest.raises(CredentialsError, match="assumed-role"):
-            await service.assume_federation_role(
-                CALLER_CREDENTIALS, principal, ROLE_ARN
-            )
-
-        assert clients == []
-
-    @pytest.mark.parametrize(
-        "principal",
-        [
-            PrincipalInfo(principal="assumed-role/role,name", session_name="session"),
-            PrincipalInfo(principal=f"assumed-role/{CALLER_ROLE}", session_name="a,b"),
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_identity_unusable_as_a_tag_is_rejected_before_sts(
-        self, principal: PrincipalInfo
-    ):
-        session, clients = _sts_session(assume_role=ASSUME_ROLE_RESPONSE)
-        service = StsFederationService(session, FEDERATION_CONFIG)
-
-        with pytest.raises(CredentialsError, match="session tag"):
             await service.assume_federation_role(
                 CALLER_CREDENTIALS, principal, ROLE_ARN
             )
@@ -417,20 +371,13 @@ class TestStsFederationService:
             await service.assume_federation_role(CALLER_CREDENTIALS, CALLER, ROLE_ARN)
 
     @pytest.mark.asyncio
-    async def test_web_identity_token_uses_federation_session_and_tags(self):
+    async def test_web_identity_token_uses_the_federation_session_without_tags(
+        self,
+    ):
         session, clients = _sts_session(get_web_identity_token=WEB_IDENTITY_RESPONSE)
-        federation_config = FederationConfig(
-            allowed_account_ids=[ACCOUNT],
-            sts_endpoint_url=STS_ENDPOINT,
-            user_tag_key="example:user",
-            principal_tag_key="example:principal",
-            session_tag_key="example:session",
-            project_tag_key="example:project",
-        )
-        service = StsFederationService(session, federation_config)
-        identity = replace(_identity(), user=SOURCE_IDENTITY)
+        service = StsFederationService(session, FEDERATION_CONFIG)
 
-        proof = await service.web_identity_token(identity, "https://api.example.com")
+        proof = await service.web_identity_token(_identity(), "https://api.example.com")
 
         (client,) = clients
         assert client.create_kwargs["aws_access_key_id"] == "ASIAFED"
@@ -440,12 +387,6 @@ class TestStsFederationService:
             Audience=["https://api.example.com"],
             SigningAlgorithm="RS256",
             DurationSeconds=IDENTITY_TOKEN_SECONDS,
-            Tags=[
-                {"Key": "example:user", "Value": SOURCE_IDENTITY},
-                {"Key": "example:principal", "Value": CALLER_ROLE},
-                {"Key": "example:session", "Value": "session"},
-                {"Key": "example:project", "Value": "example"},
-            ],
         )
         assert proof == WebIdentityToken(
             token="header.payload.signature", expires_at=NOW + timedelta(minutes=15)
