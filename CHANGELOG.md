@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- AWS clients for STS and Secrets Manager are pooled per credential set
+  instead of being created on every cache miss.
+
 ### Fixed
 - An authorization payload that fails to decode is no longer included in the
   error message; the decode error is still chained for debugging.

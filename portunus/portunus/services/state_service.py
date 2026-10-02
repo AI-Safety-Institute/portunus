@@ -6,10 +6,13 @@ managing Redis connections and providing access to Redis clients.
 """
 
 import asyncio
+import contextlib
+import hashlib
 import logging
 import random
+from collections import OrderedDict
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import aiobotocore.session
 import redis.asyncio as aioredis
@@ -21,6 +24,75 @@ if TYPE_CHECKING:
     from types_aiobotocore_kinesis import KinesisClient
 
 logger = logging.getLogger("api.access")
+
+
+class _ClientRetirement:
+    """Idempotent closer for an LRU-evicted pooled client's context."""
+
+    def __init__(self, ctx: Any) -> None:
+        self._ctx = ctx
+        self._closed = False
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(Exception):
+            await self._ctx.__aexit__(None, None, None)
+
+
+class _PooledClientContext:
+    """Async CM yielding a pooled AWS client.
+
+    Unlike ``aiobotocore``'s ``create_client`` CM, ``__aexit__`` does NOT close
+    the client — it stays in :class:`StateService`'s credential-keyed pool,
+    closed on LRU eviction (after a grace period) and on
+    :meth:`StateService.close`.
+    """
+
+    def __init__(
+        self, state_service: "StateService", service_name: str, kwargs: dict[str, Any]
+    ) -> None:
+        self._state_service = state_service
+        self._service_name = service_name
+        self._kwargs = kwargs
+
+    async def __aenter__(self) -> Any:
+        return await self._state_service.get_pooled_aws_client(
+            self._service_name, **self._kwargs
+        )
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        # Deliberate no-op: the pooled client is shared and long-lived.
+        return None
+
+
+class PooledBotoSession:
+    """Duck-typed ``aiobotocore.Session`` subset backed by the client pool.
+
+    Drop-in for per-request ``async with session.create_client(...)`` sites
+    (STS in ``AuthService.get_aws_identity``, Secrets Manager in
+    ``SecretsService.fetch_secret``). A plain session rebuilds an aiohttp pool
+    + TLS context (~200ms cold) on every call; this reuses one client per
+    (service, credential set), like the Kinesis singleton.
+    """
+
+    def __init__(self, state_service: "StateService") -> None:
+        self._state_service = state_service
+
+    @property
+    def base_session(self) -> aiobotocore.session.AioSession:
+        """The full session behind the pool.
+
+        For callers needing more than ``create_client(credentials,
+        endpoint_url)`` — e.g. federation minting, whose per-mint credentials
+        would never hit the pool anyway.
+        """
+        return self._state_service.boto_session
+
+    def create_client(self, service_name: str, **kwargs: Any) -> _PooledClientContext:
+        """Return a non-closing async CM around a pooled client."""
+        return _PooledClientContext(self._state_service, service_name, kwargs)
 
 
 class StateService:
@@ -43,6 +115,104 @@ class StateService:
         self.kinesis_client: Optional["KinesisClient"] = None
         self._kinesis_exit_stack = AsyncExitStack()
         self._kinesis_lock = asyncio.Lock()
+        # Credential-keyed AWS client pool (STS / Secrets Manager): built with
+        # the *caller's* temporary creds, so pooled per (service, credential
+        # set) with a bounded LRU. Values are ``(ctx, client)``; ``ctx`` must
+        # be exited to close the client.
+        self._cred_client_pool: "OrderedDict[str, tuple[Any, Any]]" = OrderedDict()
+        # Grace-period close tasks for evicted clients, kept so ``close()``
+        # finishes them deterministically.
+        self._retiring_clients: dict[asyncio.Task[None], "_ClientRetirement"] = {}
+
+    # Bounded LRU (each entry is an aiohttp pool + TLS context); beyond this
+    # the least-recently-used client is retired. 64 is generous per sidecar.
+    _CRED_CLIENT_POOL_MAX = 64
+    # Grace before closing an evicted client so an in-flight call can finish;
+    # well above the 4s auth deadline on STS/Secrets calls.
+    _CRED_CLIENT_EVICT_GRACE_S = 30.0
+
+    def pooled_boto_session(self) -> PooledBotoSession:
+        """Return a session-like adapter that reuses pooled AWS clients."""
+        return PooledBotoSession(self)
+
+    @staticmethod
+    def _cred_pool_key(service_name: str, parts: tuple[Optional[str], ...]) -> str:
+        """Digest a (service, credentials, endpoint) tuple into a pool key.
+
+        Components are length-prefixed so differing tuples can't collide, and
+        raw secret key material isn't retained as a dict key.
+        """
+        digest = hashlib.sha256()
+        for part in (service_name, *parts):
+            raw = (part or "").encode("utf-8")
+            digest.update(len(raw).to_bytes(4, "big"))
+            digest.update(raw)
+        return digest.hexdigest()
+
+    async def get_pooled_aws_client(
+        self,
+        service_name: str,
+        *,
+        aws_access_key_id: str,
+        aws_secret_access_key: str,
+        aws_session_token: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+    ) -> Any:
+        """Get (or create) a pooled AWS client for a credential set.
+
+        Lock-free: all callers share the single grpc.aio loop and no ``await``
+        separates lookup from return on the hit path. On a same-key race the
+        loser closes its own unshared client and returns the winner's.
+        """
+        key = self._cred_pool_key(
+            service_name,
+            (aws_access_key_id, aws_secret_access_key, aws_session_token, endpoint_url),
+        )
+        entry = self._cred_client_pool.get(key)
+        if entry is not None:
+            self._cred_client_pool.move_to_end(key)
+            return entry[1]
+
+        # type-ignore: types-aiobotocore keys create_client overloads on
+        # literal service names; service_name here is dynamic.
+        ctx = self.boto_session.create_client(  # type: ignore[call-overload]
+            service_name,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            aws_session_token=aws_session_token,
+            endpoint_url=endpoint_url,
+        )
+        client = await ctx.__aenter__()
+
+        raced = self._cred_client_pool.get(key)
+        if raced is not None:
+            # Raced: another coroutine created it while we awaited; close ours
+            # (unshared) and use theirs.
+            with contextlib.suppress(Exception):
+                await ctx.__aexit__(None, None, None)
+            return raced[1]
+
+        self._cred_client_pool[key] = (ctx, client)
+        while len(self._cred_client_pool) > self._CRED_CLIENT_POOL_MAX:
+            _, (old_ctx, _) = self._cred_client_pool.popitem(last=False)
+            self._retire_client(old_ctx)
+        return client
+
+    def _retire_client(self, ctx: Any) -> None:
+        """Close an evicted client after a grace period (in the background)."""
+        retirement = _ClientRetirement(ctx)
+
+        async def _close_after_grace() -> None:
+            try:
+                await asyncio.sleep(self._CRED_CLIENT_EVICT_GRACE_S)
+            except asyncio.CancelledError:
+                # Shutdown: skip the remaining grace and close now.
+                pass
+            await retirement.close()
+
+        task = asyncio.get_running_loop().create_task(_close_after_grace())
+        self._retiring_clients[task] = retirement
+        task.add_done_callback(lambda t: self._retiring_clients.pop(t, None))
 
     async def get_redis_client(self) -> Optional[aioredis.Redis]:
         """
@@ -216,3 +386,24 @@ class StateService:
             finally:
                 self.kinesis_client = None
                 self._kinesis_exit_stack = AsyncExitStack()
+
+    async def close(self) -> None:
+        """Tear down cached AWS clients. Called on graceful shutdown."""
+        while self._cred_client_pool:
+            _, (ctx, _) = self._cred_client_pool.popitem(last=False)
+            with contextlib.suppress(Exception):
+                await ctx.__aexit__(None, None, None)
+        # Cut grace timers short and close their clients; the explicit
+        # (idempotent) ``retirement.close()`` covers tasks cancelled before
+        # they ran.
+        retiring = list(self._retiring_clients.items())
+        for task, _ in retiring:
+            task.cancel()
+        if retiring:
+            await asyncio.gather(
+                *(task for task, _ in retiring), return_exceptions=True
+            )
+            for _, retirement in retiring:
+                await retirement.close()
+
+        await self.close_kinesis_client()
