@@ -18,8 +18,10 @@ class FakeStateService:
     def __init__(self, client):
         self._client = client
 
-    async def acquire_redis_connection(self):
-        return self._client
+    async def execute_redis(self, operation):
+        if self._client is None:
+            return None
+        return await operation(self._client)
 
     async def health_check(self):
         return self._client is not None

@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import fakeredis.aioredis
 import pytest
@@ -62,8 +62,11 @@ class TestEffectiveCacheTtl:
 
 
 def _cache_backed_by(client: fakeredis.aioredis.FakeRedis) -> CacheService:
+    async def execute_redis(operation):
+        return await operation(client)
+
     state_service = MagicMock(spec=StateService)
-    state_service.acquire_redis_connection = AsyncMock(return_value=client)
+    state_service.execute_redis = execute_redis
     return CacheService(state_service=state_service)
 
 

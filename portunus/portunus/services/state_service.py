@@ -9,14 +9,15 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-import random
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Any, Optional
 
 import aiobotocore.session
 import redis.asyncio as aioredis
-from redis.exceptions import ConnectionError, MaxConnectionsError
+from redis.exceptions import ConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
 
@@ -93,6 +94,39 @@ class PooledBotoSession:
     def create_client(self, service_name: str, **kwargs: Any) -> _PooledClientContext:
         """Return a non-closing async CM around a pooled client."""
         return _PooledClientContext(self._state_service, service_name, kwargs)
+
+
+def _build_redis_pool() -> aioredis.BlockingConnectionPool:
+    """Build the shared Redis pool from config.
+
+    ``BlockingConnectionPool`` rather than the default pool: at the cap the
+    default raises ``ConnectionError("Too many connections")`` immediately,
+    which the auth path treats as a Redis failure and falls through to STS +
+    Secrets Manager — a burst turns into a stampede. Blocking for up to
+    ``pool_timeout_seconds`` queues the burst on the pool instead, and a
+    request whose wait expires is rejected by :meth:`StateService.execute_redis`
+    rather than falling through.
+    """
+    redis_config = config.redis
+    connection_kwargs: dict[str, Any] = {
+        "host": redis_config.host,
+        "port": redis_config.port,
+        "password": redis_config.password or None,
+        "decode_responses": True,
+        "socket_timeout": 5.0,
+        "socket_connect_timeout": 2.0,
+        "retry_on_timeout": True,
+        "health_check_interval": redis_config.health_check_interval_seconds,
+    }
+    if redis_config.use_tls:
+        connection_kwargs["connection_class"] = aioredis.SSLConnection
+        connection_kwargs["ssl_cert_reqs"] = "required"
+    return aioredis.BlockingConnectionPool(
+        max_connections=redis_config.max_connections,
+        # Typed int in redis-py, but it only feeds asyncio.timeout.
+        timeout=redis_config.pool_timeout_seconds,  # type: ignore[arg-type]
+        **connection_kwargs,
+    )
 
 
 class StateService:
@@ -225,7 +259,8 @@ class StateService:
         The client uses a connection pool with the following features:
         - Connection retry with exponential backoff
         - Pool health checks to remove dead connections
-        - Connection limits based on configuration
+        - Connection limits based on configuration; at the limit a command
+          waits for a free connection instead of failing
 
         Returns:
             Optional[aioredis.Redis]: Redis client if connection successful, None
@@ -236,25 +271,14 @@ class StateService:
             try:
                 # Log Redis connection parameters before connecting
                 logger.info(
-                    f"Connecting to Redis at {config.redis.host}:{config.redis.port} "
-                    f"with password length: "
-                    f"{len(config.redis.password or '')}"
+                    "Connecting to Redis at %s:%d (password_set=%s)",
+                    config.redis.host,
+                    config.redis.port,
+                    bool(config.redis.password),
                 )
 
                 # Create Redis client with built-in connection pooling
-                self.redis_client = aioredis.Redis(
-                    host=config.redis.host,
-                    port=config.redis.port,
-                    password=config.redis.password if config.redis.password else None,
-                    decode_responses=True,
-                    max_connections=config.redis.max_connections,
-                    ssl=config.redis.use_tls,
-                    ssl_cert_reqs="required" if config.redis.use_tls else "none",
-                    socket_timeout=5.0,
-                    socket_connect_timeout=2.0,
-                    retry_on_timeout=True,
-                    health_check_interval=5,
-                )
+                self.redis_client = aioredis.Redis.from_pool(_build_redis_pool())
 
                 # Verify authentication with a simple command
                 ping_result = await self.redis_client.ping()
@@ -263,6 +287,8 @@ class StateService:
                     f"{config.redis.host}:{config.redis.port}, "
                     f"ping result: {ping_result}"
                 )
+            except (RedisTimeoutError, TimeoutError):
+                raise
             except Exception as e:
                 logger.exception(f"Redis connection failure traceback: {e}")
                 self.redis_client = None  # Reset to None in case of error
@@ -285,48 +311,40 @@ class StateService:
             finally:
                 self.redis_client = None
 
-    async def acquire_redis_connection(self, max_retries=8):
-        """
-        Acquire a Redis connection with exponential backoff retry.
+    async def execute_redis[T](
+        self, operation: Callable[[aioredis.Redis], Awaitable[T]]
+    ) -> Optional[T]:
+        """Run a Redis operation on the shared client.
 
-        This provides backpressure by making callers wait for a client
-        if the redis server is overloaded. Note that the ping() here
-        ALSO creates load, so we might want to rethink this.
+        Returns ``None`` when no client is available. The blocking pool queues
+        the command for up to ``REDIS_POOL_TIMEOUT_SECONDS``; if that wait
+        expires, redis-py raises ``ConnectionError("No connection available.")``
+        chained from the wait's ``TimeoutError``. That one case is re-raised as
+        a ``TimeoutError`` so the auth path rejects the request instead of
+        treating it as a cache miss — a saturated pool must not fall through to
+        STS and Secrets Manager. Every other ``ConnectionError`` (refused,
+        reset, failover) propagates unchanged and callers treat it as a miss.
 
-        Args:
-            max_retries: Maximum number of retry attempts (default: 8)
-
-        Returns:
-            Redis client if successful, None otherwise
-        Note:
-            This method is intended for high-load scenarios where connections
-            may be temporarily exhausted.
+        Raises:
+            TimeoutError: If the wait for a pooled connection expires.
         """
         client = await self.get_redis_client()
         if not client:
+            logger.warning("Redis client unavailable for cache operation")
             return None
 
-        retry_count = 0
-        while retry_count <= max_retries:
-            try:
-                # Attempt a simple ping to test connection acquisition
-                await client.ping()
-                return client
-            except (MaxConnectionsError, ConnectionError) as e:
-                # Check for "Too many connections" in the error message
-                if "Too many connections" in str(e) and retry_count < max_retries:
-                    retry_count += 1
-                    backoff = min(0.1 * (1.5**retry_count), 1.0) * (
-                        0.8 + 0.4 * random.random()
-                    )
-                    logger.warning(
-                        f"Redis connection limit reached, retrying in {backoff:.2f}s "
-                        f"(attempt {retry_count}/{max_retries})"
-                    )
-                    await asyncio.sleep(backoff)
-                else:
-                    raise e
-        return None
+        try:
+            return await operation(client)
+        except ConnectionError as e:
+            if isinstance(e.__cause__, TimeoutError):
+                logger.warning(
+                    "Timed out after %.1fs waiting for a pooled Redis connection",
+                    config.redis.pool_timeout_seconds,
+                )
+                raise TimeoutError(
+                    "Timed out waiting for a pooled Redis connection"
+                ) from e
+            raise
 
     async def health_check(self) -> bool:
         """
