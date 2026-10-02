@@ -8,115 +8,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.11.0] - 2026-09-24
 
 ### Added
-- Secrets may describe a token to mint instead of holding a key. The
-  `anthropic_wif` type names a federation role, which Portunus assumes with
-  the caller's credentials to obtain an STS web identity token and exchange
-  it at the provider's `/v1/oauth/token` endpoint for a short-lived bearer
-  token, returned with `output_header: authorization`. Federation role ARNs
-  must be `arn:aws:iam::<account>:role<prefix><name>` with `<account>` in
-  `FEDERATION_ALLOWED_ACCOUNT_IDS` (new env var; unset disables minting) and
-  `<prefix>` `FEDERATION_ROLE_PATH_PREFIX` (default `/portunus-fed/`); `<name>`
-  is any further path plus the role name, e.g.
-  `arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example`.
-  The identity token carries no request tags; the federation role needs only
-  `sts:GetWebIdentityToken`. Every mint logs one INFO line pairing the
-  identity token's `jti` with the federation role ARN and the caller's user,
-  principal, session and project, which is how a provider's record is
-  matched to a caller. `FEDERATION_STS_ENDPOINT_URL` is also new. Mint secrets reject unknown
-  fields. Minted results are cached until the earlier of `CACHE_DURATION` and
-  one minute before the token expires; concurrent misses for one payload and
-  target share a mint per process.
-- `/authorise` returns 503 (`UpstreamServiceError`) when STS or a provider's
-  token endpoint (Anthropic's, OpenAI's, OpenRouter's, or Google STS and IAM
-  Credentials)
-  cannot be reached or answers 5xx/429, or when minting exceeds its 6 s
-  deadline.
-- The `openai_wif` secret type mints OpenAI access tokens. The federation
-  session's STS web identity token, signed with ES384 for the secret's
-  `audience` (default `https://api.openai.com/v1`), is exchanged at
-  `https://auth.openai.com/oauth/token` (RFC 8693 token exchange) for the
-  secret's `identity_provider_id` and `service_account_id`. OpenAI never
-  issues the access token beyond the STS token's expiry, so Portunus requests
-  a 30-minute STS token for this exchange (`anthropic_wif` keeps requesting
-  15 minutes, which Anthropic doubles); the access token is valid for about
-  30 minutes. The federation role's policy must allow `sts:DurationSeconds`
-  up to 1800.
-- The `openrouter_wif` secret type mints OpenRouter access tokens. The
-  federation session's STS web identity token, signed with RS256 for the
-  secret's `audience` (default `https://openrouter.ai/api/v1`), is exchanged
-  at `https://openrouter.ai/api/v1/oauth/token` (RFC 8693 token exchange,
-  form-encoded) under the secret's `federation_policy_id`. OpenRouter issues
-  the access token for at most 15 minutes and never beyond the STS token's
-  expiry, so Portunus requests a 15-minute STS token; the access token is
-  cached for about 14 minutes.
-- The `gcp_wif` secret type mints Google service-account access
-  tokens. The federation session's STS web identity token, signed with RS256
-  for the secret's `audience` (a workload identity pool provider resource
-  name), is exchanged at Google STS (RFC 8693 token exchange, the JWT as an
-  OIDC subject token) for a federated token, which impersonates the named
-  service account for the secret's `scopes` and `token_lifetime_seconds`.
-  The pool provider is an OIDC provider trusting the AWS account's STS token
-  issuer.
-- The CLI's default session policy allows `sts:AssumeRole` and `sts:TagSession` on every role under
-  the federation role path in the caller's account,
-  `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
-  overrides the path).
-- `portunus encode-credentials --session-name` sets the `RoleSessionName` the
-  CLI assumes the caller's own role with (default `portunus`), for roles whose
-  trust policy gates self-assumption on `sts:RoleSessionName`. Names outside
-  STS's `[\w+=,.@-]{2,64}` are rejected before any call.
-- `/authorise` responses may carry `output_header` and `output_prefix`, letting
-  the backend choose which upstream header receives the credential and with
-  what prefix. When absent, the proxy keeps using `API_KEY_HEADER` /
-  `API_KEY_PREFIX`. The WebSocket relay honours the same fields (default
-  `Authorization: Bearer`). Cached authorization results carry both fields.
-  (#136)
+- Short-lived lab tokens. A secret of type `anthropic_wif`, `openai_wif`,
+  `openrouter_wif` or `gcp_wif` names a federation role instead of holding a
+  key. Portunus assumes the role with the caller's credentials, exchanges an
+  STS web identity token at the lab, and sends the lab's short-lived token
+  upstream. New settings: `FEDERATION_ALLOWED_ACCOUNT_IDS` (unset disables
+  minting), `FEDERATION_ROLE_PATH_PREFIX` and `FEDERATION_STS_ENDPOINT_URL`.
+  See [Secret formats](README.md#secret-formats) and the
+  [worked examples](docs/federation-examples.md).
+- `/authorise` can name the upstream header and prefix for the credential
+  (`output_header`, `output_prefix`). The WebSocket relay honours them. (#136)
+- `portunus encode-credentials --session-name`. The CLI's default session
+  policy allows assuming roles under the federation role path.
+- A lab or STS outage during minting returns 503.
 
 ### Changed
-- Cached authorization results are keyed by the payload and the proxy's
-  target host, not the payload alone, so a result cached through one proxy is
-  not a hit for a proxy with a different upstream. Every entry cached before
-  this change misses once after deploy.
-- JSON secrets that carry a `type` are validated strictly against that type
-  and rejected on failure. JSON without a `type` keeps the previous
-  behaviour (stored key, or used verbatim when it matches no schema), except
-  an object with a `federation_role_arn`, which is rejected as a mint secret
-  missing its `type`.
-- The proxy removes the header the auth payload arrived in (`API_KEY_HEADER`)
-  from the upstream request and sets the header the credential is written to
-  (`output_header`, else `API_KEY_HEADER`); when both name the same header this
-  is the existing overwrite. The inbound header carries the caller's AWS
-  credentials, so it is removed explicitly now that the credential can be
-  written to a different header. Every other header, including other
-  credential-shaped ones, is forwarded untouched so clients can carry
-  provider-specific headers through. Header logging excludes
-  `KNOWN_AUTH_HEADERS` (new proxy env var, default
-  `authorization,x-api-key,x-goog-api-key,api-key`) plus the inbound and
-  output headers, whether or not they were forwarded; previously only
-  `API_KEY_HEADER` was excluded. The WebSocket relay applies the same
-  forwarding and logging rules. (#136)
+- Cache entries are keyed by payload and target host, so a credential cached
+  through one proxy is never served by another. Existing entries miss once
+  after deploy.
+- Secrets with a `type` are validated strictly. A secret with no `type` but a
+  `federation_role_arn` is rejected.
+- The proxy strips the header the payload arrived in from upstream requests,
+  and leaves `KNOWN_AUTH_HEADERS` (new, default
+  `authorization,x-api-key,x-goog-api-key,api-key`) out of header logs. (#136)
 
 ### Removed
-- RFC 9421 request signing (the `signing_key` field on JSON secrets, the
-  `Content-Digest`, `Signature` and `Signature-Input` upstream headers, and the
-  `signable_request` / `signature*` fields on `/authorise`). Anthropic has
-  deprecated the check and confirmed it can be turned off. Secrets that still
-  carry a `signing_key` field keep working; the field is ignored. The `portunus`
-  CLI's default session policy no longer grants `kms:Sign`, and LocalStack no
-  longer starts KMS.
+- RFC 9421 request signing. A `signing_key` on an existing secret is ignored.
+  (#154)
 
 ### Fixed
-- Federation payloads created by the CLI permit inherited transitive session
-  tags, including EKS Pod Identity tags. The worked examples grant the matching
-  caller and trust-policy permissions while restricting explicit tag keys.
-- A JSON secret that failed schema validation was logged with the pydantic
-  error, which embeds the secret's contents. Only field paths and error
-  types are logged now.
-- The WebSocket relay forwarded the proxy's shared-secret header
-  (`PORTUNUS_API_KEY_HEADER`, default `x-api-key`), which Envoy adds to every
-  upgrade request it routes to Portunus, to the upstream and included it in the
-  logged upgrade headers. With the default header name it is now stripped from
-  both. (#136)
+- CLI payloads permit inherited transitive session tags, including EKS Pod
+  Identity tags.
+- Secret validation errors no longer log the secret's contents.
+- The WebSocket relay no longer forwards or logs the proxy's shared-secret
+  header. (#136)
 
 ## [0.10.0] - 2026-09-16
 
