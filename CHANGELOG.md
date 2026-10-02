@@ -57,7 +57,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   service account for the secret's `scopes` and `token_lifetime_seconds`.
   The pool provider is an OIDC provider trusting the AWS account's STS token
   issuer.
-- The CLI's default session policy allows `sts:AssumeRole` on every role under
+- The CLI's default session policy allows `sts:AssumeRole` and `sts:TagSession` on every role under
   the federation role path in the caller's account,
   `arn:aws:iam::<caller account>:role/portunus-fed/*` (`--federation-role-path`
   overrides the path).
@@ -106,6 +106,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   longer starts KMS.
 
 ### Fixed
+- Federation payloads created by the CLI permit inherited transitive session
+  tags, including EKS Pod Identity tags. The worked examples grant the matching
+  caller and trust-policy permissions while restricting explicit tag keys.
 - A JSON secret that failed schema validation was logged with the pydantic
   error, which embeds the secret's contents. Only field paths and error
   types are logged now.
