@@ -18,6 +18,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   so a Redis outage does not become an STS stampede.
 
 ### Changed
+- `ext_authz` sees request headers only and never the body, so request bodies
+  stream end to end without buffering. Authentication fails closed: Portunus
+  answers within 9 s (504 after that).
+- An authentication timeout now returns 504; 0.11.0's REST path returned
+  503.
+- Authentication error bodies are `{"error": {"message", "request_id"}}`
+  (`request_id` replaces `x_amzn_trace_id`), and the request id is returned in
+  the `x-portunus-debug-id` response header instead of `X-Amzn-Trace-Id`.
 - AWS clients for STS and Secrets Manager are pooled per credential set
   instead of being created on every cache miss. Redis connections come from
   a blocking pool (`REDIS_POOL_TIMEOUT_SECONDS`, default 1.0) with idle
