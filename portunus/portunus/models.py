@@ -22,16 +22,17 @@ from typing import (
     Any,
     Dict,
     List,
+    Literal,
     Optional,
     Protocol,
     Union,
 )
 
 if TYPE_CHECKING:
-    from pydantic import BaseModel, ConfigDict, Field, ValidationError
+    from pydantic import BaseModel, ConfigDict, Field
 else:
     try:
-        from pydantic import BaseModel, ConfigDict, Field, ValidationError
+        from pydantic import BaseModel, ConfigDict, Field
     except ImportError:
         # Define minimal stubs for environments without pydantic
         def _field_stub(*args: Any, **kwargs: Any) -> None:
@@ -41,7 +42,6 @@ else:
         BaseModel = object  # type: ignore
         ConfigDict = dict  # type: ignore
         Field = _field_stub  # type: ignore
-        ValidationError = Exception  # type: ignore
 
 import logging
 
@@ -541,34 +541,63 @@ class PrincipalInfo:
 
 
 class SecretsManagerAuthPayload(BaseModel):
-    """
-    AWS SecretsManager payload for our proxy api keys.
+    """A stored API key, as held in AWS Secrets Manager.
 
-    Each api key secret is either a simple string consisting entirely of the api key,
-    or a json payload in this format
+    The secret is either a plain string consisting entirely of the API key, or
+    JSON in this shape (``type`` may be omitted). See
+    ``services.secret_validation_service.parse_secret`` for parsing rules.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
+    type: Literal["static"] = "static"
     api_key: Annotated[str, Field(alias="secret")]
     host: Optional[str] = None
 
-    @classmethod
-    def from_string(cls, input: str) -> SecretsManagerAuthPayload:
-        try:
-            secret_data: str = json.loads(input)
-        except json.JSONDecodeError:
-            logger.info("Secret is plaintext format")
-            return cls(api_key=input)
 
-        try:
-            return cls.model_validate(secret_data)
-        except ValidationError as e:
-            logger.info(
-                "JSON secret with unrecognised schema, using JSON as API key",
-                exc_info=e,
-            )
-            return cls(api_key=input)
+class MintSecretBase(BaseModel):
+    """Common fields of secrets that mint a token instead of storing one.
+
+    Portunus assumes ``federation_role_arn`` with the caller's own credentials
+    and federates that session to the provider named by the concrete type.
+    Unknown fields are rejected.
+
+    Attributes:
+        host: Target host the token is valid for; also validated against the
+            proxy's target like the static ``host`` field.
+        federation_role_arn: IAM role whose trust policy admits the caller,
+            in an allowed account and under the deployment's federation role
+            path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = Field(min_length=1)
+    federation_role_arn: str = Field(min_length=1)
+
+
+class AnthropicWifSecret(MintSecretBase):
+    """Mint an Anthropic OAuth token via workload identity federation.
+
+    The federation session requests an STS web identity token for ``audience``
+    and exchanges it at ``https://api.anthropic.com/v1/oauth/token`` (RFC 7523
+    JWT bearer grant) using the identifiers below.
+    """
+
+    type: Literal["anthropic_wif"]
+    federation_rule_id: str = Field(min_length=1)
+    organization_id: str = Field(min_length=1)
+    service_account_id: str = Field(min_length=1)
+    workspace_id: str = Field(min_length=1)
+    audience: str = Field(default="https://api.anthropic.com", min_length=1)
+
+
+# Every secret shape. A new mint provider (e.g. gcp_wif)
+# subclasses MintSecretBase, joins this union, and gets an exchange branch in
+# services.federation_service.TokenMintService.
+SecretsManagerSecret = Union[SecretsManagerAuthPayload, AnthropicWifSecret]
+TypedSecret = Annotated[SecretsManagerSecret, Field(discriminator="type")]
+"""SecretsManagerSecret discriminated on ``type``, for validating JSON input."""
 
 
 @dataclass
@@ -582,12 +611,15 @@ class AuthResult:
             means the proxy's configured header.
         output_prefix: Prefix for the credential value. None means the proxy's
             configured prefix; an empty string means no prefix.
+        expires_at: When a minted credential stops being valid. None for
+            stored keys.
     """
 
     api_key: str
     principal_info: PrincipalInfo
     output_header: Optional[str] = None
     output_prefix: Optional[str] = None
+    expires_at: Optional[datetime] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AuthResult":
@@ -601,21 +633,26 @@ class AuthResult:
         """
         principal_info_data = data.get("principal_info", {})
         principal_info = PrincipalInfo.from_dict(principal_info_data)
+        expires_at = data.get("expires_at")
 
         return cls(
             api_key=data.get("api_key", ""),
             principal_info=principal_info,
             output_header=data.get("output_header"),
             output_prefix=data.get("output_prefix"),
+            expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation.
 
         Returns:
-            Dict[str, Any]: Dictionary with auth result fields
+            Dict[str, Any]: Dictionary with auth result fields; ``expires_at``
+            is an ISO-8601 string.
         """
-        return asdict(self)
+        result = asdict(self)
+        result["expires_at"] = self.expires_at.isoformat() if self.expires_at else None
+        return result
 
     @property
     def successful(self) -> bool:

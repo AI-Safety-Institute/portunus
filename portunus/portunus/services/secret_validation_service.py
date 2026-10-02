@@ -1,43 +1,115 @@
 """
 Validation service module.
 
-This module contains the ValidationService class, which is responsible for
-validating secrets and extracting API keys with target host validation.
+Parses Secrets Manager secret strings into typed secrets and enforces target
+host validation.
 """
 
+import json
 import logging
+from typing import Optional
+
+from pydantic import TypeAdapter, ValidationError
 
 from portunus.exceptions import AuthenticationError
-from portunus.models import SecretsManagerAuthPayload
+from portunus.models import (
+    SecretsManagerAuthPayload,
+    SecretsManagerSecret,
+    TypedSecret,
+)
 
 logger = logging.getLogger("api.access")
+
+_typed_secret: TypeAdapter[SecretsManagerSecret] = TypeAdapter(TypedSecret)
+
+
+def _validation_summary(error: ValidationError) -> str:
+    """Field paths and error types only.
+
+    ``str(error)`` embeds each failing input value, and for a missing field or
+    an unknown ``type`` that is the whole secret.
+    """
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: {item['type']}"
+        for item in error.errors(include_input=False, include_url=False)
+    )
+
+
+def parse_secret(secret_string: str) -> SecretsManagerSecret:
+    """Parse a raw Secrets Manager value into a typed secret.
+
+    Plaintext, non-object JSON, and JSON objects without a ``type`` that do not
+    match the static schema are used verbatim as the API key, as they always
+    have been. The exception is a typeless object with a
+    ``federation_role_arn``: that is a mint secret missing its ``type`` and
+    raises rather than being forwarded upstream as a credential. A JSON object
+    with a ``type`` must validate as that type, for the same reason.
+
+    Raises:
+        AuthenticationError: ``type`` is unknown or its fields are invalid, or
+            the object names a federation role without a ``type``.
+    """
+    try:
+        data = json.loads(secret_string)
+    except json.JSONDecodeError:
+        logger.info("Secret is plaintext format")
+        return SecretsManagerAuthPayload(api_key=secret_string)
+
+    if not isinstance(data, dict) or "type" not in data:
+        # federation_role_arn is the field every mint secret type shares
+        # (MintSecretBase); without a type it would be used as the API key.
+        if isinstance(data, dict) and "federation_role_arn" in data:
+            logger.error("Secret names a federation role but has no type")
+            raise AuthenticationError("Secret names a federation role but has no type")
+        try:
+            return SecretsManagerAuthPayload.model_validate(data)
+        except ValidationError as e:
+            logger.info(
+                "JSON secret with unrecognised schema, using JSON as API key "
+                f"({_validation_summary(e)})"
+            )
+            return SecretsManagerAuthPayload(api_key=secret_string)
+
+    try:
+        return _typed_secret.validate_python(data)
+    except ValidationError as e:
+        logger.error(
+            f"Secret of type {data.get('type')!r} failed validation: "
+            f"{_validation_summary(e)}"
+        )
+        # Not chained: the ValidationError holds the secret's contents and
+        # would print them in any traceback.
+        raise AuthenticationError(
+            "Secret has an unsupported type or invalid fields"
+        ) from None
 
 
 class SecretValidationService:
     """
-    Service for validating secrets and extracting API keys.
+    Service for parsing secrets and enforcing their host restrictions.
 
     This service handles parsing secret formats and enforcing target host
     validation when required.
     """
 
-    def validate_and_extract_api_key(
-        self, secret_string: str, target_host: str | None
-    ) -> str:
+    def validate_secret(
+        self, secret_string: str, target_host: Optional[str]
+    ) -> SecretsManagerSecret:
         """
-        Parse secret and validate target host if secret is in JSON format.
+        Parse the secret and enforce its host restriction, if it has one.
 
         Args:
             secret_string: Raw secret value from AWS Secrets Manager
             target_host: Expected target host from proxy (optional)
 
         Returns:
-            The API key to use.
+            The typed secret: a stored key or a mint description.
 
         Raises:
-            AuthenticationError: If validation fails for JSON secrets with host field
+            AuthenticationError: Host mismatch, host restriction without a
+                known target, or an invalid typed secret.
         """
-        secret = SecretsManagerAuthPayload.from_string(secret_string)
+        secret = parse_secret(secret_string)
 
         # If secret has host field, validation is required
         if secret.host:
@@ -57,4 +129,4 @@ class SecretValidationService:
         else:
             logger.info("Secret has no host restriction, skipping validation")
 
-        return secret.api_key
+        return secret

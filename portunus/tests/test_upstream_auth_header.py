@@ -32,14 +32,17 @@ def _payload() -> str:
     return base64.b64encode(json.dumps(data).encode()).decode()
 
 
-def _auth_result(**overrides: str) -> AuthResult:
+def _auth_result(
+    output_header: str | None = None, output_prefix: str | None = None
+) -> AuthResult:
     return AuthResult(
         api_key="sk-test-key",
         principal_info=PrincipalInfo(
             arn="arn:aws:sts::123456789012:assumed-role/TestRole/session",
             account_id="123456789012",
         ),
-        **overrides,
+        output_header=output_header,
+        output_prefix=output_prefix,
     )
 
 
@@ -123,8 +126,10 @@ class TestCacheRoundTrip:
         cache = _cache_backed_by(fake_redis)
         stored = _auth_result(output_header="x-goog-api-key", output_prefix="")
 
-        assert await cache.cache_auth_result("payload", stored, ttl_seconds=60)
-        cached = await cache.get_cached_auth_result("payload")
+        assert await cache.cache_auth_result(
+            "payload", "api.example.com", stored, ttl_seconds=60
+        )
+        cached = await cache.get_cached_auth_result("payload", "api.example.com")
 
         assert cached is not None
         assert cached.output_header == "x-goog-api-key"
@@ -143,9 +148,11 @@ class TestCacheRoundTrip:
             "principal_info": _auth_result().principal_info.to_dict(),
             "signing_key": {"provider_id": "signingkey_1", "kms_key_arn": "arn:..."},
         }
-        await fake_redis.set(cache.generate_cache_key("payload"), json.dumps(legacy))
+        await fake_redis.set(
+            cache.generate_cache_key("payload", "api.example.com"), json.dumps(legacy)
+        )
 
-        cached = await cache.get_cached_auth_result("payload")
+        cached = await cache.get_cached_auth_result("payload", "api.example.com")
 
         assert cached is not None
         assert cached.api_key == "sk-legacy"
