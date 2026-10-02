@@ -15,6 +15,18 @@ dependencies = [
     "pyyaml>=6.0.1,<7",
     "redis>=5.0.0,<6",
     "async-timeout>=4.0.3,<5",
+    # gRPC servers for Envoy ext_authz / ext_proc filters. xds-protos>=1.80
+    # ships the stable v3 namespace (older versions only have v3alpha).
+    # grpcio and xds-protos are held on the 1.82 line. The floor is 1.82.2:
+    # 1.82.1 is affected by GHSA-hf3w-6hpw-qp67 (gRPC core heap exhaustion:
+    # unbounded decompression, GOAWAY parsing), patched in 1.82.2 and 1.83.1.
+    # The <1.83 cap stays: 1.84 lowered sustained throughput by ~13-20% at
+    # saturation in a same-node A/B load test (CPU per request unchanged below
+    # saturation), and an A/B in the production topology confirmed the
+    # regression: audit falls behind under mixed load.
+    "grpcio>=1.82.2,<1.83",
+    "xds-protos>=1.82.2,<1.83",
+    "googleapis-common-protos>=1.65.0,<2",
     "contextvars~=2.4",
     # Pinned to the 16.x major: the relay uses the websockets.asyncio client
     # API, which has churned across majors, and CI only exercises the locked
@@ -70,6 +82,23 @@ ignore = ["E203", "D10", "D212"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.mypy]
+
+[[tool.mypy.overrides]]
+# Third-party gRPC / protobuf / boto packages ship without type stubs (or
+# only partial ones).
+module = [
+    "brotli",
+    "grpc",
+    "grpc.*",
+    "google.protobuf.*",
+    "google.rpc.*",
+    "aiobotocore",
+    "aiobotocore.*",
+    "envoy.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 markers = [
