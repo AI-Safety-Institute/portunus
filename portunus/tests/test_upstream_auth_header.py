@@ -35,7 +35,6 @@ def _payload() -> str:
 def _auth_result(**overrides: str) -> AuthResult:
     return AuthResult(
         api_key="sk-test-key",
-        signing_key=None,
         principal_info=PrincipalInfo(
             arn="arn:aws:sts::123456789012:assumed-role/TestRole/session",
             account_id="123456789012",
@@ -47,13 +46,6 @@ def _auth_result(**overrides: str) -> AuthResult:
 AUTHORISE_BODY = {
     "payload": _payload(),
     "target_host": "api.example.com",
-    "signable_request": {
-        "type": "anthropic",
-        "content_digest": "sha-256=:abc:",
-        "content_type": "application/json",
-        "method": "POST",
-        "url": "https://api.example.com/v1/messages",
-    },
 }
 
 
@@ -141,12 +133,15 @@ class TestCacheRoundTrip:
 
     @pytest.mark.asyncio
     async def test_entry_without_output_fields_loads_as_none(self, fake_redis):
-        """Entries written before the fields existed still load."""
+        """Entries written before the fields existed still load.
+
+        Such entries also carry the removed signing_key field, which is ignored.
+        """
         cache = _cache_backed_by(fake_redis)
         legacy = {
             "api_key": "sk-legacy",
             "principal_info": _auth_result().principal_info.to_dict(),
-            "signing_key": None,
+            "signing_key": {"provider_id": "signingkey_1", "kms_key_arn": "arn:..."},
         }
         await fake_redis.set(cache.generate_cache_key("payload"), json.dumps(legacy))
 
@@ -231,3 +226,29 @@ class TestAuthoriseEndpoint:
         body = response.json()
         assert body["output_header"] == "x-goog-api-key"
         assert body["output_prefix"] == ""
+
+    @pytest.mark.asyncio
+    async def test_legacy_signable_request_is_ignored(self, client, mock_xray):
+        """Proxies from before signing was removed still send signable_request."""
+        body = {
+            **AUTHORISE_BODY,
+            "signable_request": {
+                "type": "anthropic",
+                "content_digest": "sha-256=:abc:",
+                "content_type": "application/json",
+                "method": "POST",
+                "url": "https://api.example.com/v1/messages",
+            },
+        }
+        with (
+            patch("portunus.app.auth_service") as auth_service,
+            patch("portunus.app.publish_service") as publish_service,
+        ):
+            auth_service.authenticate = AsyncMock(return_value=_auth_result())
+            publish_service.publish_metadata = AsyncMock()
+
+            response = await client.post("/authorise", json=body)
+
+        assert response.status_code == 200
+        assert "signature" not in response.json()
+        assert "signature_input" not in response.json()

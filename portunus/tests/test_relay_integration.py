@@ -24,7 +24,6 @@ def auth_result():
     return WsAuthResult(
         auth_result=AuthResult(
             api_key="sk-test-key",
-            signing_key=None,
             principal_info=PrincipalInfo(
                 arn="arn:aws:sts::123:assumed-role/Test/session",
                 account_id="123",

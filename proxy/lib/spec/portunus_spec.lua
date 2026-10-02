@@ -7,7 +7,6 @@ describe("proxy_utils.portunus", function()
 
 	before_each(function()
 		package.loaded["proxy_utils.portunus"] = nil
-		package.loaded["proxy_utils.request_signing"] = nil
 		portunus_module = require("proxy_utils.portunus")
 
 		local config = {
@@ -18,8 +17,6 @@ describe("proxy_utils.portunus", function()
 			api_key_prefix = "Bearer ",
 			known_auth_headers = "authorization,x-api-key,x-goog-api-key,api-key",
 			target_host = "api.example.com",
-			signing_key_id = "",
-			kms_key_arn = "",
 		}
 		portunus_client = portunus_module.new(config)
 	end)
@@ -131,20 +128,6 @@ describe("proxy_utils.portunus", function()
 	end)
 
 	describe("parse_authorization_response - JSON parsing", function()
-		it("should parse valid response with all fields", function()
-			local body =
-				'{"api_key": "sk-test-123", "request_id": "req-abc", "signature": "sig-xyz", "signature_input": "sig-input-def"}'
-
-			local data, err = portunus_client:parse_authorization_response(body)
-
-			assert.is_nil(err)
-			assert.is_not_nil(data)
-			assert.equals("sk-test-123", data.api_key)
-			assert.equals("req-abc", data.request_id)
-			assert.equals("sig-xyz", data.signature)
-			assert.equals("sig-input-def", data.signature_input)
-		end)
-
 		it("should parse response with required fields only", function()
 			local body = '{"api_key": "sk-test-456", "request_id": "req-def"}'
 
@@ -153,7 +136,6 @@ describe("proxy_utils.portunus", function()
 			assert.is_nil(err)
 			assert.equals("sk-test-456", data.api_key)
 			assert.equals("req-def", data.request_id)
-			assert.is_nil(data.signature)
 		end)
 
 		it("should treat null output fields as absent", function()
@@ -414,7 +396,7 @@ describe("proxy_utils.portunus", function()
 				httpCall = spy.new(),
 			}
 
-			portunus_client:authorise(handle, "test-payload", "sha-256=:abc:")
+			portunus_client:authorise(handle, "test-payload")
 
 			-- Verify we made exactly one call
 			assert.spy(handle.httpCall).was.called(1)
@@ -442,13 +424,7 @@ describe("proxy_utils.portunus", function()
 			local decoded = json.decode(body)
 			assert.equals("test-payload", decoded.payload)
 			assert.equals("api.example.com", decoded.target_host)
-			-- signable_request is always included (backend checks auth secret for signing config)
-			assert.is_not_nil(decoded.signable_request)
-			assert.equals("anthropic", decoded.signable_request.type)
-			assert.equals("sha-256=:abc:", decoded.signable_request.content_digest)
-			assert.equals("application/json", decoded.signable_request.content_type)
-			assert.equals("POST", decoded.signable_request.method)
-			assert.equals("https://api.example.com/v1/messages", decoded.signable_request.url)
+			assert.is_nil(decoded.signable_request)
 		end)
 	end)
 

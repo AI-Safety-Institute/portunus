@@ -15,7 +15,6 @@ description = {
 }
 dependencies = {
    "lua >= 5.1",
-   "sha2",
    "base64",
    "dkjson"
 }
@@ -27,7 +26,6 @@ build = {
    modules = {
       ["proxy_utils"] = "proxy_utils/init.lua",
       ["proxy_utils.utils"] = "proxy_utils/utils.lua",
-      ["proxy_utils.request_signing"] = "proxy_utils/request_signing.lua",
       ["proxy_utils.logging"] = "proxy_utils/logging.lua",
       ["proxy_utils.portunus"] = "proxy_utils/portunus.lua"
    }

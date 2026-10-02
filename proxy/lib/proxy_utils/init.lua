@@ -8,7 +8,6 @@ local proxy_utils = {
 
 -- Load submodules
 proxy_utils.utils = require("proxy_utils.utils")
-proxy_utils.request_signing = require("proxy_utils.request_signing")
 proxy_utils.logging = require("proxy_utils.logging")
 proxy_utils.portunus = require("proxy_utils.portunus")
 
