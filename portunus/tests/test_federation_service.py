@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import traceback
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -755,6 +756,22 @@ class TestOpenAiTokenExchange:
 
         assert "malformed body" in caplog.text
         assert "eyJ.openai.example" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_malformed_token_response_is_not_chained(self, caplog):
+        caplog.set_level(logging.ERROR, logger="api.access")
+        body = {"access_token": "eyJ.leaked.example", "expires_in": "soon"}
+        adapter, _ = _openai_exchange(lambda request: httpx.Response(200, json=body))
+
+        with pytest.raises(AuthenticationError, match="malformed") as exc_info:
+            await adapter.exchange("header.payload.signature", _openai_secret())
+
+        error = exc_info.value
+        assert error.__cause__ is None
+        assert error.__suppress_context__ is True
+        assert "eyJ.leaked.example" not in str(error)
+        assert "eyJ.leaked.example" not in "".join(traceback.format_exception(error))
+        assert "eyJ.leaked.example" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_non_json_success_body_raises(self):

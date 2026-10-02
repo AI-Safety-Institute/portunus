@@ -476,9 +476,11 @@ def _parse_response[M: BaseModel](model: type[M], body: object, step: str) -> M:
     """
     try:
         return model.model_validate(body)
-    except ValidationError as e:
+    except ValidationError:
         logger.error(f"{step} returned a malformed body")
-        raise AuthenticationError(f"{step} returned a malformed response") from e
+        # Not chained: the ValidationError embeds the body, which may hold the
+        # token, and would print it in any traceback.
+        raise AuthenticationError(f"{step} returned a malformed response") from None
 
 
 class AnthropicTokenExchange(_HttpTokenExchange):
