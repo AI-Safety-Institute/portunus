@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [0.11.0] - 2026-09-24
+## [0.11.0] - 2026-10-02
 
 ### Added
 - Short-lived lab tokens. A secret of type `anthropic_wif`, `openai_wif`,
