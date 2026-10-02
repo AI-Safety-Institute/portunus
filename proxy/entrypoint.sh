@@ -13,6 +13,8 @@ export TARGET_MAX_PENDING_REQUESTS=${TARGET_MAX_PENDING_REQUESTS:-1024}
 export TARGET_HOST_USE_TLS=${TARGET_HOST_USE_TLS:-true}
 export PORTUNUS_API_KEY=${PORTUNUS_API_KEY:-""}
 export PORTUNUS_API_KEY_HEADER=${PORTUNUS_API_KEY_HEADER:-"x-api-key"}
+# Header names excluded from header logging. Does not affect what is forwarded upstream.
+export KNOWN_AUTH_HEADERS=${KNOWN_AUTH_HEADERS:-"authorization,x-api-key,x-goog-api-key,api-key"}
 export PORTUNUS_HEADER_PREFIX=${PORTUNUS_HEADER_PREFIX:-portunus}
 export CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-""}
 # Loopback-only Envoy admin port, substituted into envoy.yaml; the SIGTERM

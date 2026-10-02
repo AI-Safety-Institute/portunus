@@ -8,7 +8,6 @@ including bidirectional relay and per-message Kinesis logging.
 
 import asyncio
 import base64
-import json
 import os
 import subprocess
 import sys
@@ -27,7 +26,7 @@ if portunus_path not in sys.path:
 os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
-from conftest import encode_base64
+from conftest import encode_base64, read_kinesis_records
 
 # Envoy routes /ws/* to Portunus, which relays to ws-echo upstream.
 PROXY_WS_URL = "ws://localhost:8888/ws/echo"
@@ -67,63 +66,6 @@ def get_close_code(exc: ConnectionClosed) -> int:
     if hasattr(exc, "rcvd") and exc.rcvd is not None:
         return exc.rcvd.code
     return exc.code  # type: ignore[attr-defined]
-
-
-def read_kinesis_records(stream_name: str) -> list[dict]:
-    """Read all records from a Kinesis stream in localstack."""
-    shard_result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "localstack-main",
-            "awslocal",
-            "kinesis",
-            "get-shard-iterator",
-            "--stream-name",
-            stream_name,
-            "--shard-id",
-            "shardId-000000000000",
-            "--shard-iterator-type",
-            "TRIM_HORIZON",
-            "--region",
-            "eu-west-2",
-            "--query",
-            "ShardIterator",
-            "--output",
-            "text",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if shard_result.returncode != 0:
-        return []
-
-    shard_iterator = shard_result.stdout.strip()
-    records_result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "localstack-main",
-            "awslocal",
-            "kinesis",
-            "get-records",
-            "--shard-iterator",
-            shard_iterator,
-            "--region",
-            "eu-west-2",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if records_result.returncode != 0:
-        return []
-
-    response = json.loads(records_result.stdout)
-    records = []
-    for r in response.get("Records", []):
-        data = base64.b64decode(r["Data"])
-        records.append(json.loads(data))
-    return records
 
 
 @pytest.mark.slow
