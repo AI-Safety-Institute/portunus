@@ -19,14 +19,15 @@ The examples use these values:
 |---|---|
 | AWS account | `123456789012` |
 | Federation role | `arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/portunus-fed-example-grant@teams.example-team` |
-| Caller roles | `arn:aws:iam::123456789012:role/example-callers/*` |
-| STS VPC endpoint | `vpce-0123456789abcdef0` |
+| Caller roles | `arn:aws:iam::123456789012:role/example-caller-*` |
 | Token issuer | `https://<uuid>.tokens.sts.global.api.aws` |
 | Proxies | `<lab>.proxy.example.org` |
 
 Portunus runs with `FEDERATION_ALLOWED_ACCOUNT_IDS=123456789012`,
-`FEDERATION_STS_ENDPOINT_URL` set to the VPC endpoint, and defaults for
-everything else.
+`FEDERATION_STS_ENDPOINT_URL=https://sts.<region>.amazonaws.com`, and defaults
+for everything else. That URL resolves to the STS VPC endpoint when the
+endpoint has private DNS enabled. Otherwise use the endpoint's own DNS name,
+`https://vpce-<id>.sts.<region>.vpce.amazonaws.com`.
 
 ## Once per account
 
@@ -79,7 +80,7 @@ Parameters:
     Default: portunus-fed-example-grant@teams.example-team
   CallerRoleArnPattern:
     Type: String
-    Default: arn:aws:iam::123456789012:role/example-callers/*
+    Default: arn:aws:iam::123456789012:role/example-caller-*
   StsVpcEndpointId:
     Type: String
     Default: vpce-0123456789abcdef0
@@ -146,6 +147,9 @@ payload with the caller's credentials:
 ```bash
 PAYLOAD=$(portunus encode-credentials <config secret ARN>)
 ```
+
+The CLI requires caller roles without an IAM path, because it rebuilds the
+role ARN from the caller's session ARN, which carries none.
 
 Then send it through the lab's proxy wherever the lab expects its API key.
 Each lab section below shows a request.
@@ -257,6 +261,12 @@ that can call the API (`roles/aiplatform.user` for Vertex AI). Set the
 provider's allowed audience to its own resource name: Google's default uses an
 `https://` form that won't match the JWT.
 
+Bind each grant's subject to its own service account. A pool-wide
+`principalSet` binding lets every federation role the pool admits impersonate
+that service account, which is only appropriate when all grants should share
+one service account. Roles for other labs cannot mint a token for the pool's
+audience, because each role's policy pins its own audience.
+
 Portunus exchanges the JWT at Google STS, then impersonates the service
 account. Tokens last `token_lifetime_seconds`, between 600 and 3600 seconds.
 
@@ -274,10 +284,11 @@ gcloud iam workload-identity-pools providers create-oidc example-oidc \
 
 gcloud iam service-accounts add-iam-policy-binding example-sa@example-project.iam.gserviceaccount.com \
   --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/*"
+  --member="principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/example-pool/subject/teams/example-team/portunus-fed-example-grant@teams.example-team"
 ```
 
-`extract` keeps `google.subject` under Google's 127-character limit.
+`extract` makes the subject everything after `role/portunus-fed/` in the role
+ARN. This keeps `google.subject` under Google's 127-character limit.
 
 </details>
 
