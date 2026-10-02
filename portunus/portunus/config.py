@@ -80,6 +80,38 @@ class RedisConfig(BaseModel):
     )
 
 
+class AuthCacheConfig(BaseModel):
+    """In-process (L1) auth-result cache and full-auth fallback limits.
+
+    The L1 cache sits in front of Redis. A revocation (secret rotation, cache
+    flush) takes up to ``local_ttl_seconds`` to reach every task — never past
+    the credential expiry.
+    """
+
+    local_ttl_seconds: float = Field(
+        default=30.0,
+        description="Seconds an auth result is served from process memory "
+        "without consulting Redis (0 disables the L1 cache)",
+        ge=0,
+    )
+    local_max_entries: int = Field(
+        default=10000,
+        description="LRU bound on the L1 cache",
+        ge=0,
+    )
+    fallback_max_concurrent: int = Field(
+        default=32,
+        description="Max concurrent full authentications (STS + Secrets "
+        "Manager) per process; bounds the stampede when Redis misbehaves",
+        ge=1,
+    )
+    fallback_acquire_timeout_s: float = Field(
+        default=1.0,
+        description="Seconds to wait for a full-auth slot before shedding (503)",
+        gt=0,
+    )
+
+
 class KinesisConfig(BaseModel):
     """Kinesis configuration for data streaming and storage.
 
@@ -246,6 +278,10 @@ class PortunusConfig(BaseModel):
         default_factory=RelayConfig,
         description="WebSocket relay configuration",
     )
+    auth_cache: AuthCacheConfig = Field(
+        default_factory=AuthCacheConfig,
+        description="In-process auth cache and full-auth fallback limits",
+    )
     federation: FederationConfig = Field(
         default_factory=FederationConfig,
         description="Federation token minting configuration",
@@ -343,6 +379,17 @@ def get_config() -> PortunusConfig:
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
     )
 
+    auth_cache = AuthCacheConfig(
+        local_ttl_seconds=float(os.environ.get("AUTH_LOCAL_CACHE_TTL_SECONDS", "30")),
+        local_max_entries=int(os.environ.get("AUTH_LOCAL_CACHE_MAX_ENTRIES", "10000")),
+        fallback_max_concurrent=int(
+            os.environ.get("AUTH_FALLBACK_MAX_CONCURRENT", "32")
+        ),
+        fallback_acquire_timeout_s=float(
+            os.environ.get("AUTH_FALLBACK_ACQUIRE_TIMEOUT_S", "1.0")
+        ),
+    )
+
     federation = FederationConfig(
         allowed_account_ids=_split_csv(
             os.environ.get("FEDERATION_ALLOWED_ACCOUNT_IDS", "")
@@ -361,6 +408,7 @@ def get_config() -> PortunusConfig:
         aws=aws,
         kinesis=kinesis,
         relay=relay,
+        auth_cache=auth_cache,
         federation=federation,
     )
 
