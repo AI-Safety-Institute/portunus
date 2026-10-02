@@ -26,8 +26,8 @@ def _build_default_policy(
 ) -> str:
     """Build the default session policy for one secret.
 
-    Grants GetSecretValue on ``secret_arn`` and sts:AssumeRole on every
-    federation role under ``federation_role_path`` in the caller's account.
+    Grants GetSecretValue on ``secret_arn`` and sts:AssumeRole/sts:TagSession
+    on every federation role under ``federation_role_path`` in the caller's account.
     """
     statements = [
         {
@@ -39,7 +39,9 @@ def _build_default_policy(
         {
             "Sid": "PortunusFederationAssumeRole",
             "Effect": "Allow",
-            "Action": ["sts:AssumeRole"],
+            # Transitive tags inherited from the caller's session require
+            # TagSession even though Portunus passes no explicit Tags.
+            "Action": ["sts:AssumeRole", "sts:TagSession"],
             "Resource": f"arn:aws:iam::{account_id}:role{federation_role_path}*",
         },
     ]
@@ -80,8 +82,9 @@ def encode_credentials(
     Args:
         secret_arn: The ARN of the secret in AWS Secrets Manager.
         policy: Optional IAM session policy JSON string. If None, uses the
-            default policy (secretsmanager:GetSecretValue and sts:AssumeRole on
-            the federation roles under ``federation_role_path``).
+            default policy (secretsmanager:GetSecretValue and
+            sts:AssumeRole/sts:TagSession on the federation roles under
+            ``federation_role_path``).
         federation_role_path: IAM path of the federation roles the default
             policy allows assuming.
         session_name: ``RoleSessionName`` for assuming the caller's own role.

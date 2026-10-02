@@ -35,7 +35,7 @@ def test_default_policy_grants_the_secret_and_the_federation_roles():
     assert statements["SecretsManagerAccess"]["Resource"] == SECRET_ARN
     federation = statements["PortunusFederationAssumeRole"]
     assert federation["Effect"] == "Allow"
-    assert federation["Action"] == ["sts:AssumeRole"]
+    assert federation["Action"] == ["sts:AssumeRole", "sts:TagSession"]
     assert federation["Resource"] == FEDERATION_ROLES
 
 
@@ -110,6 +110,12 @@ def test_session_name_defaults_to_portunus(
     payload = decode_payload(capsys.readouterr().out.strip())
     assert payload["secret_arn"] == SECRET_ARN
     assert payload["credentials"]["session_token"] == "token"
+    federation = _statements(sts.assume_role_kwargs["Policy"])[
+        "PortunusFederationAssumeRole"
+    ]
+    assert federation["Action"] == ["sts:AssumeRole", "sts:TagSession"]
+    assert federation["Resource"] == FEDERATION_ROLES
+    assert "Tags" not in sts.assume_role_kwargs
 
 
 @pytest.mark.parametrize(

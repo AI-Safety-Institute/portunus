@@ -40,8 +40,11 @@ endpoint has private DNS enabled. Otherwise use the endpoint's own DNS name,
    ```json
    {
      "Effect": "Allow",
-     "Action": "sts:AssumeRole",
-     "Resource": "arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/*"
+     "Action": ["sts:AssumeRole", "sts:TagSession"],
+     "Resource": "arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/*",
+     "Condition": {
+       "ForAllValues:StringEquals": {"aws:TagKeys": ["user"]}
+     }
    }
    ```
 
@@ -59,10 +62,21 @@ One template serves every lab. Only `ProviderAudience` changes:
 The template's three policies do the following:
 
 - **Trust policy:** only the caller roles can assume the role, and only through
-  the STS VPC endpoint, so only Portunus can mint.
+  the STS VPC endpoint, so only Portunus can mint. `sts:TagSession` permits
+  transitive session tags inherited from the caller's credentials, including
+  EKS Pod Identity tags. Explicit session tags are limited to `user`, so callers
+  cannot overwrite the role's other tags.
 - **Inline policy:** the role can request identity tokens for its one audience.
-  Portunus sends no request tags, so no tag permission is needed.
+  Portunus sends no identity-token request tags, so
+  `sts:TagGetWebIdentityToken` is not needed.
 - **Permissions boundary:** the role can never do anything else.
+
+The proxy payload's session policy must also permit `sts:TagSession` on the
+federation role. Portunus does not send explicit `Tags` when assuming it, but
+AWS still carries inherited transitive tags through the role chain. Inherited
+tags are applied after the trust policy is evaluated; `aws:TagKeys` restricts
+explicitly requested tags. See [EKS Pod Identity session tags](https://docs.aws.amazon.com/eks/latest/userguide/pod-id-abac.html)
+and [IAM session tags](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html).
 
 The deployer also needs IAM permissions on the bare name
 `role/portunus-fed-*`, not just the path `role/portunus-fed/*`. IAM checks
@@ -113,12 +127,16 @@ Resources:
           - Effect: Allow
             Principal:
               AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
-            Action: sts:AssumeRole
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
             Condition:
               ArnLike:
                 'aws:PrincipalArn': !Ref CallerRoleArnPattern
               StringEquals:
                 'aws:SourceVpce': !Ref StsVpcEndpointId
+              'ForAllValues:StringEquals':
+                'aws:TagKeys': [user]
       Policies:
         - PolicyName: IssueIdentityToken
           PolicyDocument:
