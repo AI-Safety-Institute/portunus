@@ -42,6 +42,7 @@ def auth_service():
     mock_cache_service = MagicMock()
     mock_cache_service.get_cached_auth_result = AsyncMock(return_value=None)
     mock_cache_service.cache_auth_result = AsyncMock(return_value=True)
+    mock_cache_service.cache_duration = 86400
     mock_validation_service = MagicMock()
 
     return AuthService(
@@ -591,3 +592,46 @@ class TestAuthenticateWithMintSecrets:
             await service.authenticate(_payload(), "req", "api.example.com")
 
         assert exc_info.value is error
+
+
+class TestCacheLifetimeBounds:
+    """No cache tier outlives the cache duration, credentials or minted token."""
+
+    @pytest.mark.asyncio
+    async def test_minted_token_entry_is_capped_by_the_credential_expiry(
+        self, fake_redis
+    ):
+        # A minted token outliving the caller's credentials must not keep the
+        # cached result alive: the entry is bound by the credentials that
+        # earned it, not only by the token's own expiry.
+        cache = _cache_backed_by(fake_redis)
+        credential_ttl = timedelta(minutes=5)
+        mint = AsyncMock(
+            return_value=MintedToken(
+                token="sk-ant-oat01-example",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+        )
+        service = _service_for(WIF_SECRET, cache, mint)
+
+        await service.authenticate(
+            _payload(expires_in=credential_ttl), "req", "api.example.com"
+        )
+
+        (key,) = await fake_redis.keys("*")
+        assert 0 < await fake_redis.ttl(key) <= credential_ttl.total_seconds()
+
+    @pytest.mark.asyncio
+    async def test_stored_key_is_capped_at_cache_duration_whatever_expiry_is_claimed(
+        self, fake_redis
+    ):
+        # CACHE_DURATION bounds the entry whatever expiry the payload carries.
+        cache = _cache_backed_by(fake_redis)
+        service = _service_for('{"secret": "sk-live"}', cache, AsyncMock())
+
+        await service.authenticate(
+            _payload(expires_in=timedelta(days=365 * 70)), "req", "api.example.com"
+        )
+
+        (key,) = await fake_redis.keys("*")
+        assert 0 < await fake_redis.ttl(key) <= cache.cache_duration

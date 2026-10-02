@@ -303,19 +303,36 @@ class AuthService:
             return
         try:
             async with asyncio.timeout(3):
-                if auth_result.expires_at is None:
-                    ttl = payload.credentials.seconds_until_expiration()
-                    # The credential expiry bounds the entry, never past the
-                    # configured cache duration.
-                    if ttl is not None:
-                        ttl = min(ttl, self.cache_service.cache_duration)
-                else:
-                    ttl = effective_cache_ttl(
-                        cache_duration=self.cache_service.cache_duration,
-                        token_expires_at=auth_result.expires_at,
-                    )
                 await self.cache_service.cache_auth_result(
-                    payload.raw, target_host, auth_result, ttl
+                    payload.raw,
+                    target_host,
+                    auth_result,
+                    self._cache_ttl(payload, auth_result),
                 )
         except Exception as e:
             logger.error(f"Cache write error during auth: {e}")
+
+    def _cache_ttl(self, payload: AuthPayload, auth_result: AuthResult) -> int:
+        """Seconds a result may be cached (Redis and L1 alike).
+
+        Never past the configured cache duration, the caller's credential
+        expiry, or, for a minted token, the token's own expiry less the
+        safety margin.
+        """
+        ttl = self.cache_service.cache_duration
+        credential_ttl = (
+            payload.credentials.seconds_until_expiration()
+            if payload.credentials is not None
+            else None
+        )
+        if credential_ttl is not None:
+            ttl = min(ttl, credential_ttl)
+        if auth_result.expires_at is not None:
+            ttl = min(
+                ttl,
+                effective_cache_ttl(
+                    cache_duration=self.cache_service.cache_duration,
+                    token_expires_at=auth_result.expires_at,
+                ),
+            )
+        return max(0, ttl)
