@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- An in-process auth cache in front of Redis (`AUTH_LOCAL_CACHE_TTL_SECONDS`,
+  default 30; `AUTH_LOCAL_CACHE_MAX_ENTRIES`, default 10000; a TTL of 0
+  disables it). A revoked credential can keep working for up to the TTL per
+  task, but never past the caller's credential expiry. Expired entries are
+  never served: a Redis timeout still rejects the request, and other Redis
+  errors fall back to full authentication under the cap below.
+- A cap on concurrent full authentications (STS + Secrets Manager) per
+  process, `AUTH_FALLBACK_MAX_CONCURRENT` (default 32); requests that cannot
+  get a slot within `AUTH_FALLBACK_ACQUIRE_TIMEOUT_S` (default 1.0) get 503,
+  so a Redis outage does not become an STS stampede.
+
 ### Changed
 - AWS clients for STS and Secrets Manager are pooled per credential set
   instead of being created on every cache miss. Redis connections come from
@@ -24,7 +36,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Joined log records decode request bodies with the request content type, as
   response bodies already did, so `application/vnd.amazon.eventstream` request
   bodies decode.
-- Cached results are capped at the earliest of
+- Every cache tier (Redis and in-process) is capped at the earliest of
   `CACHE_DURATION`, the credential expiry and, for minted tokens, one minute
   before the token expires.
 - Authentication rejects Redis connection-probe and read timeouts, and
