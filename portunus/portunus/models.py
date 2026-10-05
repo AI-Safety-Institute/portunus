@@ -704,43 +704,6 @@ class AuthResult:
         return bool(self.api_key)
 
 
-# Request payload models for the new REST endpoints
-class HeadersPayload(BaseModel):
-    """Request payload model for headers endpoints (request/response).
-
-    Attributes:
-        headers: Dictionary of headers with base64-encoded values from Lua
-        timestamp: Unix timestamp number when the event occurred
-    """
-
-    headers: Dict[str, str]
-    timestamp: int
-
-    def get_iso_timestamp(self) -> str:
-        """Convert timestamp to ISO-8601 format if it's a Unix timestamp."""
-        from portunus.util import unix_timestamp_to_iso
-
-        return unix_timestamp_to_iso(self.timestamp)
-
-
-class TrailersPayload(BaseModel):
-    """Request payload model for trailers endpoints (request/response).
-
-    Attributes:
-        trailers: Dictionary of trailers with base64-encoded values from Lua
-        timestamp: Unix timestamp number when the event occurred
-    """
-
-    trailers: Dict[str, str]
-    timestamp: int
-
-    def get_iso_timestamp(self) -> str:
-        """Convert timestamp to ISO-8601 format if it's a Unix timestamp."""
-        from portunus.util import unix_timestamp_to_iso
-
-        return unix_timestamp_to_iso(self.timestamp)
-
-
 # Kinesis record dataclasses - define the structure of published records
 
 

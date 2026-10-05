@@ -345,24 +345,6 @@ class StateService:
                 ) from e
             raise
 
-    async def health_check(self) -> bool:
-        """
-        Check if Redis is available.
-
-        Returns:
-            bool: True if Redis is available, False otherwise
-        """
-        client = await self.get_redis_client()
-        if client is None:
-            return False
-
-        try:
-            await client.ping()
-            return True
-        except Exception as e:
-            logger.error(f"Redis health check failed: {e}")
-            return False
-
     async def _ensure_aws_stack(self) -> contextlib.AsyncExitStack:
         """Lazily open the shared exit stack used by the AWS client singletons."""
         if self._aws_stack is None:

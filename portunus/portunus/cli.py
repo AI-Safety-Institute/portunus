@@ -1,6 +1,7 @@
-"""Portunus CLI for generating proxy authentication payloads."""
+"""Portunus CLI: proxy authentication payloads and auth-cache administration."""
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -8,7 +9,7 @@ import sys
 
 import boto3
 
-from portunus.config import DEFAULT_FEDERATION_ROLE_PATH_PREFIX
+from portunus.config import DEFAULT_FEDERATION_ROLE_PATH_PREFIX, config
 from portunus.services.arn_service import extract_arn_parts, get_role_arn
 from portunus.services.payload_service import encode_payload
 
@@ -113,10 +114,61 @@ def encode_credentials(
     return encode_payload(credentials, secret_arn)
 
 
+def flush_auth_cache(assume_yes: bool = False) -> int:
+    """Flush the shared auth cache (Redis ``FLUSHDB``) after confirmation.
+
+    Prints the Redis target (never the password) before flushing, and asks
+    for confirmation unless ``assume_yes``.
+
+    Args:
+        assume_yes: Skip the confirmation prompt (``--yes``).
+
+    Returns:
+        The process exit code: 0 when flushed, 1 when the flush was not
+        confirmed or Redis is unavailable.
+    """
+    from portunus.services.cache_service import CacheService
+
+    redis = config.redis
+    print(
+        f"About to flush the Portunus auth cache: FLUSHDB on Redis "
+        f"{redis.host}:{redis.port}, database 0 "
+        f"(TLS {'on' if redis.use_tls else 'off'})."
+    )
+    print(
+        "This deletes every key in that database, including keys of any other "
+        "application sharing it."
+    )
+    if not assume_yes:
+        answer = input("Type 'yes' to flush: ")
+        if answer.strip().lower() != "yes":
+            print("Not confirmed; nothing was flushed.", file=sys.stderr)
+            return 1
+
+    async def _flush() -> bool:
+        cache = CacheService()
+        try:
+            return await cache.flush_all()
+        finally:
+            await cache.state_service.close_redis_client()
+
+    try:
+        flushed = asyncio.run(_flush())
+    except Exception as e:
+        print(f"Flush failed: {e}", file=sys.stderr)
+        return 1
+    if not flushed:
+        print("Flush failed: Redis unavailable.", file=sys.stderr)
+        return 1
+    print("Auth cache flushed.")
+    return 0
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Generate proxy authentication payloads",
+        description="Generate proxy authentication payloads and administer "
+        "the auth cache",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -151,6 +203,16 @@ def main() -> None:
         ),
     )
 
+    flush_cmd = subparsers.add_parser(
+        "flush-auth-cache",
+        help="Delete every cached auth result in the configured Redis (FLUSHDB)",
+    )
+    flush_cmd.add_argument(
+        "--yes",
+        action="store_true",
+        help="Flush without asking for confirmation",
+    )
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -168,6 +230,8 @@ def main() -> None:
                 session_name=args.session_name,
             )
         )
+    elif args.command == "flush-auth-cache":
+        sys.exit(flush_auth_cache(assume_yes=args.yes))
 
 
 if __name__ == "__main__":
