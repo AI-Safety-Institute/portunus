@@ -41,6 +41,7 @@ ENV VIRTUAL_ENV=/app/.venv \
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 COPY portunus ./portunus
+COPY --chmod=0755 healthcheck.sh /usr/local/bin/portunus-healthcheck
 # gRPC listen port the server binds and the health probe targets.
 ENV GRPC_PORT=9000
 ENV LOG_LEVEL=info
@@ -51,8 +52,10 @@ EXPOSE 9000
 
 # grpc_health_probe exits 0 on overall SERVING; the server flips to
 # NOT_SERVING at drain start, so draining tasks fail the probe promptly.
+# portunus-healthcheck probes the port(s) GRPC_ROLE serves: an audit-only
+# process listens on GRPC_AUDIT_PORT, not GRPC_PORT.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD grpc_health_probe -addr=127.0.0.1:${GRPC_PORT} || exit 1
+    CMD portunus-healthcheck || exit 1
 
 # Deps installed with --no-install-project + source COPYed, so console scripts
 # aren't generated — invoke the server as a module.

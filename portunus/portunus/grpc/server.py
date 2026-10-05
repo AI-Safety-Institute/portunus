@@ -6,7 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import grpc
@@ -49,6 +49,7 @@ class GrpcRuntime:
     publish_queue: BoundedPublishQueue
     publish_service: PublishService
     health_servicer: health.aio.HealthServicer
+    audit_server: Optional[grpc.aio.Server] = field(default=None)
 
 
 async def start_grpc_server(
@@ -104,7 +105,10 @@ async def start_grpc_server(
     # short-circuits to ``None`` (warning only) when its stream is unset, so a
     # task with ``KINESIS_*`` unset would serve while silently dropping all
     # audit records. Refuse to serve instead — there is no opt-out.
-    missing_streams = kinesis.missing_required_streams()
+    # An auth-only process never publishes, so it needs no Kinesis config.
+    missing_streams = (
+        kinesis.missing_required_streams() if config.role != "auth" else []
+    )
     if missing_streams:
         raise RuntimeError(
             "Refusing to start the gRPC server: Kinesis audit publishing is "
@@ -115,6 +119,17 @@ async def start_grpc_server(
             "env vars)."
         )
 
+    serves_auth = config.role in ("all", "auth")
+    serves_audit = config.role in ("all", "audit")
+    if config.role == "all" and config.audit_port == config.port:
+        raise RuntimeError("Authentication and audit listeners need distinct ports")
+    # An audit-only process listens where Envoy's ext_proc cluster points: the
+    # audit port when one is configured, else the single gRPC port.
+    listen_port = (
+        config.audit_port
+        if config.role == "audit" and config.audit_port is not None
+        else config.port
+    )
     options = [
         ("grpc.max_concurrent_streams", config.max_concurrent_streams),
         ("grpc.keepalive_time_ms", 30_000),
@@ -124,9 +139,17 @@ async def start_grpc_server(
         ("grpc.max_receive_message_length", _MAX_GRPC_MSG_BYTES),
     ]
     server = grpc.aio.server(options=options)
+    audit_server = (
+        grpc.aio.server(options=options)
+        if config.role == "all" and config.audit_port is not None
+        else None
+    )
 
     auth_servicer = PortunusAuthServicer(auth_service=auth_service)
-    external_auth_pb2_grpc.add_AuthorizationServicer_to_server(auth_servicer, server)
+    if serves_auth:
+        external_auth_pb2_grpc.add_AuthorizationServicer_to_server(
+            auth_servicer, server
+        )
 
     publish_queue = BoundedPublishQueue(
         maxsize=config.publish_queue_maxsize,
@@ -153,15 +176,22 @@ async def start_grpc_server(
         publish_service=publish_service,
         publish_queue=publish_queue,
     )
-    proc_grpc.add_ExternalProcessorServicer_to_server(proc_servicer, server)
+    if serves_audit:
+        proc_grpc.add_ExternalProcessorServicer_to_server(
+            proc_servicer, audit_server if audit_server is not None else server
+        )
 
     # Standard gRPC health service — the one health signal (default service
-    # ""), read by the container probe and Envoy's /healthz cluster.
+    # ""), read by the container probe and Envoy's /healthz cluster. One
+    # servicer is shared by every listener, so a probe on either port sees the
+    # same state and the drain flips both together.
     health_servicer = health.aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    if audit_server is not None:
+        health_pb2_grpc.add_HealthServicer_to_server(health_servicer, audit_server)
 
-    # Server reflection so operators can introspect the listener without a
-    # local .proto copy.
+    # Server reflection so operators can introspect each listener without a
+    # local .proto copy; each listener advertises exactly what it serves.
     auth_service_name = external_auth_pb2.DESCRIPTOR.services_by_name[
         "Authorization"
     ].full_name
@@ -171,24 +201,35 @@ async def start_grpc_server(
     health_service_name = health_pb2.DESCRIPTOR.services_by_name["Health"].full_name
     reflection.enable_server_reflection(
         (
-            auth_service_name,
-            proc_service_name,
+            *((auth_service_name,) if serves_auth else ()),
+            *((proc_service_name,) if serves_audit and audit_server is None else ()),
             health_service_name,
             reflection.SERVICE_NAME,
         ),
         server,
     )
+    if audit_server is not None:
+        reflection.enable_server_reflection(
+            (proc_service_name, health_service_name, reflection.SERVICE_NAME),
+            audit_server,
+        )
 
-    listen_addr = f"{config.host}:{config.port}"
+    listen_addr = f"{config.host}:{listen_port}"
     try:
         server.add_insecure_port(listen_addr)
+        if audit_server is not None:
+            audit_server.add_insecure_port(f"{config.host}:{config.audit_port}")
+            await audit_server.start()
         await server.start()
     except BaseException:
-        await server.stop(0)
+        await asyncio.gather(
+            server.stop(0),
+            *([audit_server.stop(0)] if audit_server is not None else []),
+        )
         await publish_queue.stop(drain_timeout=0)
         raise
 
-    # SERVING only once the listener is up, NOT_SERVING from drain start.
+    # SERVING only once the listeners are up, NOT_SERVING from drain start.
     # Deliberately not tied to Redis or any other shared dependency: every task
     # shares one Redis, so a Redis-gated health signal would pull the whole
     # fleet out of rotation at once and turn a Redis problem into a total
@@ -196,8 +237,9 @@ async def start_grpc_server(
     await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
 
     logger.info(
-        "gRPC server listening on %s (max_concurrent_streams=%d)",
+        "gRPC server listening on %s (role=%s, max_concurrent_streams=%d)",
         listen_addr,
+        config.role,
         config.max_concurrent_streams,
     )
     return GrpcRuntime(
@@ -206,6 +248,7 @@ async def start_grpc_server(
         publish_queue=publish_queue,
         publish_service=publish_service,
         health_servicer=health_servicer,
+        audit_server=audit_server,
     )
 
 
@@ -247,7 +290,12 @@ async def stop_grpc_server(
     reserve = min(max(0.0, flush_reserve_seconds), float(grace_seconds))
     deadline = loop.time() + grace_seconds
 
-    await runtime.server.stop(grace=max(0.0, grace_seconds - reserve))
+    servers = [runtime.server]
+    if runtime.audit_server is not None:
+        servers.append(runtime.audit_server)
+    await asyncio.gather(
+        *(server.stop(grace=max(0.0, grace_seconds - reserve)) for server in servers)
+    )
 
     # The queue gets the remaining grace to flush to Kinesis — accepted
     # records should not be dropped while grace remains. ``stop`` reports how
