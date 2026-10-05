@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- A gRPC backend (`python -m portunus.grpc.server`, also the `portunus-server`
+  script) hosting an Envoy `ext_authz` `Check` servicer,
+  `grpc.health.v1.Health` and reflection. The backend image still runs
+  uvicorn; nothing calls the gRPC server yet. Set `GRPC_ENABLED=true` to
+  start it; with it unset the process serves nothing.
+  `GRPC_PROXY_API_KEY` must be at least 16 bytes; an empty key needs the
+  development-only opt-out `GRPC_PROXY_API_KEY_OPTIONAL`.
 - An in-process auth cache in front of Redis (`AUTH_LOCAL_CACHE_TTL_SECONDS`,
   default 30; `AUTH_LOCAL_CACHE_MAX_ENTRIES`, default 10000; a TTL of 0
   disables it). A revoked credential can keep working for up to the TTL per
@@ -31,6 +38,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   a blocking pool (`REDIS_POOL_TIMEOUT_SECONDS`, default 1.0) with idle
   health checks (`REDIS_HEALTH_CHECK_INTERVAL_SECONDS`, default 30), and
   cached authentication no longer probes Redis before each operation.
+- The backend image uses a glibc-based Python 3.12 runtime with native
+  protobuf, uvloop and hiredis.
 
 ### Fixed
 - An authorization payload that fails to decode is no longer included in the
@@ -51,6 +60,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   requests whose wait for a pooled Redis connection expires, without starting
   further identity or secret lookups. Other Redis failures still fall back to
   full authentication.
+- The backend base image includes glibc fixes for CVE-2026-5450 and
+  CVE-2026-5928 on both supported Linux architectures.
 
 ### Removed
 - AWS X-Ray tracing: the `aws-xray-sdk` dependency, Envoy's X-Ray tracer,
