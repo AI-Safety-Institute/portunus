@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-02
+
 Envoy now delegates authentication and audit to Portunus over gRPC, and the
 REST service, Lua filter and Python WebSocket relay are gone. The proxy and
 backend images must be deployed together, with the configuration changes
@@ -419,7 +421,8 @@ below. Request signing was already removed in 0.11.0.
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.8.0...v0.9.0
