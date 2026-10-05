@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -38,6 +39,14 @@ from portunus.grpc.proxy_auth import (
 )
 from portunus.grpc.proxy_auth import (
     extract_target_host as _extract_target_host,
+)
+from portunus.metrics import (
+    CHECK_ALLOWED,
+    CHECK_DENIED,
+    CHECK_ERROR,
+    CHECK_LATENCY,
+    CHECK_SHED,
+    metrics,
 )
 from portunus.models import AuthPayload, AuthResult
 from portunus.request_context import parse_trace_root, request_id_var, set_trace_id
@@ -69,9 +78,22 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
     ) -> external_auth_pb2.CheckResponse:
         """Handle an Envoy ext_authz Check call.
 
-        Never raises — failures are reported as ``denied_response``.
+        Never raises — failures are reported as ``denied_response``. This is the
+        one place Check outcomes and latency are metered.
         """
-        return await self._check_inner(request, context)
+        started = time.perf_counter()
+        response = await self._check_inner(request, context)
+        metrics.observe(CHECK_LATENCY, (time.perf_counter() - started) * 1000)
+        if response.HasField("denied_response"):
+            metrics.incr(CHECK_DENIED)
+            status = response.denied_response.status.code
+            if status == 503:
+                metrics.incr(CHECK_SHED)
+            elif status >= 500:
+                metrics.incr(CHECK_ERROR)
+        else:
+            metrics.incr(CHECK_ALLOWED)
+        return response
 
     async def _check_inner(
         self,

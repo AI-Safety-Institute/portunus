@@ -8,7 +8,14 @@ import json
 
 import pytest
 
+import portunus.services.publish_service as publish_service_mod
 from portunus.config import config
+from portunus.metrics import (
+    AUDIT_COUNTERS,
+    KINESIS_PUT_ERRORS,
+    KINESIS_THROTTLED_RECORDS,
+    MetricsAggregator,
+)
 from portunus.services.publish_service import (
     _MAX_CALL_BYTES,
     _MAX_CALL_RECORDS,
@@ -184,13 +191,44 @@ async def test_put_records_retries_failed_packs_under_fresh_keys() -> None:
     assert not first_keys & {k for _, k in client.calls[1]}
 
 
+@pytest.fixture
+def emf(monkeypatch) -> MetricsAggregator:
+    """A live aggregator in place of publish_service's (disabled) singleton."""
+    aggregator = MetricsAggregator(enabled=True, counter_names=AUDIT_COUNTERS)
+    monkeypatch.setattr(publish_service_mod, "metrics", aggregator)
+    return aggregator
+
+
+def _counts(aggregator: MetricsAggregator) -> dict[str, int]:
+    return {name: aggregator._counters[name] for name in AUDIT_COUNTERS}
+
+
 @pytest.mark.asyncio
-async def test_non_throttle_errors_count_as_put_errors_not_throttles() -> None:
+async def test_non_throttle_errors_count_as_put_errors_not_throttles(emf) -> None:
     client = _FakeKinesisClient(
         failed_per_call=1, error_code="InternalFailure", fail_first_n_calls=1
     )
     service = _service(client)
     assert await service.put_records("audit", [b"a\n"]) == 0
+    counts = _counts(emf)
+    assert counts[KINESIS_PUT_ERRORS] == 1
+    assert counts[KINESIS_THROTTLED_RECORDS] == 0
+
+
+@pytest.mark.asyncio
+async def test_throttle_errors_count_as_throttles_not_put_errors(emf) -> None:
+    client = _FakeKinesisClient(failed_per_call=1, fail_first_n_calls=1)
+    assert await _service(client).put_records("audit", [b"a\n"]) == 0
+    counts = _counts(emf)
+    assert counts[KINESIS_THROTTLED_RECORDS] == 1
+    assert counts[KINESIS_PUT_ERRORS] == 0
+
+
+@pytest.mark.asyncio
+async def test_put_records_raising_counts_every_record_as_a_put_error(emf) -> None:
+    client = _FakeKinesisClient(raise_on_call=True)
+    assert await _service(client).put_records("audit", [b"a\n", b"b\n"]) == 2
+    assert _counts(emf)[KINESIS_PUT_ERRORS] == 2
 
 
 @pytest.mark.asyncio
@@ -277,13 +315,18 @@ async def test_inconsistent_kinesis_response_retries_all_unconfirmed_packs(respo
 
 
 @pytest.mark.asyncio
-async def test_repeated_inconsistent_kinesis_responses_count_all_records_as_failed():
+async def test_repeated_inconsistent_kinesis_responses_count_all_records_as_failed(
+    emf,
+):
     response = {"FailedRecordCount": 2, "Records": [_THROTTLED]}
     records = _big(3)
     client = _FakeKinesisClient(responses=[response, response])
 
     assert await _service(client).put_records("audit", records) == len(records)
     assert len(client.calls) == 2
+    # Unconfirmed, not throttled: both attempts count every record.
+    assert _counts(emf)[KINESIS_PUT_ERRORS] == 2 * len(records)
+    assert _counts(emf)[KINESIS_THROTTLED_RECORDS] == 0
 
 
 # --- build_* produce newline-terminated JSON --------------------------------
