@@ -9,7 +9,7 @@ provides validation and documentation for all options.
 import logging
 import os
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -265,6 +265,19 @@ class GrpcConfig(BaseModel):
         description="TCP port the gRPC server binds to",
         ge=1,
         le=65535,
+    )
+    audit_port: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Separate audit listener; unset retains the shared listener",
+    )
+    role: Literal["all", "auth", "audit"] = Field(
+        default="all",
+        description="Which servicers this process hosts: 'all' (ext_authz + "
+        "ext_proc), 'auth' (ext_authz + health on port), or 'audit' (ext_proc "
+        "+ health on audit_port, falling back to port). Run one 'auth' and one "
+        "'audit' process to stop audit load sharing the auth event loop.",
     )
     audit_drop_on_pressure: bool = Field(
         default=False,
@@ -564,6 +577,12 @@ def get_config() -> PortunusConfig:
         enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
         host=os.environ.get("GRPC_HOST", "127.0.0.1"),
         port=int(os.environ.get("GRPC_PORT", "9000")),
+        audit_port=(
+            int(os.environ["GRPC_AUDIT_PORT"])
+            if "GRPC_AUDIT_PORT" in os.environ
+            else None
+        ),
+        role=os.environ.get("GRPC_ROLE", "all"),  # type: ignore[arg-type]
         audit_drop_on_pressure=os.environ.get(
             "GRPC_AUDIT_DROP_ON_PRESSURE", "false"
         ).lower()

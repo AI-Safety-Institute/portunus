@@ -4,6 +4,7 @@
 # can't do indirect defaults (${X:-${Y}}).
 export WS_TARGET_HOST=${WS_TARGET_HOST:-${TARGET_HOST}}
 export WS_TARGET_PORT=${WS_TARGET_PORT:-${TARGET_PORT}}
+export PORTUNUS_AUDIT_GRPC_PORT=${PORTUNUS_AUDIT_GRPC_PORT:-${PORTUNUS_GRPC_PORT}}
 
 # HTTP/2 multiplexes requests over connections; preserve separate limits.
 export TARGET_MAX_REQUESTS=${TARGET_MAX_REQUESTS:-1024}
@@ -115,6 +116,25 @@ fi
 
 # Apply environment variable substitution to config files
 envsubst < /envoy/envoy.yaml > /envoy/envoy_subst.yaml
+
+# Separate audit listener: /healthz must also require it to be SERVING, or an
+# audit process that is down or draining stays in ALB rotation. Clone
+# portunus_health_cluster onto the audit port and require both. Done here
+# because envsubst can't add or omit a cluster.
+if [ "$PORTUNUS_AUDIT_GRPC_PORT" != "$PORTUNUS_GRPC_PORT" ]; then
+  yq -i '
+    (.static_resources.clusters[] | select(.name == "portunus_health_cluster")) as $main
+    | .static_resources.clusters += [
+        $main
+        | .name = "portunus_audit_health_cluster"
+        | .load_assignment.cluster_name = "portunus_audit_health_cluster"
+        | .load_assignment.endpoints[0].lb_endpoints[0].endpoint.address.socket_address.port_value = (strenv(PORTUNUS_AUDIT_GRPC_PORT) | to_number)
+      ]
+    | (.static_resources.listeners[].filter_chains[].filters[].typed_config.http_filters[]
+        | select(.name == "envoy.filters.http.health_check")
+        | .typed_config.cluster_min_healthy_percentages.portunus_audit_health_cluster.value) = 100
+  ' /envoy/envoy_subst.yaml
+fi
 
 # --- Graceful shutdown orchestration ---------------------------------------
 #

@@ -217,7 +217,8 @@ static_resources:
           # /healthz — the ALB health-check target, answered by this
           # health_check filter gated on the ACTIVE gRPC health check of
           # portunus_health_cluster (Portunus's standard gRPC health
-          # service). Returns 503 when Portunus is
+          # service). With a separate audit port, entrypoint.sh adds
+          # portunus_audit_health_cluster and requires it here too. Returns 503 when Portunus is
           # dead/unreachable/NOT_SERVING or draining, so ALB pulls a bad task
           # in seconds rather than serving 403s until ECS recycles it. First
           # in the chain so probes are never rate-limited or authed.
@@ -441,9 +442,9 @@ static_resources:
               socket_address:
                 address: ${PORTUNUS_HOST}
                 port_value: ${PORTUNUS_GRPC_PORT}
-  # ext_proc (audit/observability) cluster, separate from the ext_authz cluster
-  # so that audit has its own circuit-breaker budget. Under a wedged Kinesis
-  # sink, blocked publish
+  # ext_proc (audit/observability) cluster. PORTUNUS_AUDIT_GRPC_PORT can route
+  # to a separate server instance; this cluster also gives audit its own
+  # circuit-breaker budget. Under a wedged Kinesis sink, blocked publish
   # submits hold ext_proc streams open (WS up to WS_MAX_CONNECTION_LIFETIME);
   # that accumulation saturates THIS breaker (dropping audit, tolerated by
   # failure_mode_allow: true) instead of starving ext_authz into customer 503s.
@@ -479,7 +480,7 @@ static_resources:
             address:
               socket_address:
                 address: ${PORTUNUS_HOST}
-                port_value: ${PORTUNUS_GRPC_PORT}
+                port_value: ${PORTUNUS_AUDIT_GRPC_PORT}
   # Health-observation cluster: same Portunus endpoint, used ONLY by the
   # /healthz health_check filter — no request traffic is routed to it. Kept
   # separate so its ACTIVE gRPC check can't perturb data-path clusters
