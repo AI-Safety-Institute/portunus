@@ -157,7 +157,6 @@ def test_http2_request_limit(proxy_image, tmp_path, request_limit):
             "PORTUNUS_API_KEY": "dummy-backend-key",
             "API_KEY_HEADER": "authorization",
             "API_KEY_PREFIX": "Bearer ",
-            "AWS_XRAY_DAEMON_ADDRESS": "127.0.0.1",
             "ENVOY_LOG_LEVEL": "warn",
         }
         if request_limit is not None:

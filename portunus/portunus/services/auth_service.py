@@ -33,7 +33,6 @@ from portunus.services.cache_service import CacheService, effective_cache_ttl
 from portunus.services.federation_service import TokenMintService
 from portunus.services.secret_validation_service import SecretValidationService
 from portunus.services.secrets_service import SecretsService
-from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -80,7 +79,6 @@ class AuthService:
             weakref.WeakValueDictionary()
         )
 
-    @capture_async()
     async def get_aws_identity(
         self, credentials: Optional[AwsCredentials] = None
     ) -> PrincipalInfo:
@@ -136,7 +134,6 @@ class AuthService:
         # Parse the ARN to get identity information
         return parse_identity_from_arn(principal_arn)
 
-    @capture_async()
     async def authenticate(
         self, payload: AuthPayload, request_id: str, target_host: Optional[str] = None
     ) -> AuthResult:

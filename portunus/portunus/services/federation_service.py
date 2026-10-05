@@ -50,7 +50,6 @@ from portunus.models import (
     OpenRouterWifSecret,
     PrincipalInfo,
 )
-from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -282,7 +281,6 @@ class StsFederationService:
             )
         return f"https://sts.{region}.amazonaws.com"
 
-    @capture_async()
     async def assume_federation_role(
         self, credentials: AwsCredentials, principal: PrincipalInfo, role_arn: str
     ) -> FederationIdentity:
@@ -339,7 +337,6 @@ class StsFederationService:
             project=project,
         )
 
-    @capture_async()
     async def web_identity_token(
         self,
         identity: FederationIdentity,
@@ -528,7 +525,6 @@ class GoogleAccessTokenResponse(BaseModel):
 class AnthropicTokenExchange(_HttpTokenExchange):
     """Exchange adapter for Anthropic's RFC 7523 JWT-bearer token endpoint."""
 
-    @capture_async(name="anthropic_exchange")
     async def exchange(self, proof: str, secret: AnthropicWifSecret) -> MintedToken:
         """POST the STS web identity token to ``ANTHROPIC_TOKEN_URL``.
 
@@ -559,7 +555,6 @@ class AnthropicTokenExchange(_HttpTokenExchange):
 class OpenAiTokenExchange(_HttpTokenExchange):
     """Exchange adapter for OpenAI's RFC 8693 token exchange endpoint."""
 
-    @capture_async(name="openai_exchange")
     async def exchange(self, proof: str, secret: OpenAiWifSecret) -> MintedToken:
         """POST the STS web identity token to ``OPENAI_TOKEN_URL``.
 
@@ -589,7 +584,6 @@ class OpenAiTokenExchange(_HttpTokenExchange):
 class OpenRouterTokenExchange(_HttpTokenExchange):
     """Exchange adapter for OpenRouter's RFC 8693 token exchange endpoint."""
 
-    @capture_async(name="openrouter_exchange")
     async def exchange(self, proof: str, secret: OpenRouterWifSecret) -> MintedToken:
         """POST the STS web identity token to ``OPENROUTER_TOKEN_URL`` as a form.
 
@@ -626,7 +620,6 @@ class GcpTokenExchange(_HttpTokenExchange):
 
     timeout = _GCP_HOP_TIMEOUT
 
-    @capture_async(name="gcp_exchange")
     async def exchange(self, proof: str, secret: GcpWifSecret) -> MintedToken:
         """Obtain an access token for ``secret.service_account``.
 
@@ -768,7 +761,6 @@ class TokenMintService:
         )
         return token.token
 
-    @capture_async()
     async def mint(
         self,
         credentials: AwsCredentials,

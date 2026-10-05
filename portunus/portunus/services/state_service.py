@@ -16,7 +16,6 @@ import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError, MaxConnectionsError
 
 from portunus.config import config
-from portunus.services.xray_service import capture_async
 
 if TYPE_CHECKING:
     from types_aiobotocore_kinesis import KinesisClient
@@ -118,7 +117,6 @@ class StateService:
             finally:
                 self.redis_client = None
 
-    @capture_async()
     async def acquire_redis_connection(self, max_retries=8):
         """
         Acquire a Redis connection with exponential backoff retry.

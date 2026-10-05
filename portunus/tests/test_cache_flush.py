@@ -32,15 +32,6 @@ async def fake_redis():
     await client.aclose()
 
 
-@pytest.fixture
-def mock_xray():
-    mock_segment = AsyncMock()
-    mock_segment.trace_id = "test-trace-id"
-    with patch("portunus.app.xray_service") as mock:
-        mock.recorder.current_segment.return_value = mock_segment
-        yield mock
-
-
 @pytest_asyncio.fixture
 async def client_with_cache():
     async with AsyncExitStack() as stack:
@@ -50,7 +41,9 @@ async def client_with_cache():
             stack.enter_context(patch("portunus.app.cache_service", cache))
             return await stack.enter_async_context(
                 AsyncClient(
-                    transport=ASGITransport(app=portunus), base_url="http://test"
+                    transport=ASGITransport(app=portunus),
+                    base_url="http://test",
+                    headers={"x-amzn-trace-id": "Root=test-trace-id"},
                 )
             )
 
@@ -59,7 +52,7 @@ async def client_with_cache():
 
 class TestCacheFlush:
     @pytest.mark.asyncio
-    async def test_flush_success(self, client_with_cache, fake_redis, mock_xray):
+    async def test_flush_success(self, client_with_cache, fake_redis):
         await fake_redis.set("auth:one", "cached")
         await fake_redis.set("auth:two", "cached")
         assert await fake_redis.dbsize() == 2
@@ -74,7 +67,7 @@ class TestCacheFlush:
         assert await fake_redis.dbsize() == 0
 
     @pytest.mark.asyncio
-    async def test_flush_redis_unavailable(self, client_with_cache, mock_xray):
+    async def test_flush_redis_unavailable(self, client_with_cache):
         http = await client_with_cache(FakeStateService(None))
         resp = await http.post("/cache/flush")
 
@@ -82,7 +75,7 @@ class TestCacheFlush:
         assert "unavailable" in resp.json()["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_flush_redis_error(self, client_with_cache, fake_redis, mock_xray):
+    async def test_flush_redis_error(self, client_with_cache, fake_redis):
         fake_redis.flushdb = AsyncMock(side_effect=ConnectionError("connection reset"))
 
         http = await client_with_cache(FakeStateService(fake_redis))
@@ -92,9 +85,7 @@ class TestCacheFlush:
         assert "failed" in resp.json()["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_flush_returns_debug_id(
-        self, client_with_cache, fake_redis, mock_xray
-    ):
+    async def test_flush_returns_debug_id(self, client_with_cache, fake_redis):
         fake_redis.flushdb = AsyncMock(side_effect=ConnectionError("boom"))
 
         http = await client_with_cache(FakeStateService(fake_redis))
