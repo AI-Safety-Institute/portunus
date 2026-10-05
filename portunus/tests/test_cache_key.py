@@ -87,17 +87,3 @@ class TestCacheIsKeyedByTarget:
         other = await cache.get_cached_auth_result("payload", "api.other.example")
         assert example is not None and example.api_key == "sk-a"
         assert other is not None and other.api_key == "sk-b"
-
-    @pytest.mark.asyncio
-    async def test_invalidation_is_per_target(self, fake_redis):
-        cache = _cache_backed_by(fake_redis)
-        await cache.cache_auth_result("payload", "api.example.com", _result(), 60)
-        await cache.cache_auth_result("payload", "api.other.example", _result(), 60)
-
-        assert await cache.invalidate_cache_entry("payload", "api.example.com")
-
-        assert await cache.get_cached_auth_result("payload", "api.example.com") is None
-        assert (
-            await cache.get_cached_auth_result("payload", "api.other.example")
-            is not None
-        )

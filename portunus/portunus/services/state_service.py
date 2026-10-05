@@ -61,8 +61,6 @@ class StateService:
             Optional[aioredis.Redis]: Redis client if connection successful, None
                                       otherwise
 
-        Raises:
-            RedisError: If Redis configuration is invalid
         """
         if self.redis_client is None:
             try:
@@ -177,15 +175,6 @@ class StateService:
         except Exception as e:
             logger.error(f"Redis health check failed: {e}")
             return False
-
-    async def get_kinesis_firehose_client(self):
-        """
-        Get a Kinesis Firehose client using aioboto3.
-
-        Returns:
-            A Kinesis Firehose client instance
-        """
-        return self.boto_session.create_client("firehose")
 
     async def get_kinesis_client(self) -> "KinesisClient":
         """
