@@ -69,6 +69,8 @@ exclude = [
 module = [
     "envoy.*",
     "google.rpc.*",
+    "grpc_health.*",
+    "grpc_reflection.*",
     "brotli",
 ]
 ignore_missing_imports = true
