@@ -32,9 +32,7 @@ dev = [
     "freezegun>=1.5.0,<2",
     "fakeredis>=2.37.0,<3",
     "pyyaml>=6.0.1,<7",
-    # Test client for the WS behaviour tests. The 16.x floor matches the
-    # relay's pin while it is still in the tree.
-    "websockets>=16,<18",
+    "websockets>=17,<18",
 ]
 
 [tool.uv]

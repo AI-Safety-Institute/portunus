@@ -5,11 +5,8 @@ description = ""
 authors = [{ name = "Tom.Catling", email = "Tom.Catling@dsit.gov.uk" }]
 requires-python = "~=3.12"
 dependencies = [
-    "fastapi>=0.111.0,<1",
-    "gunicorn>=22.0.0,<23",
-    "cryptography>=43.0.0,<50",
-    "httpx>=0.27.0,<1",
-    "rsa~=4.9",
+    # pydantic is used directly by config/models/auth_servicer.
+    "pydantic>=2.7.0,<3",
     "boto3>=1.34.144,<2",
     "aiobotocore>=2.13.0,<3",
     "pyyaml>=6.0.1,<7",
@@ -18,6 +15,8 @@ dependencies = [
     "async-timeout>=4.0.3,<5",
     # gRPC servers for Envoy ext_authz / ext_proc filters. xds-protos>=1.80
     # ships the stable v3 namespace (older versions only have v3alpha).
+    # httpx: the federation token-mint exchanges (federation_service).
+    "httpx>=0.27.0,<1",
     # grpcio, its health/reflection packages and xds-protos are held on the
     # 1.82 line. The floor is 1.82.2: 1.82.1 is affected by GHSA-hf3w-6hpw-qp67
     # (gRPC core heap exhaustion: unbounded decompression, GOAWAY parsing),
@@ -28,18 +27,6 @@ dependencies = [
     "grpcio>=1.82.2,<1.83",
     "xds-protos>=1.82.2,<1.83",
     "googleapis-common-protos>=1.65.0,<2",
-    "contextvars~=2.4",
-    # Pinned to the 16.x major: the relay uses the websockets.asyncio client
-    # API, which has churned across majors, and CI only exercises the locked
-    # 16.x line. (The asyncio API was introduced in 13.0; 12.x lacks it.)
-    "websockets>=16,<17",
-    # <0.47: uvicorn 0.47.0 imports the ASGI app before the serving event loop
-    # exists (encode/uvicorn#2919), which broke X-Ray trace propagation
-    # (2026-07-02 outage). X-Ray is gone; the pin stays until the REST service
-    # is retired rather than taking a server upgrade alongside this change.
-    # uvicorn is ignored in .github/dependabot.yml so it isn't bumped
-    # automatically — update that ignore rule if this pin changes.
-    "uvicorn>=0.29.0,<0.47",
     # Standard gRPC health checking (grpc.health.v1.Health) for the ECS /
     # ALB health probe, and server reflection so operators can introspect
     # the served services without a local .proto copy. protobuf itself is
@@ -68,10 +55,16 @@ dev = [
     "boto3-stubs[secretsmanager, logs]>=1.43.47,<2",
     "types-pyyaml>=6.0.12.20240724,<7",
     "moto>=5.1.13,<6",
+    # Not imported by Portunus; moto needs it. The floor is raised to 50,
+    # the patched release (it was a runtime dependency, >=43,<50).
+    "cryptography>=50.0.0,<51",
     "pytest>=9.0.2,<10",
     "pytest-asyncio>=1.3.0,<2",
     "fakeredis>=2.26.0,<3",
     "freezegun>=1.5.0,<2",
+    # Test client only; Portunus does not import websockets. 17.x line: the
+    # websockets.asyncio API churns across majors.
+    "websockets>=17,<18",
 ]
 
 [project.scripts]
