@@ -1,12 +1,18 @@
-# ---- Builder: install the Lua rocks and fetch yq ----
-# Kept on the same Envoy base so luarocks targets the Lua 5.1 layout the
-# runtime image's embedded LuaJIT searches.
-FROM envoyproxy/envoy:v1.38.4@sha256:447f857a01460642ef08ca2ab51136a44b9101fc2fa6bca2d1ae534466fa62f5 AS builder
+# Envoy 1.38 LTS. >= 1.36 required for the ext_proc observability_mode +
+# STREAMED body-mode combination; also carries the fix for the 1.31 shutdown SIGSEGV
+# under in-flight AsyncClient streams. Do NOT drop back to v1.31.x. Digest-pinned.
+FROM envoyproxy/envoy:v1.38.4@sha256:447f857a01460642ef08ca2ab51136a44b9101fc2fa6bca2d1ae534466fa62f5
 
-# luarocks (and the C toolchain its recommends pull in) builds the native rocks;
-# wget fetches yq. None of this reaches the runtime image.
+# Assert the base image is the Envoy this config was qualified against: 1.31
+# boots cleanly and passes health checks, so the regression only shows up as
+# the nondeterministic shutdown SIGSEGV. entrypoint.sh re-asserts at runtime.
+RUN envoy --version && envoy --version | grep -q '/1\.38\.'
+
+# gettext-base provides envsubst; wget fetches yq AND is REQUIRED at runtime —
+# the entrypoint drives the SIGTERM drain through the admin API with it. If this
+# image ever goes multi-stage, wget must stay in the runtime stage.
 RUN apt-get update && \
-    apt-get install -y luarocks wget && \
+    apt-get install -y --no-install-recommends gettext-base wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Install yq (YAML processor) from GitHub releases, verifying its checksum.
@@ -21,33 +27,23 @@ RUN case "${TARGETARCH}" in \
     echo "${YQ_SHA256}  /usr/bin/yq" | sha256sum -c - && \
     chmod +x /usr/bin/yq
 
-# Build and install the proxy-utils library into /usr/local/{share,lib}/lua/5.1
-COPY lib /tmp/proxy-utils-lib
-WORKDIR /tmp/proxy-utils-lib
-RUN luarocks-5.1 make proxy-utils-1.0-0.rockspec
-WORKDIR /
-
-# ---- Runtime: clean Envoy image with only what's needed at run time ----
-FROM envoyproxy/envoy:v1.38.4@sha256:447f857a01460642ef08ca2ab51136a44b9101fc2fa6bca2d1ae534466fa62f5
-
-# gettext-base provides envsubst; wget is REQUIRED at runtime — entrypoint.sh
-# drives the SIGTERM drain through the Envoy admin API with it.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends gettext-base wget && \
-    rm -rf /var/lib/apt/lists/*
-
-# Bring over the installed Lua modules (Envoy's embedded LuaJIT finds them on
-# its default /usr/local/share/lua/5.1 search path) and the yq binary. Every
-# rock is pure Lua, so there is no /usr/local/lib/lua/5.1 to copy.
-COPY --from=builder /usr/local/share/lua/5.1/ /usr/local/share/lua/5.1/
-COPY --from=builder /usr/bin/yq /usr/bin/yq
-
-# Copy the Envoy configuration files
 COPY envoy.yaml /envoy/envoy.yaml
-COPY lua.lua /envoy/lua.lua
 
 RUN chown -R envoy:envoy /envoy
-ENV ENVOY_LOG_LEVEL=info
+
+# Defaults for envsubst variables (overridable via the container env).
+# envsubst doesn't support ${X:-default}, so defaults live here.
+ENV ENVOY_LOG_LEVEL=info \
+    LISTEN_PORT=8888 \
+    RATE_LIMIT_REQUESTS_PER_INTERVAL=1 \
+    RATE_LIMIT_INTERVAL_SECONDS=1 \
+    RATE_LIMIT_PERCENT_ENABLED=0 \
+    TARGET_MAX_CONNECTIONS=10000 \
+    PORTUNUS_HEADER_PREFIX=portunus \
+    PORTUNUS_HOST=127.0.0.1 \
+    PORTUNUS_GRPC_PORT=9000 \
+    ADMIN_PORT=9901 \
+    DRAIN_TIME_S=60
 
 COPY entrypoint.sh /envoy/entrypoint.sh
 RUN chmod +x /envoy/entrypoint.sh

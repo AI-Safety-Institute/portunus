@@ -3,7 +3,7 @@
 Generate test data by making HTTP requests through the proxy.
 
 This script sends requests through the Portunus proxy, which will:
-1. Authenticate via the /authorise endpoint
+1. Authenticate the request via Portunus (gRPC ext_authz)
 2. Forward requests to the target (http-bin)
 3. Log request/response data to Kinesis
 4. Flow through Firehose to S3 for Glue processing

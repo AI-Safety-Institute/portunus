@@ -7,12 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 - A gRPC backend (`python -m portunus.grpc.server`, also the `portunus-server`
-  script) hosting an Envoy `ext_authz` `Check` servicer,
-  `grpc.health.v1.Health` and reflection. The backend image still runs
-  uvicorn; nothing calls the gRPC server yet. Set `GRPC_ENABLED=true` to
-  start it; with it unset the process serves nothing.
-  `GRPC_PROXY_API_KEY` must be at least 16 bytes; an empty key needs the
-  development-only opt-out `GRPC_PROXY_API_KEY_OPTIONAL`.
+  script) hosting an Envoy `ext_authz` `Check` servicer, an `ext_proc`
+  `Process` servicer, `grpc.health.v1.Health` and reflection; the backend
+  image now runs it instead of uvicorn. Set `GRPC_ENABLED=true`; with it
+  unset the process serves nothing. The proxy presents `PORTUNUS_API_KEY` as
+  `x-portunus-proxy-key` gRPC metadata and the backend checks it against
+  `GRPC_PROXY_API_KEY` on every call; both must be the same key of at least
+  16 bytes. An empty key needs both components' development-only opt-outs
+  (`PORTUNUS_API_KEY_OPTIONAL`, `GRPC_PROXY_API_KEY_OPTIONAL`).
+- Health checks: `/ping` is answered by Envoy and reports only that Envoy is
+  running; `/healthz` follows Portunus's standard gRPC health service (the
+  default service), which reports only this task's own state (`SERVING` once
+  its listeners are up, `NOT_SERVING` while draining) and never follows Redis
+  or any other shared dependency. Point load-balancer health checks at
+  `/healthz`; images before this release answer it with 401, so switch the
+  health-check path together with the image. Neither endpoint produces audit
+  records.
 - An in-process auth cache in front of Redis (`AUTH_LOCAL_CACHE_TTL_SECONDS`,
   default 30; `AUTH_LOCAL_CACHE_MAX_ENTRIES`, default 10000; a TTL of 0
   disables it). A revoked credential can keep working for up to the TTL per
@@ -30,23 +40,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   waiting when the publish queue is full.
 - Streamed audit capture: HTTP bodies are published as ordered chunk records
   while they stream.
+- `ENVOY_CONCURRENCY` sets Envoy's worker count. It defaults to 1 rather than
+  the host CPU count; set it to the CPU allocated to Envoy.
 
 ### Changed
 - `ext_authz` sees request headers only and never the body, so request bodies
   stream end to end without buffering. Authentication fails closed: Portunus
-  answers within 9 s (504 after that).
+  answers within 9 s (504 after that) and Envoy's `ext_authz` timeout is
+  10 s. Audit (`ext_proc`) runs in observability mode and fails open, so a
+  slow or failed audit path does not delay or reject traffic.
 - An authentication timeout now returns 504; 0.11.0's REST path returned
   503.
+- `API_KEY_HEADER`, `API_KEY_PREFIX`, `KNOWN_AUTH_HEADERS` and
+  `PORTUNUS_HEADER_PREFIX` are now read by the backend; the proxy still reads
+  `PORTUNUS_HEADER_PREFIX` for its own response headers.
 - Authentication error bodies are `{"error": {"message", "request_id"}}`
   (`request_id` replaces `x_amzn_trace_id`), and the request id is returned in
   the `x-portunus-debug-id` response header instead of `X-Amzn-Trace-Id`.
+- Every response carries Envoy's `x-request-id`, the id under which the
+  access log, Portunus's log lines and the audit records file the request;
+  it replaces the `X-Amzn-Trace-Id` the Lua filter added to proxied responses.
+- WebSocket upgrades go straight from Envoy to `WS_TARGET_HOST` (default
+  `TARGET_HOST`) after the same `Check`. Connections last at most
+  `WS_MAX_CONNECTION_LIFETIME` seconds (default 3300, unchanged), which now
+  applies on the proxy as the route's `max_stream_duration` rather than on the
+  backend; clients must reconnect after that or after a shutdown, and a clean
+  close frame is not guaranteed.
 - Audit records are batched by a bounded publish queue and packed,
   newline-delimited, into shared Kinesis Data Streams records (up to 256 KiB
   or 500 audit records per KDS record, the `RecordDeAggregation` limit) sent
   with `PutRecords` (up to 500 KDS records / 5 MiB per call), instead of one
   `PutRecord` per audit record. Consumers' Firehose must run JSON
   `RecordDeAggregation` before partitioning; enable it before rollout. Grant
-  `kinesis:PutRecords`.
+  `kinesis:PutRecords`. A process that publishes audit records will not start
+  unless all seven metadata, request and response streams are configured.
 - Body records use `num_chunks=0` with ordered `chunk_id` values and a
   `final_chunk` marker, and carry a `truncated` indicator. A body is complete
   iff its chunk_ids are contiguous from 0 through the record with
@@ -62,7 +89,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   health checks (`REDIS_HEALTH_CHECK_INTERVAL_SECONDS`, default 30), and
   cached authentication no longer probes Redis before each operation.
 - The backend image uses a glibc-based Python 3.12 runtime with native
-  protobuf, uvloop and hiredis.
+  protobuf, uvloop and hiredis. The proxy stays on Envoy 1.38.4 and now
+  refuses to start on a different Envoy minor version.
 
 ### Fixed
 - An authorization payload that fails to decode is no longer included in the
@@ -91,6 +119,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `proxy/xray.json`, the docker-compose X-Ray daemon and the `AWS_XRAY_*` /
   `XRAY_SAMPLING_RATE` settings. An inbound `x-amzn-trace-id` `Root=` id is
   still attached to log lines and REST error responses.
+- Settings with no remaining use: `UVICORN_WORKERS`, `CORS_ALLOWED_ORIGINS`,
+  `PORTUNUS_API_KEY_HEADER`, `TARGET_HOST_USE_TLS` and
+  `PORTUNUS_TRANSPORT_SOCKET`.
 
 ## [0.11.0] - 2026-10-02
 

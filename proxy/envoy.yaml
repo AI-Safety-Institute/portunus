@@ -13,18 +13,23 @@ static_resources:
       socket_address:
         address: 0.0.0.0
         port_value: ${LISTEN_PORT}
-    # Large buffer size (50 MiB) for buffering complete request bodies
-    # This is necessary because:
-    #  1. Our authentication requires access to the full request before forwarding
-    #  2. Large requests are common with API services (e.g., embedding large documents)
-    # Note that responses are streamed and NOT buffered for better performance
+    # 50 MiB — some upstream LLM APIs accept large request bodies
+    # (long-document embeddings).
     per_connection_buffer_limit_bytes: 52428800  # 50 MiB
     filter_chains:
     - filters:
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-          generate_request_id: false
+          # No `tracing` provider: request correlation rides on
+          # x-request-id (below) and the JSON access log. There is no span
+          # exporter to configure.
+          generate_request_id: true
+          # Return that id on every response (the key of the access log,
+          # Portunus's log lines and every audit record) so a client can
+          # correlate a response with its audit trail. Replaces the
+          # X-Amzn-Trace-Id the Lua filter used to add.
+          always_set_request_id_in_response: true
           access_log:
           - name: envoy.access_loggers.file
             typed_config:
@@ -32,7 +37,7 @@ static_resources:
               path: "/dev/stdout"
               json_format:
                 timestamp: "%START_TIME%"
-                http_x_trace_id: "%DYNAMIC_METADATA(envoy.filters.http.lua:request_id)%"
+                http_x_request_id: "%REQ(X-REQUEST-ID)%"
                 http_method: "%REQ(:METHOD)%"
                 http_path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
                 http_protocol: "%PROTOCOL%"
@@ -43,6 +48,11 @@ static_resources:
                 bytes_received: "%BYTES_RECEIVED%"
                 bytes_sent: "%BYTES_SENT%"
                 duration: "%DURATION%"
+                upstream_pool_wait_ms: "%UPSTREAM_CONNECTION_POOL_READY_DURATION%"
+                request_sent_ms: "%REQUEST_TX_DURATION%"
+                first_response_ms: "%RESPONSE_DURATION%"
+                upstream_attempts: "%UPSTREAM_REQUEST_ATTEMPT_COUNT%"
+                openai_processing_ms: "%RESP(OPENAI-PROCESSING-MS)%"
                 upstream_service_time: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
                 http_forwarded_for: "%REQ(X-FORWARDED-FOR)%"
                 http_user_agent: "%REQ(USER-AGENT)%"
@@ -61,64 +71,144 @@ static_resources:
           # Without this, connections would time out after 5 minutes of inactivity
           # Ref: https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts#stream-timeouts
           stream_idle_timeout: 3600s
+          # Default 1s adds a full second of latency to every WS close.
+          delayed_close_timeout: 0.1s
           upgrade_configs:
           - upgrade_type: websocket
           route_config:
             name: local_route
+            # Strip internal x-portunus-* inbound so clients can't forge them
+            # (authoritative values arrive via gRPC initial_metadata below).
+            request_headers_to_remove:
+              - x-portunus-debug-id
+              - x-portunus-proxy-key
+              - x-portunus-target-host
             virtual_hosts:
             - name: local_service
               domains: ["*"]
               routes:
-              # WebSocket upgrades on any path route to the Portunus WS relay.
-              # Envoy matches the Upgrade header before falling through to the
-              # default HTTP route. Portunus handles auth and relays messages
-              # to the upstream target with per-message Kinesis logging.
+              # Envoy-liveness smoke endpoint — no auth, no upstream. 200 while
+              # the Envoy process lives; says nothing about Portunus (that is
+              # /healthz, gated on Portunus's gRPC health).
+              - match:
+                  path: "/ping"
+                direct_response:
+                  status: 200
+                  body:
+                    inline_string: "ok\n"
+                response_headers_to_add:
+                - header:
+                    key: x-${PORTUNUS_HEADER_PREFIX}-ping
+                    value: "true"
+                typed_per_filter_config:
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    disabled: true
+                  envoy.filters.http.ext_proc:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                    disabled: true
+              # /healthz is answered by the health_check filter, which sits
+              # ahead of ext_authz and ext_proc in the chain, so this route's
+              # action never runs. The route exists so that reply is matched
+              # to a route with both filters disabled: without it the probe
+              # matches the default route and ext_proc, which only ever sees
+              # the response side of a local reply, publishes a response-only
+              # audit record for every health check.
+              - match:
+                  path: "/healthz"
+                direct_response:
+                  status: 503
+                  body:
+                    inline_string: "health_check filter did not answer\n"
+                typed_per_filter_config:
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    disabled: true
+                  envoy.filters.http.ext_proc:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                    disabled: true
+              # WS route. Body modes must be STREAMED under the ext_proc
+              # filter's observability_mode (see the ext_proc filter below).
               - match:
                   prefix: "/"
                   headers:
                   - name: "upgrade"
                     string_match:
                       exact: "websocket"
-                # Disable Lua filter for WS — auth is handled by Portunus directly.
+                      # RFC 6455 §4.2.1: HTTP Upgrade tokens are
+                      # case-insensitive. Clients legitimately send
+                      # ``Upgrade: WebSocket`` mixed-case.
+                      ignore_case: true
+                metadata:
+                  filter_metadata:
+                    envoy.filters.http.ext_proc:
+                      websocket: true
                 typed_per_filter_config:
-                  envoy.filters.http.lua:
-                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
-                    disabled: true
-                request_headers_to_add:
-                - header:
-                    key: "${PORTUNUS_API_KEY_HEADER}"
-                    value: "${PORTUNUS_API_KEY}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-host"
-                    value: "${WS_TARGET_HOST}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-port"
-                    value: "${TARGET_PORT}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
-                - header:
-                    key: "x-portunus-target-use-tls"
-                    value: "${TARGET_HOST_USE_TLS}"
-                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    check_settings:
+                      context_extensions:
+                        target_host: "${WS_TARGET_HOST}"
+                  envoy.filters.http.ext_proc:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                    overrides:
+                      processing_mode:
+                        request_header_mode: SEND
+                        response_header_mode: SEND
+                        request_body_mode: STREAMED
+                        response_body_mode: STREAMED
+                        request_trailer_mode: SEND
+                        response_trailer_mode: SEND
                 route:
-                  cluster: ${PORTUNUS_HOST}
+                  # Static name (not ${WS_TARGET_HOST}) so the WS and HTTP
+                  # clusters don't collide when WS_TARGET_HOST defaults to
+                  # TARGET_HOST in prod.
+                  cluster: ws_upstream
                   timeout: 0s
-                  # Rewrite Host so the shared ALB routes to the Portunus service,
-                  # not back to this proxy (which would loop until XFF hits 30 IPs → 463).
-                  host_rewrite_literal: "${PORTUNUS_HOST}"
+                  # timeout:0s means no upstream response timeout (correct for
+                  # long-lived WS), but a connection would then stay pinned to
+                  # its task forever. The cap cycles long-lived connections so
+                  # scale-out rebalances them, bounds how long one upgrade-time
+                  # authorisation (ext_authz runs only at the upgrade) stays
+                  # valid, and carries over the relay's WS_MAX_CONNECTION_LIFETIME
+                  # (default 3300 s; entrypoint.sh sets the default). Clients
+                  # must reconnect when it fires.
+                  max_stream_duration:
+                    max_stream_duration: ${WS_MAX_CONNECTION_LIFETIME}s
+                  # Without host rewrite, Cloudflare etc. reject on host/SNI
+                  # mismatch.
+                  host_rewrite_literal: "${WS_TARGET_HOST}"
                   upgrade_configs:
                   - upgrade_type: websocket
-              # Default HTTP route through Lua filter
+              # Default HTTP route
               - match:
                   prefix: "/"
                 route:
                   cluster: ${TARGET_HOST}
                   timeout: 0s # no timeout
+                  host_rewrite_literal: "${TARGET_HOST}"
                   retry_policy:
                     retry_on: reset
                     num_retries: 3
           http_filters:
+          # /healthz — the ALB health-check target, answered by this
+          # health_check filter gated on the ACTIVE gRPC health check of
+          # portunus_health_cluster (Portunus's standard gRPC health
+          # service). Returns 503 when Portunus is
+          # dead/unreachable/NOT_SERVING or draining, so ALB pulls a bad task
+          # in seconds rather than serving 403s until ECS recycles it. First
+          # in the chain so probes are never rate-limited or authed.
+          - name: envoy.filters.http.health_check
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+              pass_through_mode: false
+              headers:
+              - name: ":path"
+                string_match:
+                  exact: "/healthz"
+              cluster_min_healthy_percentages:
+                portunus_health_cluster:
+                  value: 100
           - name: envoy.filters.http.local_ratelimit
             # This filter enable rate-limiting on a per-proxy basis, so that we
             # can rate limit for specific projects/labs as required
@@ -155,11 +245,66 @@ static_resources:
                     key: x-${PORTUNUS_HEADER_PREFIX}-rate-limit
                     value: "true"
               local_rate_limit_per_downstream_connection: false
-          - name: envoy.filters.http.lua
+          # ext_authz — header-only auth. The request body is never sent:
+          # requests stream end-to-end without buffering.
+          - name: envoy.filters.http.ext_authz
             typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-              default_source_code:
-                filename: /envoy/lua_subst.lua
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              transport_api_version: V3
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: portunus_grpc_cluster
+                # Covers a cold federation mint (STS identity, secret fetch,
+                # then up to MINT_DEADLINE_SECONDS=6 s of minting); matches the
+                # 10 s the REST path gave /authorise. Portunus answers with a
+                # structured 504 at 9 s, before this fires.
+                timeout: 10s
+                initial_metadata:
+                # Channel-identity gate.
+                - key: x-portunus-proxy-key
+                  value: "${PORTUNUS_API_KEY}"
+                # Authoritative target_host; the matching HTTP header is
+                # stripped at route_config so clients cannot forge.
+                - key: x-portunus-target-host
+                  value: "${TARGET_HOST}"
+              failure_mode_allow: false
+          # Observability via Portunus ext_proc. ``failure_mode_allow:
+          # true`` — if Portunus is slow we lose audit fidelity rather
+          # than dropping customer traffic.
+          - name: envoy.filters.http.ext_proc
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+              grpc_service:
+                envoy_grpc:
+                  # Dedicated cluster (NOT portunus_grpc_cluster) so audit-stream
+                  # pressure gets its own circuit-breaker budget — see
+                  # portunus_extproc_cluster below.
+                  cluster_name: portunus_extproc_cluster
+                timeout: 30s
+                initial_metadata:
+                - key: x-portunus-proxy-key
+                  value: "${PORTUNUS_API_KEY}"
+              failure_mode_allow: true
+              # Fire-and-forget: Envoy ignores ProcessingResponses.
+              observability_mode: true
+              # Forward ext_authz's dynamic_metadata so the Process service can
+              # publish the audit record off the auth path and redact the header
+              # the upstream credential was written to.
+              metadata_options:
+                forwarding_namespaces:
+                  untyped:
+                  - envoy.filters.http.ext_authz
+              processing_mode:
+                request_header_mode: SEND
+                response_header_mode: SEND
+                # observability_mode only supports body modes NONE and STREAMED.
+                # FDS is silently rejected at runtime ("Wrong body mode for
+                # observability mode, no data is sent.") and no body bytes reach
+                # the ext_proc service.
+                request_body_mode: STREAMED
+                response_body_mode: STREAMED
+                request_trailer_mode: SEND
+                response_trailer_mode: SEND
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -169,7 +314,9 @@ static_resources:
     connect_timeout: 5s
     type: LOGICAL_DNS
     dns_lookup_family: V4_ONLY
-    lb_policy: ROUND_ROBIN
+    # LOGICAL_DNS resolves to one IP per connection, so lb_policy is mostly
+    # decorative; LEAST_REQUEST is kept for a possible future move to STRICT_DNS.
+    lb_policy: LEAST_REQUEST
     common_http_protocol_options:
       idle_timeout: 60s  # Set the idle timeout to 60 seconds
     upstream_connection_options:
@@ -195,11 +342,15 @@ static_resources:
                 address: ${TARGET_HOST}
                 port_value: ${TARGET_PORT}
     transport_socket: ${TARGET_HOST_TRANSPORT_SOCKET}
-  - name: ${PORTUNUS_HOST}
+  # HTTP/1.1-only cluster: if this speaks h2 to the upstream, Envoy
+  # converts inbound h1 Upgrade requests into RFC 8441 extended CONNECT,
+  # which AWS ALB and most CDNs reject with 400. Pin h1 via the typed
+  # extension path so env-substitution can't accidentally enable h2.
+  - name: ws_upstream
     connect_timeout: 5s
     type: LOGICAL_DNS
     dns_lookup_family: V4_ONLY
-    lb_policy: ROUND_ROBIN
+    lb_policy: LEAST_REQUEST
     common_http_protocol_options:
       idle_timeout: 60s
     upstream_connection_options:
@@ -207,16 +358,140 @@ static_resources:
         keepalive_probes: 1
         keepalive_interval: 60
         keepalive_time: 10
-    # Must stay HTTP/1.1 — WebSocket relay uses the traditional Upgrade mechanism
-    # which is forbidden in HTTP/2 (RFC 7540 §8.1.2.2). Extended CONNECT (RFC 8441)
-    # would work but uvicorn doesn't support it. Do not add http2_protocol_options here.
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http_protocol_options: {}
+    circuit_breakers:
+      thresholds:
+        - priority: DEFAULT
+          max_connections: ${TARGET_MAX_CONNECTIONS}
+          max_requests: ${TARGET_MAX_REQUESTS}
+          max_pending_requests: ${TARGET_MAX_PENDING_REQUESTS}
+          track_remaining: true
     load_assignment:
-      cluster_name: ${PORTUNUS_HOST}
+      cluster_name: ws_upstream
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${WS_TARGET_HOST}
+                port_value: ${WS_TARGET_PORT}
+    transport_socket: ${WS_TARGET_HOST_TRANSPORT_SOCKET}
+  # Portunus gRPC cluster — ext_authz ONLY. ext_proc uses portunus_extproc_cluster so audit-stream pressure
+  # can't consume this budget; ext_authz is failure_mode_allow: false, so
+  # exhausting its breaker denies customers. STRICT_DNS so one image serves
+  # both the sidecar topology (PORTUNUS_HOST=127.0.0.1) and a future
+  # DNS-based deployment without rebuilding.
+  - name: portunus_grpc_cluster
+    connect_timeout: 5s
+    type: STRICT_DNS
+    common_http_protocol_options:
+      idle_timeout: 60s
+    upstream_connection_options:
+      tcp_keepalive:
+        keepalive_probes: 1
+        keepalive_interval: 60
+        keepalive_time: 10
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    # Fail fast on a stalled portunus rather than queueing into the 10s
+    # ext_authz timeout.
+    circuit_breakers:
+      thresholds:
+        - priority: DEFAULT
+          max_connections: 1024
+          max_pending_requests: 256
+          max_requests: 2048
+          max_retries: 3
+    load_assignment:
+      cluster_name: portunus_grpc_cluster
       endpoints:
       - lb_endpoints:
         - endpoint:
             address:
               socket_address:
                 address: ${PORTUNUS_HOST}
-                port_value: ${PORTUNUS_PORT}
-    transport_socket: ${PORTUNUS_TRANSPORT_SOCKET}
+                port_value: ${PORTUNUS_GRPC_PORT}
+  # ext_proc (audit/observability) cluster, separate from the ext_authz cluster
+  # so that audit has its own circuit-breaker budget. Under a wedged Kinesis
+  # sink, blocked publish
+  # submits hold ext_proc streams open (WS up to WS_MAX_CONNECTION_LIFETIME);
+  # that accumulation saturates THIS breaker (dropping audit, tolerated by
+  # failure_mode_allow: true) instead of starving ext_authz into customer 503s.
+  - name: portunus_extproc_cluster
+    connect_timeout: 5s
+    type: STRICT_DNS
+    common_http_protocol_options:
+      idle_timeout: 60s
+    upstream_connection_options:
+      tcp_keepalive:
+        keepalive_probes: 1
+        keepalive_interval: 60
+        keepalive_time: 10
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    # One ext_proc stream per proxied request/WS session; 2048 covers per-task
+    # concurrency. Overflow degrades AUDIT ONLY (fail-open), never customer auth.
+    circuit_breakers:
+      thresholds:
+        - priority: DEFAULT
+          max_connections: 1024
+          max_pending_requests: 256
+          max_requests: 2048
+          max_retries: 3
+    load_assignment:
+      cluster_name: portunus_extproc_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${PORTUNUS_HOST}
+                port_value: ${PORTUNUS_GRPC_PORT}
+  # Health-observation cluster: same Portunus endpoint, used ONLY by the
+  # /healthz health_check filter — no request traffic is routed to it. Kept
+  # separate so its ACTIVE gRPC check can't perturb data-path clusters
+  # (marking a shared cluster unhealthy would hit ext_authz panic-threshold
+  # routing); here, unhealthy only flips /healthz to 503 for the ALB.
+  - name: portunus_health_cluster
+    connect_timeout: 2s
+    type: STRICT_DNS
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {}
+    # Active check of grpc.health.v1.Health's default service (""), the same
+    # signal the container probe reads: SERVING once Portunus's listeners are
+    # up, NOT_SERVING from drain start. It reports only this task's processes,
+    # never Redis or another shared dependency (every task shares one Redis).
+    # Probed HERE, so a dead or draining Portunus leaves ALB rotation in
+    # seconds.
+    # no_traffic_interval is required: no data traffic hits this cluster, else
+    # Envoy falls back to the 60s no-traffic cadence.
+    health_checks:
+    - timeout: 2s
+      interval: 5s
+      no_traffic_interval: 5s
+      unhealthy_threshold: 2
+      healthy_threshold: 1
+      grpc_health_check:
+        service_name: ""
+    load_assignment:
+      cluster_name: portunus_health_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${PORTUNUS_HOST}
+                port_value: ${PORTUNUS_GRPC_PORT}
