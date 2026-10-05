@@ -97,6 +97,7 @@ _REQUIRED_FIREHOSE_STREAMS = (
     "portunus-firehose-response-headers",
     "portunus-firehose-response-body",
     "portunus-firehose-response-trailers",
+    "portunus-firehose-ws-summary",
 )
 _AUDIT_S3_BUCKET = "portunus-logs-local"
 

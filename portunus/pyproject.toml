@@ -50,6 +50,10 @@ dependencies = [
     # orjson on the publish hot path — every audit record goes through
     # ``orjson.dumps``.
     "orjson>=3.10.0,<4",
+    # wsproto: sans-IO WebSocket frame parsing in the ext_proc Process
+    # service. ``FrameObserver`` wraps ``wsproto.Connection`` to recover
+    # logical text/binary/close frames from post-101 byte chunks.
+    "wsproto>=1.2.0,<2",
     # Brotli: ``Content-Encoding: br`` decode branch in models.py — several
     # providers brotli-compress response bodies; without it token accounting
     # silently fails for them.

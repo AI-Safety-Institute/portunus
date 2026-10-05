@@ -26,6 +26,7 @@ from portunus.models import (
     ResponseBodyRecord,
     ResponseHeadersRecord,
     ResponseTrailersRecord,
+    WSSummaryRecord,
 )
 from portunus.services.state_service import StateService
 from portunus.util import generate_iso_timestamp
@@ -714,3 +715,14 @@ class PublishService:
         return config.kinesis.response_trailers_stream_name, _serialize(
             record.to_dict()
         )
+
+    def build_ws_summary(
+        self,
+        record: WSSummaryRecord,
+    ) -> Optional[BuiltRecord]:
+        """Build a per-connection WebSocket summary record."""
+        if not config.kinesis.ws_summary_stream_name:
+            logger.warning("WS summary stream not configured, skipping publish")
+            return None
+
+        return config.kinesis.ws_summary_stream_name, _serialize(record.to_dict())

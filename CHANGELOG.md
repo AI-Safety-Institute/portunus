@@ -23,6 +23,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `/healthz`; images before this release answer it with 401, so switch the
   health-check path together with the image. Neither endpoint produces audit
   records.
+- Streamed audit capture: HTTP bodies are published as ordered chunk records
+  while they stream, WebSocket traffic as per-frame records, and, with the
+  optional `KINESIS_WS_SUMMARY_STREAM`, one summary record per WebSocket
+  connection.
 - An in-process auth cache in front of Redis (`AUTH_LOCAL_CACHE_TTL_SECONDS`,
   default 30; `AUTH_LOCAL_CACHE_MAX_ENTRIES`, default 10000; a TTL of 0
   disables it). A revoked credential can keep working for up to the TTL per
@@ -87,9 +91,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `kinesis:PutRecords`. A process that publishes audit records will not start
   unless all seven metadata, request and response streams are configured.
 - Body records use `num_chunks=0` with ordered `chunk_id` values and a
-  `final_chunk` marker, and carry a `truncated` indicator. A body is complete
-  iff its chunk_ids are contiguous from 0 through the record with
-  `final_chunk=true`. Update consumers before upgrading.
+  `final_chunk` marker, and carry a `truncated` indicator; WebSocket records
+  add frame indexes and connection loss counters. A body is complete iff its
+  chunk_ids are contiguous from 0 through the record with `final_chunk=true`.
+  Update consumers before upgrading.
 - Audit header capture records every request and response header except the
   credential headers: `KNOWN_AUTH_HEADERS` (now read by the backend;
   comma-separated, default `authorization,x-api-key,x-goog-api-key,api-key`,

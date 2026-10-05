@@ -102,6 +102,25 @@ async def test_wrong_identity_denied_before_any_body(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_websocket_cancellation_releases_state_and_publishes_summary(monkeypatch):
+    async with running(monkeypatch) as (stub, servicer, publish, queue):
+        call = stub.Process(metadata=[("x-portunus-proxy-key", _PROXY_KEY)])
+        await call.write(headers(True, observe=True, websocket=True))
+        await call.write(headers(False, observe=True, websocket=True))
+        body = _http_body_message(body=b"\x81\x82\x00\x00\x00\x00hi", is_request=True)
+        body.observability_mode = True
+        await call.write(body)
+        await until(lambda: bool(publish.of_kind("request_body")))
+        assert servicer.active_stream_count == 1
+        assert call.cancel()
+        await until(lambda: servicer.active_stream_count == 0)
+        await queue.stop()
+        assert len(publish.of_kind("ws_summary")) == 1
+        assert queue.cancelled_total == 0
+        assert queue.dropped_total == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("request_side", [True, False], ids=["request", "response"])
 @pytest.mark.parametrize("body", [b"", b"payload"], ids=["empty", "nonempty"])
 @pytest.mark.parametrize("ending", ["body", "trailers"])

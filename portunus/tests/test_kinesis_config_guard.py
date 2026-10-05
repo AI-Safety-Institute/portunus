@@ -74,6 +74,16 @@ class TestMissingRequiredStreams:
         kinesis = _all_streams_set().model_copy(update={"metadata_stream_name": ""})
         assert "KINESIS_METADATA_STREAM" in kinesis.missing_required_streams()
 
+    def test_ws_summary_is_not_required(self):
+        """``ws_summary_stream_name`` is not required.
+
+        WS payloads still flow through the required request/response body
+        streams, so an unset summary stream loses only stats, not audit.
+        """
+        kinesis = _all_streams_set()  # ws_summary_stream_name left None
+        assert kinesis.ws_summary_stream_name is None
+        assert kinesis.missing_required_streams() == []
+
 
 class TestStartupFailFast:
     """``start_grpc_server`` must refuse to serve when audit is misconfigured."""

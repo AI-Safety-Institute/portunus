@@ -1232,6 +1232,94 @@ class ResponseTrailersRecord:
 
 
 @dataclass
+class WSSummaryRecord:
+    """Per-connection WebSocket summary emitted on stream end.
+
+    A joinable, cheap view of connection-level shape (duration, frame
+    counts per direction, close code) so analytics don't have to
+    aggregate the body stream.
+    """
+
+    request_id: str
+    timestamp: str
+    published_at: str
+    duration_seconds: float
+    close_code: Optional[int] = None
+    close_initiator: Optional[str] = None
+    client_text_frames: int = 0
+    client_binary_frames: int = 0
+    client_ping_frames: int = 0
+    client_pong_frames: int = 0
+    client_close_frames: int = 0
+    server_text_frames: int = 0
+    server_binary_frames: int = 0
+    server_ping_frames: int = 0
+    server_pong_frames: int = 0
+    server_close_frames: int = 0
+    # Audit-integrity counters: frames lost to publish-queue backpressure or
+    # capped by the deflate decompression limit. A cheap aggregate of the
+    # frames missing from the body stream (chunk_id gaps) or marked
+    # ``truncated``, joinable without scanning the body stream.
+    dropped_client_frames: int = 0
+    dropped_server_frames: int = 0
+    truncated_client_frames: int = 0
+    truncated_server_frames: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for publishing."""
+        return {
+            "record_type": "ws_summary",
+            "request_id": self.request_id,
+            "timestamp": self.timestamp,
+            "published_at": self.published_at,
+            "duration_seconds": self.duration_seconds,
+            "close_code": self.close_code,
+            "close_initiator": self.close_initiator,
+            "client_text_frames": self.client_text_frames,
+            "client_binary_frames": self.client_binary_frames,
+            "client_ping_frames": self.client_ping_frames,
+            "client_pong_frames": self.client_pong_frames,
+            "client_close_frames": self.client_close_frames,
+            "server_text_frames": self.server_text_frames,
+            "server_binary_frames": self.server_binary_frames,
+            "server_ping_frames": self.server_ping_frames,
+            "server_pong_frames": self.server_pong_frames,
+            "server_close_frames": self.server_close_frames,
+            "dropped_client_frames": self.dropped_client_frames,
+            "dropped_server_frames": self.dropped_server_frames,
+            "truncated_client_frames": self.truncated_client_frames,
+            "truncated_server_frames": self.truncated_server_frames,
+        }
+
+    @classmethod
+    def glue_schema(cls) -> List[Dict[str, str]]:
+        """Return Glue table schema for this record type."""
+        return [
+            {"name": "record_type", "type": "string"},
+            {"name": "request_id", "type": "string"},
+            {"name": "timestamp", "type": "string"},
+            {"name": "published_at", "type": "string"},
+            {"name": "duration_seconds", "type": "double"},
+            {"name": "close_code", "type": "int"},
+            {"name": "close_initiator", "type": "string"},
+            {"name": "client_text_frames", "type": "bigint"},
+            {"name": "client_binary_frames", "type": "bigint"},
+            {"name": "client_ping_frames", "type": "bigint"},
+            {"name": "client_pong_frames", "type": "bigint"},
+            {"name": "client_close_frames", "type": "bigint"},
+            {"name": "server_text_frames", "type": "bigint"},
+            {"name": "server_binary_frames", "type": "bigint"},
+            {"name": "server_ping_frames", "type": "bigint"},
+            {"name": "server_pong_frames", "type": "bigint"},
+            {"name": "server_close_frames", "type": "bigint"},
+            {"name": "dropped_client_frames", "type": "bigint"},
+            {"name": "dropped_server_frames", "type": "bigint"},
+            {"name": "truncated_client_frames", "type": "bigint"},
+            {"name": "truncated_server_frames", "type": "bigint"},
+        ]
+
+
+@dataclass
 class JoinedLogRecord:
     """Joined log record combining all streams for analysis.
 
