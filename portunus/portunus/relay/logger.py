@@ -88,12 +88,6 @@ class LogQueue:
 _log_queue: LogQueue | None = None
 
 
-def get_log_queue() -> LogQueue:
-    """Get the module-level log queue (must be started first)."""
-    assert _log_queue is not None, "LogQueue not started — call start_log_queue() first"
-    return _log_queue
-
-
 async def start_log_queue(num_workers: int = 200) -> None:
     """Create and start the global log queue."""
     global _log_queue

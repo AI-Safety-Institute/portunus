@@ -45,13 +45,6 @@ class PayloadError(AuthenticationError):
     message: str
 
 
-class AuthError(AuthenticationError):
-    """Exception raised for general authentication issues."""
-
-    def __init__(self, message: str = "Authentication failed"):
-        super().__init__(message)
-
-
 # Service Errors
 
 
@@ -103,47 +96,10 @@ class StateError(PortunusError):
         super().__init__(message)
 
 
-class RedisError(StateError):
-    """Exception raised when there's an error with Redis operations."""
-
-    def __init__(self, message: str = "Redis operation failed"):
-        super().__init__(message)
-
-
 class CacheError(StateError):
     """Exception raised when there's an error with caching operations."""
 
     def __init__(self, message: str = "Cache operation failed"):
-        super().__init__(message)
-
-
-class LoggingError(StateError):
-    """Exception raised when there's an error with logging operations."""
-
-    def __init__(self, message: str = "Logging operation failed"):
-        super().__init__(message)
-
-
-class LogDecodeError(LoggingError):
-    """Exception raised when log decoding fails."""
-
-    def __init__(
-        self, message: str = "Log decode operation failed", field: str | None = None
-    ):
-        if field:
-            message = f"Failed to decode {field}: {message}"
-        super().__init__(message)
-        self.field = field
-
-
-class LogNotFoundError(LoggingError):
-    """Exception raised when log lookup fails."""
-
-    def __init__(
-        self, message: str = "Failed to retrieve log", message_id: str | None = None
-    ):
-        if message_id:
-            message = f"Log with message_id {message_id} not found"
         super().__init__(message)
 
 
