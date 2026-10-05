@@ -25,7 +25,6 @@ Supporting AWS services:
 
 - **Kinesis Data Streams / Firehose**: All traffic is streamed to Kinesis for archival in S3
 - **AWS Secrets Manager**: Stores the real API keys
-- **AWS X-Ray**: Distributed tracing for debugging
 
 ## Data Flow
 
@@ -350,10 +349,6 @@ uv run pytest
 docker compose up --build --wait
 uv run pytest tests/ portunus/
 ```
-
-### X-Ray Integration
-
-For [X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) integration to work when testing locally, you need valid credentials in your environment when you start the docker stack. See the compose file for details.
 
 ### CloudWatch Integration
 

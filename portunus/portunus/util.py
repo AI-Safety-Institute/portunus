@@ -10,8 +10,6 @@ import datetime
 import logging
 import time
 
-import boto3
-
 # Import function for implementation
 # Re-export these functions for backwards compatibility
 from portunus.services.arn_service import (
@@ -22,7 +20,6 @@ from portunus.services.arn_service import (
 from portunus.services.payload_service import (
     decode_payload,
 )
-from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -32,25 +29,12 @@ __all__ = [
     "get_role_arn",
     "parse_identity_from_arn",
     "decode_payload",
-    "get_current_session_arn",
     "generate_iso_timestamp",
     "unix_timestamp_to_iso",
     "chunk_body_data",
 ]
 
 
-def get_current_session_arn() -> str:
-    """Get the ARN of the current session.
-
-    Returns:
-        str: The ARN of the current session.
-    """
-    sts_client = boto3.client("sts")
-    response = sts_client.get_caller_identity()
-    return response["Arn"]
-
-
-@capture_async()
 async def wait_until(
     condition_func, timeout=3.0, interval=0.05, error_message=None
 ) -> None:
