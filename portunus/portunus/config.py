@@ -119,47 +119,48 @@ class KinesisConfig(BaseModel):
     and Kinesis Firehose for S3 delivery.
 
     Attributes:
-        metadata_stream_name: Firehose stream name for metadata records
-        request_headers_stream_name: Firehose stream name for request headers
-        request_body_stream_name: Firehose stream name for request bodies
-        request_trailers_stream_name: Firehose stream name for request trailers
-        response_headers_stream_name: Firehose stream name for response headers
-        response_body_stream_name: Firehose stream name for response bodies
-        response_trailers_stream_name: Firehose stream name for response trailers
-        max_record_size: Maximum size in bytes for a single Kinesis record
+        metadata_stream_name: Kinesis data stream for metadata records
+        request_headers_stream_name: Kinesis data stream for request headers
+        request_body_stream_name: Kinesis data stream for request bodies
+        request_trailers_stream_name: Kinesis data stream for request trailers
+        response_headers_stream_name: Kinesis data stream for response headers
+        response_body_stream_name: Kinesis data stream for response bodies
+        response_trailers_stream_name: Kinesis data stream for response trailers
+        max_record_size: Maximum size in bytes for a single audit record
     """
 
     metadata_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for metadata records",
+        description="Kinesis data stream for metadata records",
     )
     request_headers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request headers",
+        description="Kinesis data stream for request headers",
     )
     request_body_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request bodies",
+        description="Kinesis data stream for request bodies",
     )
     request_trailers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for request trailers",
+        description="Kinesis data stream for request trailers",
     )
     response_headers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response headers",
+        description="Kinesis data stream for response headers",
     )
     response_body_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response bodies",
+        description="Kinesis data stream for response bodies",
     )
     response_trailers_stream_name: Optional[str] = Field(
         default=None,
-        description="Kinesis Firehose stream name for response trailers",
+        description="Kinesis data stream for response trailers",
     )
     max_record_size: int = Field(
-        default=900000,
-        description="Maximum size in bytes for single Kinesis record (900KB)",
+        # Must match get_config()'s env-loader default (1_000_000).
+        default=1_000_000,
+        description="Max bytes per audit record (KDS caps a record at 1 MiB)",
         ge=1000,
     )
 
@@ -234,6 +235,10 @@ class GrpcConfig(BaseModel):
         ge=1,
         le=65535,
     )
+    audit_drop_on_pressure: bool = Field(
+        default=False,
+        description="Drop audit submissions immediately when their queue is full",
+    )
     max_concurrent_streams: int = Field(
         default=1000,
         description="Per-connection HTTP/2 stream limit",
@@ -243,6 +248,55 @@ class GrpcConfig(BaseModel):
         default=30,
         description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
+    )
+    publish_queue_maxsize: int = Field(
+        default=10_000,
+        description="Publish queue record-count capacity (bodies + metadata)",
+        ge=1,
+    )
+    publish_queue_body_capacity: int = Field(
+        default=9_000,
+        description=(
+            "Record-count soft cap for droppable body submits; the headroom "
+            "up to ``publish_queue_maxsize`` is reserved for blocking "
+            "header/metadata submits."
+        ),
+        ge=0,
+    )
+    publish_queue_max_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        description=(
+            "Byte budget for raw body payloads retained by queued (and "
+            "in-flight) publish tasks. Body submits drop once the budget is "
+            "hit, whatever the record count — the record-count cap alone "
+            "allows ~6.4 GiB of retained chunks (10k × ~750 KB), which "
+            "drives the process into its cgroup OOM kill. Size this with "
+            "headroom: building a record adds ~33% (base64) transiently."
+        ),
+        ge=1,
+    )
+    # Defaults are the load-tested settings: one worker draining up to 3000
+    # records per batch with a 5 ms coalescing wait sustained 600 RPS per pod
+    # with exact audit; smaller batches send about one record per PutRecords
+    # call and collapse to roughly 100 RPS under load.
+    publish_workers: Optional[int] = Field(
+        default=1,
+        description="Publisher workers; None uses the stream-based worker count",
+        ge=1,
+        le=64,
+    )
+    publish_batch_size: int = Field(
+        default=3000,
+        description="Maximum queued records grouped before per-stream publishing",
+        ge=1,
+        le=3000,
+    )
+    publish_coalesce_ms: float = Field(
+        default=5.0,
+        description="Delay in milliseconds between partial publisher batches",
+        ge=0.0,
+        le=100.0,
+        allow_inf_nan=False,
     )
     proxy_api_key: str = Field(
         default="",
@@ -323,7 +377,7 @@ class PortunusConfig(BaseModel):
     )
     kinesis: KinesisConfig = Field(
         default_factory=KinesisConfig,
-        description="Kinesis Firehose configuration",
+        description="Kinesis Data Streams audit publishing configuration",
     )
     relay: RelayConfig = Field(
         default_factory=RelayConfig,
@@ -445,12 +499,28 @@ def get_config() -> PortunusConfig:
         enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
         host=os.environ.get("GRPC_HOST", "127.0.0.1"),
         port=int(os.environ.get("GRPC_PORT", "9000")),
+        audit_drop_on_pressure=os.environ.get(
+            "GRPC_AUDIT_DROP_ON_PRESSURE", "false"
+        ).lower()
+        == "true",
         max_concurrent_streams=int(
             os.environ.get("GRPC_MAX_CONCURRENT_STREAMS", "1000")
         ),
         graceful_shutdown_seconds=int(
             os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
         ),
+        publish_queue_maxsize=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_MAXSIZE", "10000")
+        ),
+        publish_queue_body_capacity=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_BODY_CAPACITY", "9000")
+        ),
+        publish_queue_max_bytes=int(
+            os.environ.get("GRPC_PUBLISH_QUEUE_MAX_BYTES", str(256 * 1024 * 1024))
+        ),
+        publish_workers=int(os.environ.get("GRPC_PUBLISH_WORKERS", "1")),
+        publish_batch_size=int(os.environ.get("GRPC_PUBLISH_BATCH_SIZE", "3000")),
+        publish_coalesce_ms=float(os.environ.get("GRPC_PUBLISH_COALESCE_MS", "5")),
         proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
         proxy_api_key_optional=(
             os.environ.get("GRPC_PROXY_API_KEY_OPTIONAL", "false").lower() == "true"
