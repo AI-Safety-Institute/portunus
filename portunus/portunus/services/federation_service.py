@@ -540,18 +540,16 @@ class AnthropicTokenExchange(_HttpTokenExchange):
         """
         step = "Anthropic token exchange"
         requested_at = datetime.now(timezone.utc)
-        body = await self._post_json(
-            step,
-            ANTHROPIC_TOKEN_URL,
-            json_body={
-                "grant_type": JWT_BEARER_GRANT_TYPE,
-                "assertion": proof,
-                "federation_rule_id": secret.federation_rule_id,
-                "organization_id": secret.organization_id,
-                "service_account_id": secret.service_account_id,
-                "workspace_id": secret.workspace_id,
-            },
-        )
+        json_body: dict[str, object] = {
+            "grant_type": JWT_BEARER_GRANT_TYPE,
+            "assertion": proof,
+            "federation_rule_id": secret.federation_rule_id,
+            "organization_id": secret.organization_id,
+            "service_account_id": secret.service_account_id,
+        }
+        if secret.workspace_id is not None:
+            json_body["workspace_id"] = secret.workspace_id
+        body = await self._post_json(step, ANTHROPIC_TOKEN_URL, json_body=json_body)
         token = _parse_response(OAuthTokenResponse, body, step)
         return token.minted_token(requested_at)
 
