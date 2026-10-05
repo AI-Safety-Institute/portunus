@@ -8,6 +8,8 @@ particularly for AWS interactions like getting temporary credentials.
 import datetime
 import logging
 
+from portunus.config import config
+
 # Import function for implementation
 # Re-export these functions for backwards compatibility
 from portunus.services.arn_service import (
@@ -43,10 +45,9 @@ def generate_iso_timestamp() -> str:
         str: ISO-8601 formatted timestamp with millisecond precision
     """
     return (
-        datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[
-            :-3
-        ]
-        + "Z"
+        datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -77,8 +78,6 @@ def chunk_body_data(
     Chunk order in the list determines the chunk_id.
     """
     if max_record_size is None:
-        from portunus.config import config
-
         max_record_size = config.kinesis.max_record_size
 
     max_b64_per_chunk = max_record_size - 100
