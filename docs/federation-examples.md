@@ -193,10 +193,11 @@ Tokens last up to 30 minutes, capped at twice the JWT's remaining life.
   "federation_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/teams/example-team/portunus-fed-example-grant@teams.example-team",
   "federation_rule_id": "fdrl_01J8ZQ2M9K3N4P5R6S7T8V9W0X",
   "organization_id": "3f1c9d2e-7b4a-4c6d-9e8f-0a1b2c3d4e5f",
-  "service_account_id": "svac_01J8ZQ2M9K3N4P5R6S7T8V9W0Y",
-  "workspace_id": "wrkspc_01J8ZQ2M9K3N4P5R6S7T8V9W0Z"
+  "service_account_id": "svac_01J8ZQ2M9K3N4P5R6S7T8V9W0Y"
 }
 ```
+
+If the rule covers more than one workspace, add `"workspace_id": "wrkspc_…"`.
 
 </details>
 

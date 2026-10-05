@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- `anthropic_wif`'s `workspace_id` is optional. Portunus sends it to Anthropic
+  only when set; set it only for rules that span more than one workspace.
+
 ## [0.11.0] - 2026-10-02
 
 ### Added
