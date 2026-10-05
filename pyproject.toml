@@ -76,6 +76,7 @@ exclude = [
 module = [
     "envoy.*",
     "google.rpc.*",
+    "wsproto.*",
     "grpc_health.*",
     "grpc_reflection.*",
     "brotli",
