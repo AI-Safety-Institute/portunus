@@ -438,6 +438,17 @@ class TestAuthenticateWithMintSecrets:
         )
 
     @pytest.mark.asyncio
+    async def test_host_mismatch_message_is_not_rewrapped(self, fake_redis):
+        """Our own AuthenticationError reaches the caller with its message intact."""
+        cache = _cache_backed_by(fake_redis)
+        service = _service_for(WIF_SECRET, cache, AsyncMock(return_value=_minted()))
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            await service.authenticate(_payload(), "a", "api.other.example")
+
+        assert str(exc_info.value) == "API key is not valid for target host"
+
+    @pytest.mark.asyncio
     async def test_stored_key_cached_for_one_target_is_a_miss_for_another(
         self, fake_redis
     ):

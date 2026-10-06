@@ -462,7 +462,9 @@ class AuthPayload:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
         except Exception as e:
-            msg = f"Failed to decode authorization payload: {e}, payload: {raw_payload}"
+            # raw_payload holds temporary AWS credentials, so it stays out of
+            # the message.
+            msg = f"Failed to decode authorization payload: {e}"
             raise PayloadError(msg) from e
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1386,7 +1388,9 @@ class JoinedLogRecord:
             True if decoding succeeded, False otherwise
         """
         decoded, failed = _decompress_b64_body(
-            self.request_body_body, self.request_headers_content_encoding
+            self.request_body_body,
+            self.request_headers_content_encoding,
+            self.request_headers_content_type,
         )
         self.request_body_decoded = decoded
         self.request_body_decode_failure = failed

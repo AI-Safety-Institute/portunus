@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- An authorization payload that fails to decode is no longer included in the
+  error message; the decode error is still chained for debugging.
+- Portunus's own authentication errors, such as "API key is not valid for
+  target host", keep their message instead of being re-wrapped as
+  "Authentication failed: …".
+- Joined log records decode request bodies with the request content type, as
+  response bodies already did, so `application/vnd.amazon.eventstream` request
+  bodies decode.
+
 ## [0.11.0] - 2026-10-02
 
 ### Added

@@ -195,7 +195,14 @@ class AuthService:
             )
             await self._write_cache(payload, target_host, auth_result)
             return auth_result
-        except (PayloadError, CredentialsError, ServiceError, TimeoutError):
+        except (
+            PayloadError,
+            CredentialsError,
+            AuthenticationError,
+            ServiceError,
+            TimeoutError,
+        ):
+            # Our own exceptions carry curated messages; re-raise them as is.
             raise
         except Exception as e:
             logger.error(f"Authentication error: {e}")
