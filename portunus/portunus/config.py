@@ -174,6 +174,27 @@ class KinesisConfig(BaseModel):
         ge=1000,
     )
 
+    def missing_required_streams(self) -> list[str]:
+        """Return the ``KINESIS_*`` env-var names whose stream is unset.
+
+        Used to fail fast at gRPC startup: with a stream unset, the build path
+        short-circuits to None and the task serves traffic while dropping 100%
+        of that audit record type.
+
+        Returns:
+            Unset required ``KINESIS_*`` env-var names (empty when all set).
+        """
+        required = {
+            "KINESIS_METADATA_STREAM": self.metadata_stream_name,
+            "KINESIS_REQUEST_HEADERS_STREAM": self.request_headers_stream_name,
+            "KINESIS_REQUEST_BODY_STREAM": self.request_body_stream_name,
+            "KINESIS_REQUEST_TRAILERS_STREAM": self.request_trailers_stream_name,
+            "KINESIS_RESPONSE_HEADERS_STREAM": self.response_headers_stream_name,
+            "KINESIS_RESPONSE_BODY_STREAM": self.response_body_stream_name,
+            "KINESIS_RESPONSE_TRAILERS_STREAM": self.response_trailers_stream_name,
+        }
+        return [env_var for env_var, value in required.items() if not value]
+
 
 class AwsConfig(BaseModel):
     """AWS-related configuration settings."""
@@ -258,6 +279,18 @@ class GrpcConfig(BaseModel):
         default=30,
         description="Grace period for in-flight RPCs on SIGTERM",
         ge=0,
+    )
+    drain_flush_reserve_seconds: float = Field(
+        default=5.0,
+        description=(
+            "Slice of the SIGTERM grace reserved for flushing the publish "
+            "queue after the gRPC stream drain. Envoy holds ext_proc streams "
+            "open for its own (longer) drain, so ``server.stop`` consumes "
+            "its whole budget on every busy stop; without a reserve the "
+            "queue would get a 0-second flush window and cancel every "
+            "buffered audit record even with a healthy sink."
+        ),
+        ge=0.0,
     )
     publish_queue_maxsize: int = Field(
         default=10_000,
@@ -540,6 +573,9 @@ def get_config() -> PortunusConfig:
         ),
         graceful_shutdown_seconds=int(
             os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
+        ),
+        drain_flush_reserve_seconds=float(
+            os.environ.get("GRPC_DRAIN_FLUSH_RESERVE_SECONDS", "5.0")
         ),
         publish_queue_maxsize=int(
             os.environ.get("GRPC_PUBLISH_QUEUE_MAXSIZE", "10000")
