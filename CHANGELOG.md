@@ -28,6 +28,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   3000) and `GRPC_PUBLISH_COALESCE_MS` (default 5); and
   `GRPC_AUDIT_DROP_ON_PRESSURE=true`, which drops audit records instead of
   waiting when the publish queue is full.
+- Streamed audit capture: HTTP bodies are published as ordered chunk records
+  while they stream.
 
 ### Changed
 - `ext_authz` sees request headers only and never the body, so request bodies
@@ -45,6 +47,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `PutRecord` per audit record. Consumers' Firehose must run JSON
   `RecordDeAggregation` before partitioning; enable it before rollout. Grant
   `kinesis:PutRecords`.
+- Body records use `num_chunks=0` with ordered `chunk_id` values and a
+  `final_chunk` marker, and carry a `truncated` indicator. A body is complete
+  iff its chunk_ids are contiguous from 0 through the record with
+  `final_chunk=true`. Update consumers before upgrading.
+- Audit header capture records every request and response header except the
+  credential headers: `KNOWN_AUTH_HEADERS` (now read by the backend;
+  comma-separated, default `authorization,x-api-key,x-goog-api-key,api-key`,
+  matched case-insensitively), `API_KEY_HEADER` and the header the upstream
+  credential was written to. Bodies are still captured in full.
 - AWS clients for STS and Secrets Manager are pooled per credential set
   instead of being created on every cache miss. Redis connections come from
   a blocking pool (`REDIS_POOL_TIMEOUT_SECONDS`, default 1.0) with idle
