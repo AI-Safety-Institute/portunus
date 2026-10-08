@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_FEDERATION_ROLE_PATH_PREFIX = "/portunus-fed/"
 
 
+# Credential-carrying headers left out of audit header capture; the default
+# the proxy's entrypoint used up to 0.11.0, now read by the backend.
+DEFAULT_KNOWN_AUTH_HEADERS = "authorization,x-api-key,x-goog-api-key,api-key"
+
+
+def _parse_header_names(value: str) -> frozenset[str]:
+    """Parse a comma-separated list of header names into a lower-cased set."""
+    return frozenset(name.strip().lower() for name in value.split(",") if name.strip())
+
+
 class RedisConfig(BaseModel):
     """Redis configuration settings.
 
@@ -298,6 +308,19 @@ class GrpcConfig(BaseModel):
         le=100.0,
         allow_inf_nan=False,
     )
+    publish_blocking_timeout_seconds: float = Field(
+        default=5.0,
+        description=(
+            "Bound on every blocking publish submit issued from the "
+            "ext_proc stream path (headers, trailers, metadata, WS "
+            "summary). With a wedged sink the queue never drains; an "
+            "unbounded submit would pin the Process coroutine (and the "
+            "drain's WS-summary flush) forever. On timeout the record is "
+            "dropped and counted (dropped_total + warning) — observable "
+            "loss instead of a wedged stream/drain."
+        ),
+        gt=0.0,
+    )
     proxy_api_key: str = Field(
         default="",
         description=(
@@ -406,6 +429,15 @@ class PortunusConfig(BaseModel):
     api_key_prefix: str = Field(
         default="Bearer ",
         description="Prefix to use for the API key",
+    )
+    known_auth_headers: frozenset[str] = Field(
+        default=frozenset(DEFAULT_KNOWN_AUTH_HEADERS.split(",")),
+        description=(
+            "Lower-cased names of headers that carry credentials and are left "
+            "out of audit header capture (KNOWN_AUTH_HEADERS, comma-separated). "
+            "The configured api_key_header and the header the upstream "
+            "credential is written to are always excluded as well."
+        ),
     )
     proxy_header_prefix: str = Field(
         default="portunus",
@@ -521,6 +553,9 @@ def get_config() -> PortunusConfig:
         publish_workers=int(os.environ.get("GRPC_PUBLISH_WORKERS", "1")),
         publish_batch_size=int(os.environ.get("GRPC_PUBLISH_BATCH_SIZE", "3000")),
         publish_coalesce_ms=float(os.environ.get("GRPC_PUBLISH_COALESCE_MS", "5")),
+        publish_blocking_timeout_seconds=float(
+            os.environ.get("GRPC_PUBLISH_BLOCKING_TIMEOUT_SECONDS", "5.0")
+        ),
         proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
         proxy_api_key_optional=(
             os.environ.get("GRPC_PROXY_API_KEY_OPTIONAL", "false").lower() == "true"
@@ -552,6 +587,9 @@ def get_config() -> PortunusConfig:
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
+        known_auth_headers=_parse_header_names(
+            os.environ.get("KNOWN_AUTH_HEADERS", DEFAULT_KNOWN_AUTH_HEADERS)
+        ),
         proxy_header_prefix=os.environ.get("PORTUNUS_HEADER_PREFIX", "portunus"),
         redis=redis,
         aws=aws,
