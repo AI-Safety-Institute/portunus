@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   response bodies already did, so `application/vnd.amazon.eventstream` request
   bodies decode.
 
+### Removed
+- AWS X-Ray tracing: the `aws-xray-sdk` dependency, Envoy's X-Ray tracer,
+  `proxy/xray.json`, the docker-compose X-Ray daemon and the `AWS_XRAY_*` /
+  `XRAY_SAMPLING_RATE` settings. An inbound `x-amzn-trace-id` `Root=` id is
+  still attached to log lines and REST error responses.
+
 ## [0.11.0] - 2026-10-02
 
 ### Added

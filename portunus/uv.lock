@@ -247,19 +247,6 @@ wheels = [
 ]
 
 [[package]]
-name = "aws-xray-sdk"
-version = "2.15.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "botocore" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/14/25/0cbd7a440080def5e6f063720c3b190a25f8aa2938c1e34415dc18241596/aws_xray_sdk-2.15.0.tar.gz", hash = "sha256:794381b96e835314345068ae1dd3b9120bd8b4e21295066c37e8814dbb341365", size = 76315, upload-time = "2025-10-29T20:59:45Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/c3/f30a7a63e664acc7c2545ca0491b6ce8264536e0e5cad3965f1d1b91e960/aws_xray_sdk-2.15.0-py2.py3-none-any.whl", hash = "sha256:422d62ad7d52e373eebb90b642eb1bb24657afe03b22a8df4a8b2e5108e278a3", size = 103228, upload-time = "2025-10-29T21:00:24.12Z" },
-]
-
-[[package]]
 name = "boto3"
 version = "1.41.5"
 source = { registry = "https://pypi.org/simple" }
@@ -1158,7 +1145,6 @@ source = { editable = "." }
 dependencies = [
     { name = "aiobotocore" },
     { name = "async-timeout" },
-    { name = "aws-xray-sdk" },
     { name = "boto3" },
     { name = "brotli" },
     { name = "contextvars" },
@@ -1189,7 +1175,6 @@ dev = [
 requires-dist = [
     { name = "aiobotocore", specifier = ">=2.13.0,<3" },
     { name = "async-timeout", specifier = ">=4.0.3,<5" },
-    { name = "aws-xray-sdk", specifier = ">=2.14.0,<3" },
     { name = "boto3", specifier = ">=1.34.144,<2" },
     { name = "brotli", specifier = ">=1.1.0,<2" },
     { name = "contextvars", specifier = "~=2.4" },

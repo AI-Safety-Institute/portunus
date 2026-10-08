@@ -11,12 +11,10 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-# aws_xray_sdk.core is imported via XRayService
-from aws_xray_sdk.core.utils import stacktrace
 from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
 from pydantic import BaseModel, Field
 
-from portunus.config import config  # noqa: E402 — also used by XRayService
+from portunus.config import config
 from portunus.exceptions import (
     AuthenticationError,
     CredentialsError,
@@ -24,7 +22,7 @@ from portunus.exceptions import (
     PayloadError,
     UpstreamServiceError,
 )
-from portunus.logging import LoggingMiddleware
+from portunus.logging import LoggingMiddleware, get_trace_id
 from portunus.models import (
     AuthPayload,
     HeadersPayload,
@@ -37,7 +35,6 @@ from portunus.services.auth_service import AuthService
 from portunus.services.cache_service import CacheService
 from portunus.services.publish_service import PublishService
 from portunus.services.state_service import StateService
-from portunus.services.xray_service import XRayService
 from portunus.util import (
     chunk_body_data,
     generate_iso_timestamp,
@@ -50,7 +47,6 @@ state_service = StateService()
 cache_service = CacheService(state_service=state_service)
 publish_service = PublishService(state_service=state_service)
 auth_service = AuthService(cache_service=cache_service)
-xray_service = XRayService()
 
 common_router = APIRouter()
 portunus_router = APIRouter()
@@ -106,7 +102,6 @@ async def authorise(
     Args:
         request: The FastAPI request object
         response: The FastAPI response object for setting status codes
-        segment: The current X-Ray segment for tracing
 
     Returns:
         AuthorizationResponse: On success, contains the API key and request ID
@@ -120,8 +115,7 @@ async def authorise(
         503: Service unavailable - a dependency could not be reached, or the
             request timed out
     """
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
 
     try:
@@ -160,17 +154,13 @@ async def authorise(
             # There are some synchronous actions happening which can succeed even
             # if the timeout is hit
             except TimeoutError as e:
-                # Add exception to X-Ray trace for visibility
-                # but don't fail the whole request
-                segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+                # Don't fail the whole request
                 logger.critical(
                     f"Publishing metadata to kinesis timeout out for {trace_id}: {e}, ",
                     "although may have succeeded",
                 )
             except Exception as e:
-                # Add exception to X-Ray trace for visibility
-                # but don't fail the whole request
-                segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
+                # Don't fail the whole request
                 logger.critical(
                     f"Failed to publish metadata to Kinesis for {trace_id}: {e}"
                 )
@@ -202,13 +192,11 @@ async def authorise(
     except TimeoutError as e:
         reason = str(e) or "request deadline exceeded"
         logger.critical(f"Authorization processing timed out for {trace_id}: {reason}")
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         response.status_code = 503
         return ErrorResponse(
             message="Authorization timed out. Proxy overloaded.", debug_id=trace_id
         )
     except Exception as e:
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         logger.error(f"Unexpected error in authorise: {e}")
         response.status_code = 500
         return ErrorResponse(message="Internal server error", debug_id=trace_id)
@@ -221,8 +209,7 @@ async def log_request_headers(
     response: Response,
 ) -> Optional[ErrorResponse]:
     """Store request headers."""
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Kinesis for long-term storage
@@ -232,7 +219,6 @@ async def log_request_headers(
             timestamp=content.get_iso_timestamp(),
         )
     except Exception as e:
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         logger.critical(f"Kinesis publishing failed for request headers: {e}")
         response.status_code = 500
         return ErrorResponse(message="Request headers storage error", debug_id=trace_id)
@@ -248,8 +234,7 @@ async def log_request_body(
     response: Response,
 ) -> Optional[ErrorResponse]:
     """Store request body as raw bytes."""
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     body_bytes = await request.body()
     # Body endpoints receive raw binary data, so timestamp must be generated server-side
@@ -280,7 +265,6 @@ async def log_request_body(
                 num_chunks=1,
             )
     except Exception as e:
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         logger.critical(f"Kinesis publishing failed for request body: {e}")
         response.status_code = 500
         return ErrorResponse(message="Request body storage error", debug_id=trace_id)
@@ -296,8 +280,7 @@ async def log_request_trailers(
     response: Response,
 ) -> Optional[ErrorResponse]:
     """Store request trailers."""
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Kinesis
@@ -307,7 +290,6 @@ async def log_request_trailers(
             timestamp=content.get_iso_timestamp(),
         )
     except Exception as e:
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         logger.critical(f"Kinesis publishing failed for request trailers: {e}")
         response.status_code = 500
         return ErrorResponse(
@@ -325,8 +307,7 @@ async def log_response_headers(
     response: Response,
 ) -> Optional[ErrorResponse]:
     """Store response headers."""
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Kinesis
@@ -336,7 +317,6 @@ async def log_response_headers(
             timestamp=content.get_iso_timestamp(),
         )
     except Exception as e:
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         logger.critical(f"Kinesis publishing failed for response headers: {e}")
         response.status_code = 500
         return ErrorResponse(
@@ -354,8 +334,7 @@ async def log_response_body(
     response: Response,
 ) -> Optional[ErrorResponse]:
     """Store response body as raw bytes."""
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     body_bytes = await request.body()
     # Body endpoints receive raw binary data, so timestamp must be generated server-side
@@ -386,7 +365,6 @@ async def log_response_body(
                 num_chunks=1,
             )
     except Exception as e:
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         logger.critical(f"Kinesis publishing failed for response body: {e}")
         response.status_code = 500
         return ErrorResponse(message="Response body storage error", debug_id=trace_id)
@@ -402,8 +380,7 @@ async def log_response_trailers(
     response: Response,
 ) -> Optional[ErrorResponse]:
     """Store response trailers."""
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Processing authorization request with trace_id: {trace_id}")
     try:
         # Publish to Kinesis
@@ -413,7 +390,6 @@ async def log_response_trailers(
             timestamp=content.get_iso_timestamp(),
         )
     except Exception as e:
-        segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
         logger.critical(f"Kinesis publishing failed for response trailers: {e}")
         response.status_code = 500
         return ErrorResponse(
@@ -448,8 +424,7 @@ async def ws_relay(websocket: WebSocket, path: str):
         )
         return
 
-    segment = xray_service.recorder.current_segment()
-    request_id = segment.trace_id if segment else str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
 
     task = asyncio.current_task()
     if task is not None:
@@ -493,8 +468,7 @@ async def flush_cache(
     Returns:
         CacheFlushResponse on success, ErrorResponse on failure.
     """
-    segment = xray_service.recorder.current_segment()
-    trace_id = segment.trace_id if segment else "No-Trace-Id"
+    trace_id = get_trace_id()
     logger.info(f"Cache flush requested, trace_id: {trace_id}")
 
     try:

@@ -56,30 +56,6 @@ class RowLike(Protocol):
         ...
 
 
-@dataclass
-class ParsedArn:
-    """Result of parsing an AWS ARN."""
-
-    account_id: str
-    path_parts: Optional[List[str]] = None
-
-
-@dataclass
-class RequestSummary:
-    """Summary of request data for notifications."""
-
-    headers: Dict[str, str]
-    size: int
-
-
-@dataclass
-class ResponseSummary:
-    """Summary of response data for notifications."""
-
-    headers: Dict[str, str]
-    size: int
-
-
 def decode_base64(value: str) -> bytes:
     """Decode a base64-encoded string to bytes, preserving binary data."""
     return base64.b64decode(value)
@@ -384,19 +360,6 @@ class AwsCredentials:
         delta = (self.expiration - datetime.now(timezone.utc)).total_seconds()
         return max(0, int(delta))
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary representation.
-
-        Returns:
-            Dict[str, Any]: Dictionary with credential fields
-        """
-        return {
-            "access_key_id": self.access_key_id,
-            "secret_access_key": self.secret_access_key,
-            "session_token": self.session_token,
-            "expiration": self.expiration.isoformat() if self.expiration else None,
-        }
-
 
 @dataclass
 class AuthPayload:
@@ -470,21 +433,6 @@ class AuthPayload:
             msg = f"Failed to decode authorization payload: {e}"
             raise PayloadError(msg) from e
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary representation.
-
-        Returns:
-            Dict[str, Any]: Dictionary with payload fields
-        """
-        result = {
-            "credentials": self.credentials.to_dict(),
-            "secret_arn": self.secret_arn,
-            "expiration": None,  # This is typically set when creating temporary creds
-        }
-        if self.target_host:
-            result["target_host"] = self.target_host
-        return result
-
 
 @dataclass
 class PrincipalInfo:
@@ -502,15 +450,6 @@ class PrincipalInfo:
     principal: Optional[str] = None
     session_name: Optional[str] = None
     project: Optional[str] = None
-
-    @classmethod
-    def empty(cls) -> "PrincipalInfo":
-        """Create an empty PrincipalInfo object with default values.
-
-        Returns:
-            PrincipalInfo: An empty principal info object
-        """
-        return cls()
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PrincipalInfo":

@@ -1065,8 +1065,8 @@ class TestGcpTokenExchange:
 
     @pytest.mark.asyncio
     async def test_requests_run_on_the_event_loop_thread(self):
-        # The app's X-Ray context is task-local; a worker thread would have
-        # no segment (or another task's) for the instrumented HTTP client.
+        # Request context is task-local; a worker thread would not see this
+        # request's context (or would see another task's).
         adapter, requests = _gcp_exchange(_google())
 
         await adapter.exchange(PROOF, _gcp_secret())
