@@ -284,6 +284,10 @@ class AuthService:
             async with asyncio.timeout(3):
                 if auth_result.expires_at is None:
                     ttl = payload.credentials.seconds_until_expiration()
+                    # The credential expiry bounds the entry, never past the
+                    # configured cache duration.
+                    if ttl is not None:
+                        ttl = min(ttl, self.cache_service.cache_duration)
                 else:
                     ttl = effective_cache_ttl(
                         cache_duration=self.cache_service.cache_duration,

@@ -373,7 +373,8 @@ class TestAuthenticateWithMintSecrets:
         cache = _cache_backed_by(fake_redis)
         mint = AsyncMock()
         service = _service_for("sk-static", cache, mint)
-        payload = _payload()
+        # Credentials that outlive CACHE_DURATION, so the duration is the bound.
+        payload = _payload(expires_in=timedelta(seconds=cache.cache_duration * 2))
 
         result = await service.authenticate(payload, "req", "api.example.com")
 
