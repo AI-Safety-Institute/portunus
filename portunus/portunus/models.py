@@ -928,6 +928,9 @@ class RequestBodyRecord:
             was split across multiple records. ETL jobs set a 'truncated' flag when
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+
+    A streamed body (``num_chunks=0``) is complete iff its chunk_ids are
+    contiguous from 0 through the record with ``final_chunk=True``.
     """
 
     request_id: str
@@ -937,6 +940,11 @@ class RequestBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    truncated: bool = False
+    final_chunk: bool = False
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS frames
+    # by (request_id, frame_index) to reassemble and disambiguate frames.
+    frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -949,6 +957,9 @@ class RequestBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "truncated": self.truncated,
+            "final_chunk": self.final_chunk,
+            "frame_index": self.frame_index,
         }
 
     @classmethod
@@ -963,6 +974,9 @@ class RequestBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "truncated", "type": "boolean"},
+            {"name": "final_chunk", "type": "boolean"},
+            {"name": "frame_index", "type": "bigint"},
         ]
 
 
@@ -1121,6 +1135,9 @@ class ResponseBodyRecord:
             be known until the final chunk. ETL jobs set a 'truncated' flag when
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+
+    A streamed body (``num_chunks=0``) is complete iff its chunk_ids are
+    contiguous from 0 through the record with ``final_chunk=True``.
     """
 
     request_id: str
@@ -1130,6 +1147,11 @@ class ResponseBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    truncated: bool = False
+    final_chunk: bool = False
+    # Per-direction WS frame ordinal; None for HTTP bodies. Glue keys WS frames
+    # by (request_id, frame_index) to reassemble and disambiguate frames.
+    frame_index: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -1142,6 +1164,9 @@ class ResponseBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "truncated": self.truncated,
+            "final_chunk": self.final_chunk,
+            "frame_index": self.frame_index,
         }
 
     @classmethod
@@ -1156,6 +1181,9 @@ class ResponseBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "truncated", "type": "boolean"},
+            {"name": "final_chunk", "type": "boolean"},
+            {"name": "frame_index", "type": "bigint"},
         ]
 
 

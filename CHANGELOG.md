@@ -23,6 +23,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   process, `AUTH_FALLBACK_MAX_CONCURRENT` (default 32); requests that cannot
   get a slot within `AUTH_FALLBACK_ACQUIRE_TIMEOUT_S` (default 1.0) get 503,
   so a Redis outage does not become an STS stampede.
+- Publisher tuning: `GRPC_PUBLISH_WORKERS` (default 1),
+  `GRPC_PUBLISH_BATCH_SIZE` (records drained per batch, default 3000, max
+  3000) and `GRPC_PUBLISH_COALESCE_MS` (default 5); and
+  `GRPC_AUDIT_DROP_ON_PRESSURE=true`, which drops audit records instead of
+  waiting when the publish queue is full.
 
 ### Changed
 - `ext_authz` sees request headers only and never the body, so request bodies
@@ -33,6 +38,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Authentication error bodies are `{"error": {"message", "request_id"}}`
   (`request_id` replaces `x_amzn_trace_id`), and the request id is returned in
   the `x-portunus-debug-id` response header instead of `X-Amzn-Trace-Id`.
+- Audit records are batched by a bounded publish queue and packed,
+  newline-delimited, into shared Kinesis Data Streams records (up to 256 KiB
+  or 500 audit records per KDS record, the `RecordDeAggregation` limit) sent
+  with `PutRecords` (up to 500 KDS records / 5 MiB per call), instead of one
+  `PutRecord` per audit record. Consumers' Firehose must run JSON
+  `RecordDeAggregation` before partitioning; enable it before rollout. Grant
+  `kinesis:PutRecords`.
 - AWS clients for STS and Secrets Manager are pooled per credential set
   instead of being created on every cache miss. Redis connections come from
   a blocking pool (`REDIS_POOL_TIMEOUT_SECONDS`, default 1.0) with idle
