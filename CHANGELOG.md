@@ -33,6 +33,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   process, `AUTH_FALLBACK_MAX_CONCURRENT` (default 32); requests that cannot
   get a slot within `AUTH_FALLBACK_ACQUIRE_TIMEOUT_S` (default 1.0) get 503,
   so a Redis outage does not become an STS stampede.
+- Audit isolation options: `GRPC_AUDIT_PORT` (backend) with
+  `PORTUNUS_AUDIT_GRPC_PORT` (proxy) serves `ext_proc` on its own port;
+  `GRPC_ROLE=auth` / `audit` splits authentication and audit into separate
+  processes. Defaults keep one process and one port. The image health check
+  probes the port(s) the process serves, and Envoy's `/healthz` requires the
+  audit listener as well when it has its own port.
 - Publisher tuning: `GRPC_PUBLISH_WORKERS` (default 1),
   `GRPC_PUBLISH_BATCH_SIZE` (records drained per batch, default 3000, max
   3000) and `GRPC_PUBLISH_COALESCE_MS` (default 5); and
