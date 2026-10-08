@@ -25,6 +25,29 @@ static_resources:
           # x-request-id (below) and the JSON access log. There is no span
           # exporter to configure.
           generate_request_id: true
+          # Decide whether a request comes from the edge by the connection
+          # peer, not by client-supplied headers. Envoy only regenerates
+          # x-request-id for edge requests; with use_remote_address unset
+          # none ever is, so a client could pick the id every audit record,
+          # log line and response is keyed on (a constant id collapses its
+          # records into one group). Envoy also appends the peer to
+          # x-forwarded-for and strips client-sent x-envoy-* headers.
+          use_remote_address: true
+          # No peer address is internal: an internal request keeps its
+          # x-request-id, and the ALB and the docker bridge both have private
+          # addresses. Envoy 1.38 treats an unset or EMPTY internal_address_config
+          # as "use the legacy rule" (RFC1918 and loopback peers are internal),
+          # so list one impossible address to switch that rule off.
+          internal_address_config:
+            cidr_ranges:
+            - address_prefix: 0.0.0.0
+              prefix_len: 32
+          # Trusted proxies in front of Envoy: the client address for the
+          # access log and x-envoy-external-address is that many entries
+          # from the right of x-forwarded-for. 1 behind the ALB (the
+          # entrypoint default), 0 when Envoy is reached directly
+          # (docker-compose).
+          xff_num_trusted_hops: ${XFF_NUM_TRUSTED_HOPS}
           # Return that id on every response (the key of the access log,
           # Portunus's log lines and every audit record) so a client can
           # correlate a response with its audit trail. Replaces the

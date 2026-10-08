@@ -20,6 +20,16 @@ case "$WS_MAX_CONNECTION_LIFETIME" in
     ;;
 esac
 
+# Trusted proxies in front of Envoy (HCM xff_num_trusted_hops): 1 for the
+# ALB in production, 0 when clients reach Envoy directly.
+export XFF_NUM_TRUSTED_HOPS=${XFF_NUM_TRUSTED_HOPS:-1}
+case "$XFF_NUM_TRUSTED_HOPS" in
+  ""|*[!0-9]*|0[0-9]*)
+    echo "[entrypoint] FATAL: XFF_NUM_TRUSTED_HOPS must be a non-negative integer" >&2
+    exit 1
+    ;;
+esac
+
 # Host CPU count can exceed the container's CPU allocation.
 ENVOY_CONCURRENCY=${ENVOY_CONCURRENCY:-1}
 case "$ENVOY_CONCURRENCY" in
