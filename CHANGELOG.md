@@ -60,6 +60,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Every response carries Envoy's `x-request-id`, the id under which the
   access log, Portunus's log lines and the audit records file the request;
   it replaces the `X-Amzn-Trace-Id` the Lua filter added to proxied responses.
+- The proxy decides whether a request comes from the edge by its connection
+  peer (`use_remote_address`), with `XFF_NUM_TRUSTED_HOPS` trusted proxies in
+  front (default 1, the load balancer; set 0 when clients reach Envoy
+  directly). Envoy therefore replaces a client-supplied `x-request-id` with
+  its own, appends the peer address to `x-forwarded-for` and strips
+  client-sent `x-envoy-*` headers.
 - WebSocket upgrades go straight from Envoy to `WS_TARGET_HOST` (default
   `TARGET_HOST`) after the same `Check`. Connections last at most
   `WS_MAX_CONNECTION_LIFETIME` seconds (default 3300, unchanged), which now

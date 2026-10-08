@@ -164,6 +164,56 @@ def test_ws_lifetime_cap_defaults_to_the_relay_value_and_is_configurable(
         assert _ws_route_max_stream_duration(proxy.admin_port) == expected
 
 
+def _hcm_setting(admin_port: int, key: str):
+    response = requests.get(
+        f"http://127.0.0.1:{admin_port}/config_dump?resource=static_listeners",
+        timeout=2,
+    )
+    response.raise_for_status()
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if key in node:
+                found.append(node[key])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(response.json())
+    assert len(found) == 1, found
+    return found[0]
+
+
+@pytest.mark.parametrize(("configured", "expected"), [(None, 1), ("0", None), ("2", 2)])
+def test_trusted_hop_count_defaults_to_one_load_balancer(
+    entrypoint_image, configured, expected
+):
+    """``XFF_NUM_TRUSTED_HOPS`` reaches the HCM; the dump omits a zero value."""
+    overrides = {} if configured is None else {"XFF_NUM_TRUSTED_HOPS": configured}
+    with running_proxy(entrypoint_image, overrides) as proxy:
+        proxy.wait_for_ping()
+        assert _hcm_setting(proxy.admin_port, "use_remote_address") is True
+        response = requests.get(
+            f"http://127.0.0.1:{proxy.admin_port}/config_dump?resource=static_listeners",
+            timeout=2,
+        )
+        assert ("xff_num_trusted_hops" in response.text) == (expected is not None)
+        if expected is not None:
+            assert _hcm_setting(proxy.admin_port, "xff_num_trusted_hops") == expected
+
+
+@pytest.mark.parametrize("hops", ["-1", "01", "one"])
+def test_invalid_trusted_hop_count_prevents_startup(entrypoint_image, hops):
+    with running_proxy(entrypoint_image, {"XFF_NUM_TRUSTED_HOPS": hops}) as proxy:
+        result = subprocess.run(
+            ["docker", "wait", proxy.name], capture_output=True, text=True, timeout=8
+        )
+        assert result.stdout.strip() == "1"
+
+
 # An empty value means "use the default", like the other ${X:-default} settings.
 @pytest.mark.parametrize("lifetime", ["0", "-1", "55m"])
 def test_invalid_ws_lifetime_cap_prevents_startup(entrypoint_image, lifetime):

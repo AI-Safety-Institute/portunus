@@ -78,6 +78,9 @@ services:
       WS_TARGET_HOST_TRANSPORT_SOCKET: "null"
       ENVOY_LOG_LEVEL: info
       PORTUNUS_API_KEY_OPTIONAL: "true"
+      # Clients reach Envoy directly here; in production the ALB is one
+      # trusted hop in front (the image default).
+      XFF_NUM_TRUSTED_HOPS: "0"
       # Uncomment the three env vars below to
       # enable rate-limiting
       # RATE_LIMIT_PERCENT_ENABLED: 100

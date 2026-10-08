@@ -134,6 +134,44 @@ def test_credential_headers_are_not_logged(
         assert "client-supplied" not in value
 
 
+@pytest.mark.parametrize("docker_setup", ["xyz"], indirect=True)
+def test_client_supplied_request_id_is_not_trusted(
+    api_key_prefix: str, api_key_header: str, docker_setup
+):
+    """A client cannot choose the id its audit records are filed under.
+
+    A constant client-supplied ``x-request-id`` would collapse every record
+    into one group (the 2026-07-02 joined-logs failure mode, made
+    client-controllable). Envoy must mint its own.
+    """
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    spoofed = f"spoof-{uuid.uuid4()}"
+    marker = f"marker-{uuid.uuid4()}"
+    response = requests.get(
+        "http://localhost:8888/get",
+        headers={
+            api_key_header: f"{api_key_prefix}{payload}",
+            "x-request-id": spoofed,
+            "user-agent": marker,
+        },
+    )
+    assert response.status_code == 200, response.content
+
+    minted = response.headers["x-request-id"]
+    assert minted != spoofed
+    uuid.UUID(minted)
+    record = _wait_for_request_headers_record(minted)
+    logged = {
+        name.lower(): base64.b64decode(value).decode()
+        for name, value in record["raw_headers"].items()
+    }
+    assert logged["user-agent"] == marker
+    assert all(
+        record.get("request_id") != spoofed
+        for record in read_kinesis_records("portunus-stream-request-headers")
+    )
+
+
 # Manually test with:
 # curl -X POST http://localhost:8888/post -H "Authorization: Bearer eyJjcmVkZW50aWFscyI6eyJhY2Nlc3Nfa2V5X2lkIjoiQUtJQVRFU1QiLCJzZWNyZXRfYWNjZXNzX2tleSI6IlNFQ1JFVFRFU1QiLCJzZXNzaW9uX3Rva2VuIjoiVEVTVFRPS0VOIn0sInNlY3JldF9hcm4iOiJhcm46YXdzOnNlY3JldHNtYW5hZ2VyOnVzLWVhc3QtMToxMjM0NTY3ODkwMTI6c2VjcmV0OnRlc3Qtc2VjcmV0In0=" -H "Content-Type: application/json" -d '{"key3":   "value3"   , "key1":"value1","key2" : "value2" }' # noqa: E501
 @pytest.mark.parametrize(
