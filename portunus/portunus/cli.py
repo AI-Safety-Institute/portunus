@@ -17,6 +17,12 @@ DEFAULT_SESSION_NAME = "portunus"
 # STS's RoleSessionName rule; the charset is ASCII, so re.ASCII keeps \w from
 # admitting more.
 _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
+# Path segments are printable ASCII other than "/".
+_ROLE_ARN = re.compile(
+    r"^arn:aws[a-z-]*:iam::(\d{12}):role/"
+    r"(?:[\x21-\x2e\x30-\x7e]+/)*([\w+=,.@-]{1,64})$",
+    re.ASCII,
+)
 
 
 def _build_default_policy(
@@ -71,11 +77,40 @@ def _session_name(value: str) -> str:
     return value
 
 
+def _role_arn(value: str) -> str:
+    """Validate an IAM role ARN (argparse ``type``)."""
+    if not _ROLE_ARN.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not an IAM role ARN")
+    return value
+
+
+def _check_caller_role_arn(caller_role_arn: str, caller_arn: str) -> None:
+    """Reject a ``--caller-role-arn`` that is not the caller's own role.
+
+    An assumed-role session ARN carries the role's account and name but not
+    its path, so those two must match.
+
+    Raises:
+        ValueError: The account or role name differs from the caller's.
+    """
+    match = _ROLE_ARN.fullmatch(caller_role_arn)
+    if match is None:
+        raise ValueError(f"{caller_role_arn!r} is not an IAM role ARN")
+    expected = get_role_arn(caller_arn)
+    expected_account, expected_name = expected.split(":")[4], expected.rsplit("/", 1)[1]
+    if (match.group(1), match.group(2)) != (expected_account, expected_name):
+        raise ValueError(
+            f"--caller-role-arn {caller_role_arn} is not the role of the current "
+            f"session ({caller_arn})"
+        )
+
+
 def encode_credentials(
     secret_arn: str,
     policy: str | None = None,
     federation_role_path: str = DEFAULT_FEDERATION_ROLE_PATH_PREFIX,
     session_name: str = DEFAULT_SESSION_NAME,
+    caller_role_arn: str | None = None,
 ) -> str:
     """Assume role with scoped-down session policy and encode credentials for the proxy.
 
@@ -88,13 +123,21 @@ def encode_credentials(
         federation_role_path: IAM path of the federation roles the default
             policy allows assuming.
         session_name: ``RoleSessionName`` for assuming the caller's own role.
+        caller_role_arn: The caller's own role ARN, for roles with an IAM
+            path. By default it is rebuilt from the session ARN, which has no
+            path.
 
     Returns:
         Base64-encoded payload suitable for the Authorization header.
+
+    Raises:
+        ValueError: ``caller_role_arn`` is not the current session's role.
     """
     sts = boto3.client("sts")
     caller_arn = sts.get_caller_identity()["Arn"]
-    role_arn = get_role_arn(caller_arn)
+    if caller_role_arn is not None:
+        _check_caller_role_arn(caller_role_arn, caller_arn)
+    role_arn = caller_role_arn or get_role_arn(caller_arn)
     account_id, _ = extract_arn_parts(caller_arn)
 
     policy_json = (
@@ -150,6 +193,14 @@ def main() -> None:
             f"(default: {DEFAULT_SESSION_NAME})"
         ),
     )
+    encode_cmd.add_argument(
+        "--caller-role-arn",
+        type=_role_arn,
+        help=(
+            "ARN of the caller's own role, needed when it has an IAM path; "
+            "otherwise it is rebuilt from the session ARN"
+        ),
+    )
 
     args = parser.parse_args()
     if not args.command:
@@ -160,14 +211,17 @@ def main() -> None:
         policy_json = None
         if args.policy:
             policy_json = _load_policy(args.policy)
-        print(
-            encode_credentials(
+        try:
+            payload = encode_credentials(
                 args.secret_arn,
                 policy=policy_json,
                 federation_role_path=args.federation_role_path,
                 session_name=args.session_name,
+                caller_role_arn=args.caller_role_arn,
             )
-        )
+        except ValueError as e:
+            encode_cmd.error(str(e))
+        print(payload)
 
 
 if __name__ == "__main__":
