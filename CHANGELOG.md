@@ -37,6 +37,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   process, `AUTH_FALLBACK_MAX_CONCURRENT` (default 32); requests that cannot
   get a slot within `AUTH_FALLBACK_ACQUIRE_TIMEOUT_S` (default 1.0) get 503,
   so a Redis outage does not become an STS stampede.
+- CloudWatch EMF metrics: `Check` outcomes and latency, full-authentication
+  volume, latency and shedding, Redis cache hits, misses and errors, dropped
+  and undelivered audit records, Kinesis throttling and other Kinesis put
+  errors, publish-queue depth and event-loop lag. They are aggregated in
+  process and flushed once per `METRICS_FLUSH_INTERVAL_SECONDS` (default 60).
+  Configure with `METRICS_ENABLED` (default off), `METRICS_NAMESPACE` and
+  `METRICS_SERVICE_NAME`; the only dimensions are `ServiceName` and `Role`.
 - Audit isolation options: `GRPC_AUDIT_PORT` (backend) with
   `PORTUNUS_AUDIT_GRPC_PORT` (proxy) serves `ext_proc` on its own port;
   `GRPC_ROLE=auth` / `audit` splits authentication and audit into separate
@@ -134,8 +141,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Removed
 - AWS X-Ray tracing: the `aws-xray-sdk` dependency, Envoy's X-Ray tracer,
   `proxy/xray.json`, the docker-compose X-Ray daemon and the `AWS_XRAY_*` /
-  `XRAY_SAMPLING_RATE` settings. An inbound `x-amzn-trace-id` `Root=` id is
-  still attached to log lines and REST error responses.
+  `XRAY_SAMPLING_RATE` settings. `x-request-id` still joins the access log,
+  structured logs and audit records, and an inbound `x-amzn-trace-id` `Root=`
+  id is still attached to log lines and REST error responses; latency
+  breakdowns now come from the access log's timing fields and the EMF latency
+  distributions.
 - Settings with no remaining use: `UVICORN_WORKERS`, `CORS_ALLOWED_ORIGINS`,
   `PORTUNUS_API_KEY_HEADER`, `TARGET_HOST_USE_TLS` and
   `PORTUNUS_TRANSPORT_SOCKET`.
