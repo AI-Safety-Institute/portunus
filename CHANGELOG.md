@@ -11,6 +11,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Portunus's own authentication errors, such as "API key is not valid for
   target host", keep their message instead of being re-wrapped as
   "Authentication failed: …".
+- The credential expiry is read from the payload's top-level `expiration`,
+  where `encode-credentials` writes it. It was only read from inside
+  `credentials`, so no cache entry was ever bounded by it.
 - Joined log records decode request bodies with the request content type, as
   response bodies already did, so `application/vnd.amazon.eventstream` request
   bodies decode.
