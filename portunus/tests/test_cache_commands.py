@@ -132,13 +132,3 @@ async def test_real_pool_wait_expiry_surfaces_as_a_timeout(monkeypatch):
 
     assert type(exc_info.value) is TimeoutError
     assert isinstance(exc_info.value.__cause__, ConnectionError)
-
-
-@pytest.mark.asyncio
-async def test_readiness_still_probes_redis(cache_endpoint):
-    cache, endpoint = cache_endpoint
-    assert await cache.health_check()
-    endpoint.failures["PING"] = deque([ConnectionError("Disconnected")])
-    assert not await cache.health_check()
-    assert await cache.health_check()
-    assert endpoint.commands == ["PING", "PING", "PING"]

@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+Envoy now delegates authentication and audit to Portunus over gRPC, and the
+REST service, Lua filter and Python WebSocket relay are gone. The proxy and
+backend images must be deployed together, with the configuration changes
+below. Request signing was already removed in 0.11.0.
+
 ### Added
 - A gRPC backend (`python -m portunus.grpc.server`, also the `portunus-server`
   script) hosting an Envoy `ext_authz` `Check` servicer, an `ext_proc`
@@ -61,6 +66,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   the host CPU count; set it to the CPU allocated to Envoy.
 
 ### Changed
+- `POST /cache/flush` is removed; flush the auth cache with the
+  `portunus flush-auth-cache` CLI subcommand instead (see the
+  [runbook](docs/runbooks/flush-auth-cache.md)).
 - `ext_authz` sees request headers only and never the body, so request bodies
   stream end to end without buffering. Authentication fails closed: Portunus
   answers within 9 s (504 after that) and Envoy's `ext_authz` timeout is
@@ -139,14 +147,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   CVE-2026-5928 on both supported Linux architectures.
 
 ### Removed
+- The FastAPI service (`/authorise`, `/log/*`, `/cache/flush`), the Envoy Lua
+  filter and its `proxy_utils` library, and the Python WebSocket relay.
 - AWS X-Ray tracing: the `aws-xray-sdk` dependency, Envoy's X-Ray tracer,
   `proxy/xray.json`, the docker-compose X-Ray daemon and the `AWS_XRAY_*` /
   `XRAY_SAMPLING_RATE` settings. `x-request-id` still joins the access log,
   structured logs and audit records, and an inbound `x-amzn-trace-id` `Root=`
-  id is still attached to log lines and REST error responses; latency
-  breakdowns now come from the access log's timing fields and the EMF latency
-  distributions.
-- Settings with no remaining use: `UVICORN_WORKERS`, `CORS_ALLOWED_ORIGINS`,
+  id is still attached to log lines; latency breakdowns now come from the
+  access log's timing fields and the EMF latency distributions.
+- Settings with no remaining use: `UVICORN_WORKERS`, the relay's `WS_*`
+  limits (`WS_MAX_MESSAGE_SIZE`, `WS_MAX_CONNECTIONS`, `WS_DRAIN_TIMEOUT`;
+  `WS_TARGET_HOST`, `WS_TARGET_PORT` and `WS_MAX_CONNECTION_LIFETIME` remain,
+  read by the proxy), `CORS_ALLOWED_ORIGINS`,
   `PORTUNUS_API_KEY_HEADER`, `TARGET_HOST_USE_TLS` and
   `PORTUNUS_TRANSPORT_SOCKET`.
 
