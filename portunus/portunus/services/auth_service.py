@@ -33,6 +33,7 @@ from portunus.services.cache_service import CacheService, effective_cache_ttl
 from portunus.services.federation_service import TokenMintService
 from portunus.services.secret_validation_service import SecretValidationService
 from portunus.services.secrets_service import SecretsService
+from portunus.services.state_service import PooledBotoSession, StateService
 
 logger = logging.getLogger("api.access")
 
@@ -63,14 +64,37 @@ class AuthService:
         validation_service: Optional[SecretValidationService] = None,
         mint_service: Optional[TokenMintService] = None,
     ):
-        """Initialize the AuthService."""
-        self.secrets_service = secrets_service or SecretsService()
+        """Initialize the AuthService.
+
+        When no ``secrets_service`` is injected and the cache service is
+        backed by a real :class:`StateService`, the default
+        :class:`SecretsService` (and this service's own STS calls, which
+        share its ``boto_session``) use the StateService's pooled boto
+        session: AWS clients are then created once per (service, credential
+        set) and reused, instead of paying a fresh aiohttp pool + TLS
+        handshake (~200ms cold, twice) on every auth cache-miss.
+        """
         self.cache_service = cache_service or CacheService()
-        self.validation_service = validation_service or SecretValidationService()
+        if secrets_service is None:
+            state_service = getattr(self.cache_service, "state_service", None)
+            if isinstance(state_service, StateService):
+                secrets_service = SecretsService(
+                    boto_session=state_service.pooled_boto_session()
+                )
+            else:
+                secrets_service = SecretsService()
+        self.secrets_service = secrets_service
         self.boto_session = self.secrets_service.boto_session
-        self.mint_service = mint_service or TokenMintService(
-            boto_session=self.boto_session
+        self.validation_service = validation_service or SecretValidationService()
+        # Not the pool shim: minting reads the configured region and passes a
+        # retry config to create_client, and each mint's fresh federation
+        # credentials would never reuse a pooled client.
+        mint_session = (
+            self.boto_session.base_session
+            if isinstance(self.boto_session, PooledBotoSession)
+            else self.boto_session
         )
+        self.mint_service = mint_service or TokenMintService(boto_session=mint_session)
         # Per-process single flight for minting: concurrent cache misses on
         # one payload and target wait for a single mint instead of each
         # calling STS and the provider. A lock is dropped once no coroutine
