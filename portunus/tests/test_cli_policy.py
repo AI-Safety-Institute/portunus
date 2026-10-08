@@ -146,34 +146,13 @@ def test_invalid_session_name_is_rejected_before_calling_sts(
     assert sts.assume_role_kwargs == {}
 
 
-def test_caller_role_arn_keeps_the_role_path(
+def test_caller_role_arn_is_assumed_as_given(
     sts: _FakeSts, monkeypatch: pytest.MonkeyPatch
 ):
     role = f"arn:aws:iam::{ACCOUNT}:role/example-callers/ExampleRole"
     _run_encode(monkeypatch, "--caller-role-arn", role)
 
     assert sts.assume_role_kwargs["RoleArn"] == role
-
-
-@pytest.mark.parametrize(
-    "role",
-    [
-        f"arn:aws:iam::{ACCOUNT}:role/example-callers/OtherRole",
-        f"arn:aws:iam::{OTHER_ACCOUNT}:role/example-callers/ExampleRole",
-    ],
-)
-def test_caller_role_arn_must_be_the_session_role(
-    sts: _FakeSts,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture,
-    role: str,
-):
-    with pytest.raises(SystemExit) as excinfo:
-        _run_encode(monkeypatch, "--caller-role-arn", role)
-
-    assert excinfo.value.code == 2
-    assert "is not the role of the current session" in capsys.readouterr().err
-    assert sts.assume_role_kwargs == {}
 
 
 @pytest.mark.parametrize(

@@ -6,9 +6,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
-- `portunus encode-credentials --caller-role-arn` names the caller's own role
-  for roles with an IAM path, which the CLI cannot rebuild from the session
-  ARN. It must match the session's account and role name.
+- `portunus encode-credentials --caller-role-arn` sets the role to assume
+  instead of the caller's own. The default is rebuilt from the session ARN,
+  which has no IAM path, so pass it for caller roles with a path.
 
 ## [0.11.0] - 2026-10-02
 
