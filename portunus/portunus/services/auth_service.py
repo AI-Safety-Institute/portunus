@@ -17,6 +17,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from portunus.config import config
 from portunus.exceptions import (
     AuthenticationError,
+    AuthOverloadedError,
     CredentialsError,
     PayloadError,
     ServiceError,
@@ -29,8 +30,13 @@ from portunus.models import (
     PrincipalInfo,
 )
 from portunus.services.arn_service import parse_identity_from_arn
-from portunus.services.cache_service import CacheService, effective_cache_ttl
+from portunus.services.cache_service import (
+    CacheService,
+    auth_cache_key,
+    effective_cache_ttl,
+)
 from portunus.services.federation_service import TokenMintService
+from portunus.services.local_auth_cache import LocalAuthCache
 from portunus.services.secret_validation_service import SecretValidationService
 from portunus.services.secrets_service import SecretsService
 from portunus.services.state_service import PooledBotoSession, StateService
@@ -63,6 +69,7 @@ class AuthService:
         cache_service: Optional[CacheService] = None,
         validation_service: Optional[SecretValidationService] = None,
         mint_service: Optional[TokenMintService] = None,
+        local_cache: Optional[LocalAuthCache] = None,
     ):
         """Initialize the AuthService.
 
@@ -73,7 +80,21 @@ class AuthService:
         session: AWS clients are then created once per (service, credential
         set) and reused, instead of paying a fresh aiohttp pool + TLS
         handshake (~200ms cold, twice) on every auth cache-miss.
+
+        ``local_cache`` defaults to a :class:`LocalAuthCache` sized from
+        ``config.auth_cache``; pass one with ``ttl_seconds=0`` to disable it.
         """
+        # ``is None``, not ``or``: an empty LocalAuthCache is falsy (__len__).
+        if local_cache is None:
+            local_cache = LocalAuthCache(
+                ttl_seconds=config.auth_cache.local_ttl_seconds,
+                max_entries=config.auth_cache.local_max_entries,
+            )
+        self.local_cache = local_cache
+        self._fallback_slots = asyncio.Semaphore(
+            config.auth_cache.fallback_max_concurrent
+        )
+        self._fallback_acquire_timeout_s = config.auth_cache.fallback_acquire_timeout_s
         self.cache_service = cache_service or CacheService()
         if secrets_service is None:
             state_service = getattr(self.cache_service, "state_service", None)
@@ -164,12 +185,17 @@ class AuthService:
         """
         Authenticate a request using the provided payload.
 
-        Checks the Redis cache first (keyed by the raw payload and the target
-        host). On a miss it verifies the caller with STS, fetches and parses
-        the secret, and either returns the stored key or mints a short-lived
-        token as the secret describes. Stored keys are cached for the
-        configured cache duration; minted tokens for no longer than the token
-        remains valid.
+        Three tiers, cheapest first:
+        1. The in-process L1 cache (:class:`LocalAuthCache`), no I/O.
+        2. Redis, keyed on the raw payload and target host. Concurrent L1
+           misses for one key share a single Redis read (single-flight).
+        3. Full authentication: STS, then the secret from Secrets Manager,
+           which either holds the key or describes a token to mint; the
+           result is written back to Redis and L1.
+
+        Stored keys are cached for at most the configured cache duration and
+        never past the caller's credential expiry; minted tokens for no longer
+        than the token remains valid.
 
         Args:
             payload: The parsed base64-encoded payload from authorization header
@@ -192,10 +218,96 @@ class AuthService:
             TimeoutError: If the cache read times out; the request is rejected
                 rather than falling back to STS and Secrets Manager
         """
-        cached_result = await self._read_cache(payload, target_host)
-        if cached_result:
-            return cached_result
+        if not payload.raw or not self.local_cache.enabled:
+            return await self._authenticate_via_redis(
+                payload, request_id, target_host, key=None
+            )
+        # target_host MUST be part of the key — without it a cache hit
+        # short-circuits validate_secret, which is where the secret's host
+        # restriction is enforced. Same key as Redis.
+        key = auth_cache_key(payload.raw, target_host)
+        return await self.local_cache.get_or_load(
+            key,
+            lambda: self._authenticate_via_redis(
+                payload, request_id, target_host, key=key
+            ),
+        )
 
+    async def _authenticate_via_redis(
+        self,
+        payload: AuthPayload,
+        request_id: str,
+        target_host: Optional[str],
+        *,
+        key: Optional[str],
+    ) -> AuthResult:
+        """Redis lookup, then full authentication; fills L1 when ``key`` is set.
+
+        A Redis timeout rejects the request; any other Redis error is treated
+        as a miss, so full authentication runs under the concurrency cap.
+        """
+        if payload.raw:
+            try:
+                async with asyncio.timeout(5):
+                    cached_result = await self.cache_service.get_cached_auth_result(
+                        payload.raw, target_host
+                    )
+                    if cached_result:
+                        self._remember(key, cached_result, payload)
+                        return cached_result
+            except (TimeoutError, RedisTimeoutError) as e:
+                logger.warning(
+                    f"Cache read timed out during auth for {request_id} "
+                    f"({type(e).__name__}); rejecting rather than falling back to "
+                    "full authentication"
+                )
+                raise TimeoutError("Cache read timed out during authentication") from e
+            except Exception as e:
+                logger.error(f"Cache read error during auth: {type(e).__name__}: {e}")
+
+        auth_result = await self._bounded_full_authenticate(
+            payload, request_id, target_host
+        )
+        self._remember(key, auth_result, payload)
+        return auth_result
+
+    async def _bounded_full_authenticate(
+        self, payload: AuthPayload, request_id: str, target_host: Optional[str]
+    ) -> AuthResult:
+        """Run full authentication under the per-process concurrency cap.
+
+        When Redis wobbles every miss lands here; unbounded, that is one STS
+        and one Secrets Manager call per distinct key per task at once, which
+        is what throttled STS and turned a Redis blip into a 403 storm. Past
+        the cap requests are shed with :class:`AuthOverloadedError` (503).
+        """
+        try:
+            async with asyncio.timeout(self._fallback_acquire_timeout_s):
+                await self._fallback_slots.acquire()
+        except TimeoutError:
+            logger.warning(
+                "Full-auth capacity exhausted; shedding (request_id=%s)", request_id
+            )
+            raise AuthOverloadedError() from None
+        try:
+            return await self._full_authenticate(payload, target_host)
+        finally:
+            self._fallback_slots.release()
+
+    def _remember(
+        self, key: Optional[str], result: AuthResult, payload: AuthPayload
+    ) -> None:
+        if key is None:
+            return
+        # L1 entries must not outlive what the Redis entry may: the credential
+        # expiry, and a minted token's own expiry.
+        self.local_cache.put(key, result, self._cache_ttl(payload, result))
+
+    async def _full_authenticate(
+        self, payload: AuthPayload, target_host: Optional[str]
+    ) -> AuthResult:
+        """STS + Secrets Manager (+ a mint), then best-effort write to Redis."""
+        # If not in cache, proceed with full authentication
         try:
             credentials = payload.credentials
 
