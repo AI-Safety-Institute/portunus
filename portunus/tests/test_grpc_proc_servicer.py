@@ -19,11 +19,15 @@ from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
 from google.protobuf import struct_pb2
 
 from portunus.config import config as portunus_config
+from portunus.grpc.frame_observer import Direction
 from portunus.grpc.proc_servicer import (
+    _PRE_101_MAX_BYTES,
     PortunusProcessServicer,
+    StreamMode,
     _header_value,
     _header_value_bytes,
     _headers_to_dict,
+    _StreamState,
 )
 from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 
@@ -397,6 +401,60 @@ async def test_http_response_body_chunks_are_published_with_their_bytes_intact()
         assert response_bodies[0].payload["body_bytes"] == b"hello world"
     finally:
         await queue.stop()
+
+
+# ---------------------------------------------------------------------------
+# WS-frame helper and pre-101 buffering invariants.
+# ---------------------------------------------------------------------------
+
+
+def _ws_frame(payload: bytes) -> bytes:
+    """Single-fragment, unmasked WS text frame with the given payload."""
+    header = bytes([0x81, len(payload)])  # FIN | text opcode, payload length
+    return header + payload
+
+
+def test_pre_101_buffer_overflow_poisons_stream_instead_of_truncating(caplog):
+    """An over-cap pre-101 chunk poisons the stream rather than truncating.
+
+    Truncating mid-frame would desync the frame parser + zlib state on replay.
+    Poisoning skips observation and records the loss via the truncated counter.
+    """
+    servicer, _publish, _queue = _make_servicer()
+    state = _StreamState(
+        stream_id="stream-pre-101",
+        request_id="req-pre-101",
+        mode=StreamMode.WS_UPGRADE,
+    )
+    chunk = b"x" * (_PRE_101_MAX_BYTES + 17)
+
+    with caplog.at_level(logging.WARNING, logger="api.access"):
+        servicer._buffer_pre_101(state, Direction.REQUEST, chunk)
+
+    # Poisoned, not truncated: buffer cleared, nothing replayable, loss counted.
+    assert state.pre_101_poisoned is True
+    assert state.pre_101_buffer == []
+    assert state.pre_101_bytes == 0
+    assert state.truncated_client_frames == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_101_poisoned_stream_skips_replay_and_observation():
+    """Once poisoned, replay is a no-op and further pre-101 chunks are ignored."""
+    servicer, _publish, _queue = _make_servicer()
+    state = _StreamState(
+        stream_id="stream-pre-101-poison",
+        request_id="req-pre-101-poison",
+        mode=StreamMode.WS_UPGRADE,
+    )
+    servicer._buffer_pre_101(state, Direction.REQUEST, b"x" * (_PRE_101_MAX_BYTES + 1))
+    assert state.pre_101_poisoned is True
+
+    # Replay must not raise or emit anything (buffer already cleared).
+    await servicer._replay_pre_101(state, "2026-01-01T00:00:00Z")
+    # A subsequent under-cap chunk must still be ignored (no re-buffering).
+    servicer._buffer_pre_101(state, Direction.REQUEST, b"small")
+    assert state.pre_101_buffer == []
 
 
 # ---------------------------------------------------------------------------
@@ -873,6 +931,156 @@ def test_header_value_str_remains_lossy_for_free_text_callers():
 
 
 # ---------------------------------------------------------------------------
+# WS frame observation — the servicer parses post-101 WS frames, publishes
+# per-frame body records, and emits one summary record per connection.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ws_tagged_stream_emits_frame_and_summary_records():
+    """A WS-tagged ext_proc stream observes post-upgrade frames and emits a summary."""
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-stream-1",
+                ),
+                _http_headers_message(headers={":status": "101"}, is_request=False),
+                # Server-side WS text frame.
+                _http_body_message(body=_ws_frame(b"hello"), is_request=False),
+            ]
+        )
+
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        resp_body_items = publish.of_kind("response_body")
+        assert any(
+            item.payload.get("body_bytes") == b"hello" for item in resp_body_items
+        ), f"expected decoded frame payload, got {resp_body_items}"
+        summaries = publish.of_kind("ws_summary")
+        assert len(summaries) == 1, summaries
+        record = summaries[0].payload["record"]
+        assert record.request_id == "ws-stream-1"
+        assert record.server_text_frames == 1
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_frames_carry_monotonic_per_direction_frame_index():
+    """Each WS frame gets a distinct per-direction frame_index. Glue keys.
+
+    frames by (request_id, frame_index); without it, identical same-timestamp
+    frames collide on the row key and get dropped by dedup (undercounting).
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-fi-1",
+                ),
+                _http_headers_message(headers={":status": "101"}, is_request=False),
+                # Two identical-payload frames — the case that collides
+                # without frame_index.
+                _http_body_message(body=_ws_frame(b"dup"), is_request=False),
+                _http_body_message(body=_ws_frame(b"dup"), is_request=False),
+            ]
+        )
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        resp = publish.of_kind("response_body")
+        frame_indices = [item.payload.get("frame_index") for item in resp]
+        assert frame_indices == [0, 1], frame_indices
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_http_body_records_have_no_frame_index():
+    """HTTP (non-WS) body records leave frame_index None."""
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={}, is_request=False, request_id="http-1"
+                ),
+                _http_body_message(body=b"plain-http-body", is_request=False),
+            ]
+        )
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        resp = publish.of_kind("response_body")
+        assert resp, "expected a response_body record"
+        assert all(item.payload.get("frame_index") is None for item in resp), resp
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_summary_uses_blocking_submit_on_normal_close():
+    """The summary is the backstop for dropped frame counters."""
+    servicer, publish, queue = _make_servicer()
+    blocking_labels: list[str] = []
+    droppable_labels: list[str] = []
+    original_blocking = queue.submit_blocking
+    original_droppable = queue.submit_droppable
+
+    async def _capture_blocking(task, **kwargs):
+        blocking_labels.append(task.label)
+        await original_blocking(task, **kwargs)
+
+    def _capture_droppable(task):
+        droppable_labels.append(task.label)
+        return original_droppable(task)
+
+    queue.submit_blocking = _capture_blocking  # type: ignore[method-assign]
+    queue.submit_droppable = _capture_droppable  # type: ignore[method-assign]
+
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={},
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="ws-summary-blocking",
+                ),
+                _http_headers_message(headers={":status": "101"}, is_request=False),
+                _http_body_message(body=_ws_frame(b"hello"), is_request=False),
+            ]
+        )
+
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        assert "ws_summary" in blocking_labels
+        assert "ws_summary" not in droppable_labels
+        assert len(publish.of_kind("ws_summary")) == 1
+    finally:
+        await queue.stop()
+
+
+# ---------------------------------------------------------------------------
 # x-portunus-debug-id propagation — the servicer must surface the header
 # verbatim (base64) for every ext_proc stream shape (HTTP,
 # WS upgrade GET) so the integrity checker can correlate it with request_id.
@@ -954,6 +1162,47 @@ async def test_header_carrying_the_upstream_credential_is_never_captured():
         raw = publish.of_kind("request_headers")[0].payload["headers"]
         assert "x-request-id" not in raw
         assert _decoded_header(raw, "content-type") == "application/json"
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_upgrade_request_headers_carry_x_portunus_debug_id():
+    """WS upgrade GET: the WS-tagged stream still emits a request_headers.
+
+    event (the WS route keeps ``request_header_mode: SEND``), so the debug id
+    must land in raw_headers as it does for plain HTTP.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(
+                    headers={
+                        "x-portunus-debug-id": "DEBUG-C",
+                        "upgrade": "websocket",
+                        "connection": "upgrade",
+                        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+                        "sec-websocket-version": "13",
+                    },
+                    is_request=True,
+                    websocket_metadata=True,
+                    request_id="req-ws",
+                )
+            ]
+        )
+
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        published = publish.of_kind("request_headers")
+        assert len(published) == 1
+        assert published[0].request_id == "req-ws"
+        raw = published[0].payload["headers"]
+        assert _decoded_header(raw, "x-portunus-debug-id") == "DEBUG-C"
+        assert _decoded_header(raw, "upgrade") == "websocket"
     finally:
         await queue.stop()
 
@@ -1138,3 +1387,31 @@ async def test_blocking_submits_time_out_instead_of_stalling_process(monkeypatch
     assert elapsed < 1.0
     # Both header records were dropped-with-timeout and counted.
     assert queue.dropped_total == 2
+
+
+@pytest.mark.asyncio
+async def test_ws_summary_submit_times_out_on_wedged_queue(monkeypatch):
+    """The WS-summary submit in Process's ``finally`` is bounded too.
+
+    It runs at stream end (including during drain), so an unbounded put on a
+    wedged sink would pin the drain forever.
+    """
+    monkeypatch.setattr(portunus_config.grpc, "publish_blocking_timeout_seconds", 0.05)
+    servicer, _publish, queue = _make_servicer(queue_maxsize=1)
+    state = _StreamState(
+        stream_id="ws-wedged",
+        request_id="ws-wedged",
+        mode=StreamMode.WS_UPGRADE,
+    )
+    assert (
+        await queue.submit_blocking(
+            PublishTask(build=lambda: ("body", b"{}\n"), label="filler")
+        )
+        is True
+    )
+
+    async with asyncio.timeout(1.0):
+        await servicer._emit_ws_summary(state, droppable=False)
+
+    assert state.summary_emitted is True
+    assert queue.dropped_total == 1  # the summary was shed, counted, logged

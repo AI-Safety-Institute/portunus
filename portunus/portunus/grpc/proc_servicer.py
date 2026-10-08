@@ -1,6 +1,8 @@
 """Envoy ``ext_proc`` v3 Process servicer.
 
-Publishes per-request headers, trailers, and body chunks to Kinesis.
+Publishes per-request headers, trailers, and body chunks to Kinesis; for
+upgraded WebSocket streams, post-101 bytes are parsed through
+:class:`FrameObserver` into per-frame records plus a ``WSSummaryRecord``.
 
 Envoy runs the filter with ``observability_mode: true``, so
 ``ProcessingResponse`` messages are unnecessary and a stream failure here keeps
@@ -13,7 +15,8 @@ import base64
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import AsyncIterator, Optional
 
 import grpc
@@ -23,8 +26,14 @@ from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from google.protobuf.json_format import MessageToDict
 
 from portunus.config import config
-from portunus.grpc.frame_observer import Direction
+from portunus.grpc.frame_observer import (
+    Direction,
+    FrameObserver,
+    ObservedFrame,
+    build_observer,
+)
 from portunus.grpc.proxy_auth import extract_proxy_key, is_valid_proxy_key
+from portunus.models import WSSummaryRecord
 from portunus.request_context import parse_trace_root, request_id_var, set_trace_id
 from portunus.services.publish_queue import BoundedPublishQueue, PublishTask
 from portunus.services.publish_service import PublishService
@@ -33,12 +42,25 @@ from portunus.util import chunk_body_data, generate_iso_timestamp
 logger = logging.getLogger("api.access")
 
 
+# Hard cap on pre-101 buffered bytes per stream (real handshakes need <10 KB).
+_PRE_101_MAX_BYTES = 256 * 1024
+
+_METADATA_NS = "envoy.filters.http.ext_proc"
+_WS_METADATA_KEY = "websocket"
+
 # Namespace ext_authz populates with ``principal_info`` / ``secret_arn``,
 # forwarded via ``metadata_options.forwarding_namespaces``.
 _AUTH_METADATA_NS = "envoy.filters.http.ext_authz"
 _AUTH_PRINCIPAL_INFO_KEY = "principal_info"
 _AUTH_SECRET_ARN_KEY = "secret_arn"
 _AUTH_UPSTREAM_HEADER_KEY = "upstream_auth_header"
+
+
+class StreamMode(Enum):
+    """How a given stream should be observed."""
+
+    HTTP = "http"
+    WS_UPGRADE = "ws_upgrade"
 
 
 @dataclass(slots=True)
@@ -49,14 +71,49 @@ class _StreamState:
     # which would evict a stream and lose its close-time summary record.
     stream_id: str
     request_id: str
+    mode: StreamMode = StreamMode.HTTP
+    observer: Optional[FrameObserver] = None
+    upstream_extensions: Optional[str] = None
     # Header ext_authz wrote the upstream credential to (from its dynamic
     # metadata); excluded from capture whatever its name.
     upstream_auth_header: Optional[str] = None
+    started_at_iso: str = ""
+    started_at_monotonic: float = 0.0
     # Audit consumers reassemble each direction by request_id and chunk_id.
     request_chunk_id: int = 0
     response_chunk_id: int = 0
+    # A WebSocket message can span chunks, so frame_index identifies the message.
+    # HTTP body records leave frame_index unset.
+    request_frame_index: int = 0
+    response_frame_index: int = 0
+    client_frame_counts: dict[str, int] = field(default_factory=dict)
+    server_frame_counts: dict[str, int] = field(default_factory=dict)
+    # Audit-integrity counters (dropped by a saturated publish queue, or
+    # truncated by the deflate cap). Surfaced via WSSummaryRecord at stream end.
+    dropped_client_frames: int = 0
+    dropped_server_frames: int = 0
+    truncated_client_frames: int = 0
+    truncated_server_frames: int = 0
+    close_code: Optional[int] = None
+    close_initiator: Optional[str] = None
+    # Retain bytes and HTTP completion until the upgrade response selects
+    # either the WebSocket observer or ordinary HTTP capture.
+    pre_101_buffer: list[tuple[Direction, bytes, bool]] = field(default_factory=list)
+    pre_101_bytes: int = 0
+    # Set when the pre-101 buffer cap is hit. Truncating raw WS bytes mid-frame
+    # would desync the parser + per-direction zlib inflate state, corrupting
+    # every later frame; instead poison the stream (skip observation, record the
+    # loss via truncated counters) rather than replay a corrupt prefix.
+    pre_101_poisoned: bool = False
+    pre_101_lost_directions: set[Direction] = field(default_factory=set)
+    # Set when a direction's parser desynced mid-session (malformed frame or
+    # deflate-cap abort). The truncated counter is bumped once at desync so the
+    # WSSummaryRecord reflects the unobserved remainder of that direction.
+    parser_desynced: bool = False
+    response_headers_seen: bool = False
     request_complete: bool = False
     response_complete: bool = False
+    summary_emitted: bool = False
     audit_metadata_published: bool = False
 
 
@@ -118,11 +175,38 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     elif ended and kind.startswith("response_"):
                         state.response_complete = True
                 # Completed HTTP capture need not retain Envoy's deferred-close slot.
-                if state.request_complete and state.response_complete:
+                # Upgraded WebSockets stay open until the transport ends.
+                if (
+                    state.mode == StreamMode.HTTP
+                    and state.request_complete
+                    and state.response_complete
+                ):
                     return
         finally:
             if state is not None:
                 self._active.pop(state.stream_id, None)
+                if state.mode == StreamMode.WS_UPGRADE:
+                    if not state.response_headers_seen:
+                        for direction in {
+                            direction
+                            for direction, chunk, _ in state.pre_101_buffer
+                            if chunk
+                        }:
+                            self._record_incomplete_capture(state, direction)
+                        state.pre_101_buffer.clear()
+                        state.pre_101_bytes = 0
+                    if state.observer is not None:
+                        timestamp = generate_iso_timestamp()
+                        for direction in Direction:
+                            already_desynced = state.observer.desynced(direction)
+                            for frame in state.observer.finish(direction):
+                                await self._submit_frame(state, frame, timestamp)
+                            if not already_desynced and state.observer.desynced(
+                                direction
+                            ):
+                                state.parser_desynced = True
+                                self._record_incomplete_capture(state, direction)
+                    await self._emit_ws_summary(state, droppable=False)
 
     def _initialise_stream(self, first: proc_pb2.ProcessingRequest) -> _StreamState:
         """Inspect the first ProcessingRequest and build per-stream state.
@@ -136,16 +220,30 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         trace_root = parse_trace_root(_extract_header(first, "x-amzn-trace-id"))
         if trace_root:
             set_trace_id(trace_root)
+        mode = _extract_mode(first)
         try:
             meta_keys = list(first.metadata_context.filter_metadata.keys())
         except Exception:
             meta_keys = []
         logger.debug(
-            "STREAM_INIT request_id=%s metadata_ns_keys=%s",
+            "STREAM_INIT request_id=%s mode=%s metadata_ns_keys=%s",
             request_id,
+            mode.value,
             meta_keys,
         )
-        return _StreamState(stream_id=str(uuid.uuid4()), request_id=request_id)
+        observer = (
+            build_observer(response_extensions_header=None)
+            if mode == StreamMode.WS_UPGRADE
+            else None
+        )
+        return _StreamState(
+            stream_id=str(uuid.uuid4()),
+            request_id=request_id,
+            mode=mode,
+            observer=observer,
+            started_at_iso=generate_iso_timestamp(),
+            started_at_monotonic=time.monotonic(),
+        )
 
     async def _dispatch(
         self,
@@ -274,6 +372,30 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         timestamp: str,
     ) -> None:
         headers = _headers_to_dict(msg.headers, also_redact=state.upstream_auth_header)
+        if state.mode == StreamMode.WS_UPGRADE:
+            status = next(
+                (_header_value(h) for h in msg.headers.headers if h.key == ":status"),
+                "",
+            )
+            if status == "101":
+                ext_b64 = headers.get("sec-websocket-extensions")
+                ext: Optional[str] = None
+                if ext_b64:
+                    try:
+                        ext = base64.b64decode(ext_b64).decode(
+                            "utf-8", errors="replace"
+                        )
+                    except Exception:
+                        ext = None
+                state.upstream_extensions = ext
+                state.observer = build_observer(response_extensions_header=ext)
+                state.response_headers_seen = True
+                await self._replay_pre_101(state, timestamp)
+            elif not status.startswith("1"):
+                state.mode = StreamMode.HTTP
+                state.observer = None
+                await self._replay_pre_101(state, timestamp)
+
         await self._queue.submit_blocking(
             PublishTask(
                 build=lambda: self._publish.build_response_headers(
@@ -312,12 +434,13 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
     async def _finish_http_body(
         self, state: _StreamState, direction: Direction, timestamp: str
     ) -> None:
-        await self._on_body_chunk(
-            state,
-            proc_pb2.HttpBody(end_of_stream=True),
-            direction,
-            timestamp,
-        )
+        if state.mode == StreamMode.HTTP or not state.response_headers_seen:
+            await self._on_body_chunk(
+                state,
+                proc_pb2.HttpBody(end_of_stream=True),
+                direction,
+                timestamp,
+            )
 
     async def _on_body_chunk(
         self,
@@ -326,7 +449,22 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         direction: Direction,
         timestamp: str,
     ) -> None:
-        """Publish one HttpBody as ordered, record-sized body records."""
+        """Dispatch a body chunk to either the HTTP or WS publish path."""
+        if state.mode == StreamMode.WS_UPGRADE:
+            # A poisoned stream cannot be parsed. Track affected directions
+            # without retaining more bytes.
+            if state.pre_101_poisoned:
+                if msg.body:
+                    self._record_pre_101_loss(state, direction)
+                return
+            if not state.response_headers_seen:
+                self._buffer_pre_101(
+                    state, direction, msg.body, end_of_stream=msg.end_of_stream
+                )
+                return
+            await self._observe_ws_chunk(state, direction, msg.body, timestamp)
+            return
+
         # One HttpBody may split into several record-sized pieces; only the
         # last record of an ``end_of_stream`` message is the body's terminal
         # chunk. Marking it gives the ETL an explicit end-of-body signal the
@@ -347,6 +485,174 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 final_chunk=msg.end_of_stream and index == last_index,
             )
 
+    async def _observe_ws_chunk(
+        self,
+        state: _StreamState,
+        direction: Direction,
+        chunk: bytes,
+        timestamp: str,
+    ) -> None:
+        """Feed one WS byte chunk through the observer; account parse failures.
+
+        A parse error (malformed frame, deflate zip-bomb cap) desyncs the
+        wsproto parser and blinds the rest of that direction. Bump the
+        per-direction truncated counter ONCE at the desync transition so the
+        WSSummaryRecord reflects the loss rather than clean counts for a
+        session that silently stopped being observed.
+        """
+        observer = state.observer
+        if observer is None:
+            return
+        already_desynced = observer.desynced(direction)
+        for frame in observer.observe(direction=direction, chunk=chunk):
+            await self._submit_frame(state, frame, timestamp)
+        if not already_desynced and observer.desynced(direction):
+            state.parser_desynced = True
+            self._record_incomplete_capture(state, direction)
+
+    def _record_incomplete_capture(
+        self, state: _StreamState, direction: Direction
+    ) -> None:
+        if direction == Direction.REQUEST:
+            state.truncated_client_frames += 1
+        else:
+            state.truncated_server_frames += 1
+        logger.warning(
+            "Incomplete WS capture on stream %s (%s direction); "
+            "counted as truncated in the summary",
+            state.stream_id,
+            direction.value,
+        )
+
+    def _buffer_pre_101(
+        self,
+        state: _StreamState,
+        direction: Direction,
+        chunk: bytes,
+        *,
+        end_of_stream: bool = False,
+    ) -> None:
+        """Stash a WS body chunk that arrived before the 101 response.
+
+        If ``chunk`` would exceed the cap, poison the stream rather than
+        truncate mid-frame: a partial frame would desync the parser and zlib
+        state on replay, corrupting all later frames. Poisoning skips
+        observation and records the loss cleanly.
+        """
+        if state.pre_101_poisoned:
+            if chunk:
+                self._record_pre_101_loss(state, direction)
+            return
+        if state.pre_101_bytes + len(chunk) > _PRE_101_MAX_BYTES:
+            logger.warning(
+                "Pre-101 WS buffer cap hit on stream %s (%s): buffered=%d "
+                "incoming=%d cap=%d — poisoning stream (frame observation "
+                "disabled, loss recorded)",
+                state.stream_id,
+                direction.value,
+                state.pre_101_bytes,
+                len(chunk),
+                _PRE_101_MAX_BYTES,
+            )
+            state.pre_101_poisoned = True
+            self._record_pre_101_loss(state, direction)
+            for buffered_direction, buffered_chunk, _ in state.pre_101_buffer:
+                if buffered_chunk:
+                    self._record_pre_101_loss(state, buffered_direction)
+            state.pre_101_buffer.clear()
+            state.pre_101_bytes = 0
+            return
+        state.pre_101_buffer.append((direction, chunk, end_of_stream))
+        state.pre_101_bytes += len(chunk)
+
+    def _record_pre_101_loss(self, state: _StreamState, direction: Direction) -> None:
+        if direction in state.pre_101_lost_directions:
+            return
+        state.pre_101_lost_directions.add(direction)
+        if direction == Direction.REQUEST:
+            state.truncated_client_frames += 1
+        else:
+            state.truncated_server_frames += 1
+
+    async def _replay_pre_101(self, state: _StreamState, timestamp: str) -> None:
+        """Replay body events after the upgrade outcome selects their decoder."""
+        if state.pre_101_poisoned:
+            # Rejected upgrades have no WS summary; preserve cap loss in the
+            # HTTP body records even when a later chunk marks the body ended.
+            if state.mode == StreamMode.HTTP:
+                for direction in Direction:
+                    if direction in state.pre_101_lost_directions:
+                        await self._submit_body_record(
+                            state=state,
+                            direction=direction,
+                            body_bytes=b"",
+                            timestamp=timestamp,
+                            chunk_id=self._next_chunk_id(state, direction),
+                            label=f"{direction.value}_body",
+                            truncated=True,
+                        )
+            return
+        if not state.pre_101_buffer:
+            state.pre_101_buffer.clear()
+            state.pre_101_bytes = 0
+            return
+        for direction, chunk, end_of_stream in state.pre_101_buffer:
+            await self._on_body_chunk(
+                state,
+                proc_pb2.HttpBody(body=chunk, end_of_stream=end_of_stream),
+                direction,
+                timestamp,
+            )
+        state.pre_101_buffer.clear()
+        state.pre_101_bytes = 0
+
+    async def _submit_frame(
+        self,
+        state: _StreamState,
+        frame: ObservedFrame,
+        timestamp: str,
+    ) -> None:
+        """Publish one observed WebSocket frame as a body record."""
+        counters = (
+            state.client_frame_counts
+            if frame.direction == Direction.REQUEST
+            else state.server_frame_counts
+        )
+        counters[frame.opcode] = counters.get(frame.opcode, 0) + 1
+        if frame.opcode == "close" and state.close_code is None:
+            state.close_code = frame.close_code
+            state.close_initiator = (
+                "client" if frame.direction == Direction.REQUEST else "server"
+            )
+        if frame.truncated:
+            if frame.direction == Direction.REQUEST:
+                state.truncated_client_frames += 1
+            else:
+                state.truncated_server_frames += 1
+
+        # One frame_index per logical WS frame, even when its payload splits
+        # across multiple body-record chunks below.
+        frame_index = self._next_frame_index(state, frame.direction)
+        drop_recorded = False
+        for body_chunk in chunk_body_data(frame.payload) or [b""]:
+            chunk_id = self._next_chunk_id(state, frame.direction)
+            accepted = await self._submit_body_record(
+                state=state,
+                direction=frame.direction,
+                body_bytes=body_chunk,
+                timestamp=timestamp,
+                chunk_id=chunk_id,
+                label=f"ws_frame_{frame.direction.value}_{frame.opcode}",
+                truncated=frame.truncated,
+                frame_index=frame_index,
+            )
+            if not accepted and not drop_recorded:
+                if frame.direction == Direction.REQUEST:
+                    state.dropped_client_frames += 1
+                else:
+                    state.dropped_server_frames += 1
+                drop_recorded = True
+
     def _next_chunk_id(self, state: _StreamState, direction: Direction) -> int:
         """Allocate the next body record chunk_id for one direction."""
         if direction == Direction.REQUEST:
@@ -357,6 +663,16 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         state.response_chunk_id += 1
         return chunk_id
 
+    def _next_frame_index(self, state: _StreamState, direction: Direction) -> int:
+        """Allocate the next WS frame_index for one direction."""
+        if direction == Direction.REQUEST:
+            frame_index = state.request_frame_index
+            state.request_frame_index += 1
+            return frame_index
+        frame_index = state.response_frame_index
+        state.response_frame_index += 1
+        return frame_index
+
     async def _submit_body_record(
         self,
         *,
@@ -366,13 +682,17 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
         timestamp: str,
         chunk_id: int,
         label: str,
+        truncated: bool = False,
         final_chunk: bool = False,
+        frame_index: Optional[int] = None,
     ) -> bool:
         """Submit one record-sized body chunk.
 
         ``final_chunk`` marks a streamed HTTP body's terminal chunk (the one
         carrying Envoy's ``end_of_stream``) so the Glue ETL can detect a lost
-        trailing chunk in the ``num_chunks=0`` wire format.
+        trailing chunk in the ``num_chunks=0`` wire format. ``frame_index`` is
+        the per-frame ordinal for WS frames (shared by all chunks of one frame),
+        None for HTTP bodies.
         """
         build_method = (
             self._publish.build_request_body
@@ -387,7 +707,9 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     timestamp=timestamp,
                     chunk_id=chunk_id,
                     num_chunks=0,
+                    truncated=truncated,
                     final_chunk=final_chunk,
+                    frame_index=frame_index,
                 ),
                 label=label,
                 request_id=state.request_id,
@@ -414,6 +736,53 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             else:
                 self._suppressed_drop_warnings += 1
         return accepted
+
+    async def _emit_ws_summary(
+        self, state: _StreamState, *, droppable: bool = False
+    ) -> None:
+        """Build and submit the per-connection WS summary record. Idempotent."""
+        if state.summary_emitted:
+            return
+        duration = max(0.0, time.monotonic() - state.started_at_monotonic)
+        record = WSSummaryRecord(
+            request_id=state.request_id,
+            timestamp=state.started_at_iso,
+            published_at=generate_iso_timestamp(),
+            duration_seconds=duration,
+            close_code=state.close_code,
+            close_initiator=state.close_initiator,
+            client_text_frames=state.client_frame_counts.get("text", 0),
+            client_binary_frames=state.client_frame_counts.get("binary", 0),
+            client_ping_frames=state.client_frame_counts.get("ping", 0),
+            client_pong_frames=state.client_frame_counts.get("pong", 0),
+            client_close_frames=state.client_frame_counts.get("close", 0),
+            server_text_frames=state.server_frame_counts.get("text", 0),
+            server_binary_frames=state.server_frame_counts.get("binary", 0),
+            server_ping_frames=state.server_frame_counts.get("ping", 0),
+            server_pong_frames=state.server_frame_counts.get("pong", 0),
+            server_close_frames=state.server_frame_counts.get("close", 0),
+            dropped_client_frames=state.dropped_client_frames,
+            dropped_server_frames=state.dropped_server_frames,
+            truncated_client_frames=state.truncated_client_frames,
+            truncated_server_frames=state.truncated_server_frames,
+        )
+        task = PublishTask(
+            build=lambda: self._publish.build_ws_summary(record=record),
+            label="ws_summary",
+            request_id=state.request_id,
+        )
+        if droppable:
+            self._queue.submit_droppable(task)
+        else:
+            # Bounded: runs in Process's ``finally`` at stream end (including
+            # drain), so an unbounded put on a wedged sink would pin the stream
+            # and the drain forever. On timeout the summary is dropped and
+            # counted (per-frame records publish independently).
+            await self._queue.submit_blocking(
+                task,
+                timeout=config.grpc.publish_blocking_timeout_seconds,
+            )
+        state.summary_emitted = True
 
 
 def _extract_request_id(req: proc_pb2.ProcessingRequest) -> str:
@@ -451,6 +820,30 @@ def _header_value_bytes(h) -> bytes:
             len(legacy),
         )
     return raw or legacy
+
+
+def _extract_mode(req: proc_pb2.ProcessingRequest) -> StreamMode:
+    """Detect WS-upgrade vs plain-HTTP from the first ProcessingRequest."""
+    # filter_metadata path (forward-compat: stock Envoy doesn't populate this,
+    # but a future set_metadata filter could).
+    try:
+        metadata = req.metadata_context.filter_metadata.get(_METADATA_NS)
+        if metadata is not None:
+            ws = metadata.fields.get(_WS_METADATA_KEY)
+            if ws is not None and ws.bool_value:
+                return StreamMode.WS_UPGRADE
+    except Exception:
+        pass
+
+    # ``upgrade: websocket`` on request_headers — the reliable RFC 6455 signal
+    # across every Envoy version.
+    if req.HasField("request_headers"):
+        for h in req.request_headers.headers.headers:
+            if h.key.lower() == "upgrade":
+                if _header_value(h).lower() == "websocket":
+                    return StreamMode.WS_UPGRADE
+                break
+    return StreamMode.HTTP
 
 
 def _extract_auth_metadata(
