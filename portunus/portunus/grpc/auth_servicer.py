@@ -1,8 +1,10 @@
 """Envoy ``ext_authz`` v3 Check servicer.
 
-A single header-only pass: authenticates the bearer payload and returns the
-upstream credential as a header mutation. The request body is never sent to
-this servicer.
+A single header-only pass: authenticates the bearer and returns the upstream
+credential as a header mutation. The request body is never sent to this
+servicer. A bearer is either a payload (the caller's AWS credentials plus a
+secret ARN) or, when configured, an on-behalf-of access token minted by the
+auth relay (``services/jwt_auth_service.py``).
 
 Audit metadata is published from the ext_proc pass via
 ``CheckResponse.dynamic_metadata``, keeping Kinesis writes off the
@@ -51,6 +53,7 @@ from portunus.metrics import (
 from portunus.models import AuthPayload, AuthResult
 from portunus.request_context import parse_trace_root, request_id_var, set_trace_id
 from portunus.services.auth_service import AuthService
+from portunus.services.jwt_auth_service import JwtAuthService, looks_like_jwt
 
 logger = logging.getLogger("api.access")
 
@@ -59,6 +62,10 @@ logger = logging.getLogger("api.access")
 # call or mint surfaces as a structured 504 from Portunus. A cold mint needs
 # the STS identity call, the secret fetch, then up to MINT_DEADLINE_SECONDS.
 _AUTH_TIMEOUT_S = 9.0
+# Answered by Check itself (a 200 ``denied_response`` Envoy sends straight
+# to the client), so the proxy can tell a signed-in app which models its
+# user may use here without a second listener. Never forwarded upstream.
+ENTITLEMENTS_PATH = "/.well-known/portunus/entitlements"
 
 
 class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
@@ -68,8 +75,10 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
         self,
         *,
         auth_service: AuthService,
+        jwt_auth_service: Optional[JwtAuthService] = None,
     ) -> None:
         self._auth = auth_service
+        self._jwt_auth = jwt_auth_service
 
     async def Check(  # noqa: N802 — proto-defined method name
         self,
@@ -150,6 +159,39 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
             # target_host comes from Envoy-controlled route context / gRPC
             # initial_metadata, never client-controllable headers.
             target_host = _extract_target_host_for_check(request, context)
+
+            path = request.attributes.request.http.path.split("?", 1)[0]
+            if path == ENTITLEMENTS_PATH:
+                if self._jwt_auth is None or not looks_like_jwt(raw_payload):
+                    return _denied(
+                        code=401,
+                        body="Entitlements need a Portunus access token",
+                        request_id=request_id,
+                    )
+                async with asyncio.timeout(_AUTH_TIMEOUT_S):
+                    body = await self._jwt_auth.entitlements(
+                        raw_payload, request_id, target_host
+                    )
+                return _direct_json(200, body)
+
+            if self._jwt_auth is not None and looks_like_jwt(raw_payload):
+                try:
+                    async with asyncio.timeout(_AUTH_TIMEOUT_S):
+                        auth_result, jwt_secret_arn = await self._jwt_auth.authenticate(
+                            raw_payload,
+                            request_id,
+                            target_host,
+                            request_body=_request_body(request),
+                        )
+                except TimeoutError:
+                    return _denied(
+                        code=504, body="Auth backend timeout", request_id=request_id
+                    )
+                return _ok(
+                    auth_result=auth_result,
+                    principal_info=auth_result.principal_info.to_dict(),
+                    secret_arn=jwt_secret_arn,
+                )
 
             payload = AuthPayload.from_contents(raw_payload, target_host=None)
             try:
@@ -255,20 +297,27 @@ def _ok(
     arrived in when the two differ; every other header is forwarded as-is.
     The upstream header name goes into dynamic metadata so the audit path can
     redact it even when it is not a well-known credential header.
+
+    An empty ``api_key`` means there is no credential to inject (Envoy signs
+    the upstream request itself): only the inbound header is removed.
     """
     response = external_auth_pb2.CheckResponse()
     response.status.code = 0
     ok = response.ok_response
     ok.SetInParent()
 
-    header, value = upstream_auth_header(auth_result)
-    added = ok.headers.add()
-    added.header.key = header
-    added.header.value = value
-    added.append_action = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
     inbound_header = config.api_key_header.lower()
-    if header != inbound_header:
+    if auth_result.api_key == "":
         ok.headers_to_remove.append(inbound_header)
+        header = inbound_header
+    else:
+        header, value = upstream_auth_header(auth_result)
+        added = ok.headers.add()
+        added.header.key = header
+        added.header.value = value
+        added.append_action = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
+        if header != inbound_header:
+            ok.headers_to_remove.append(inbound_header)
 
     response.dynamic_metadata.update({"upstream_auth_header": header})
     if principal_info is not None:
@@ -276,6 +325,35 @@ def _ok(
     if secret_arn is not None:
         response.dynamic_metadata.update({"secret_arn": secret_arn})
     return response
+
+
+def _direct_json(code: int, body: Dict[str, Any]) -> external_auth_pb2.CheckResponse:
+    """A response Envoy returns to the client itself, instead of proxying.
+
+    ext_authz sends ``denied_response`` verbatim whenever ``status`` is not
+    OK, whatever HTTP status it carries, so this doubles as a direct reply.
+    """
+    return external_auth_pb2.CheckResponse(
+        status=status_pb2.Status(
+            code=grpc.StatusCode.PERMISSION_DENIED.value[0], message="direct"
+        ),
+        denied_response=external_auth_pb2.DeniedHttpResponse(
+            status=_http_status(code),
+            body=json.dumps(body, separators=(",", ":")),
+            headers=[
+                base_pb2.HeaderValueOption(
+                    header=base_pb2.HeaderValue(
+                        key="content-type", value="application/json"
+                    ),
+                    append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
+                ),
+                base_pb2.HeaderValueOption(
+                    header=base_pb2.HeaderValue(key="cache-control", value="no-store"),
+                    append_action=base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD,
+                ),
+            ],
+        ),
+    )
 
 
 def _denied(
@@ -326,6 +404,16 @@ def _denied(
             ],
         ),
     )
+
+
+def _request_body(request: external_auth_pb2.CheckRequest) -> Optional[bytes]:
+    """The buffered request body, when Envoy was configured to send one."""
+    http = request.attributes.request.http
+    if http.raw_body:
+        return bytes(http.raw_body)
+    if http.body:
+        return http.body.encode()
+    return None
 
 
 def _http_headers(

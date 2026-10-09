@@ -17,6 +17,9 @@ dependencies = [
     # ships the stable v3 namespace (older versions only have v3alpha).
     # httpx: the federation token-mint exchanges (federation_service).
     "httpx>=0.27.0,<1",
+    # PyJWT: verifying the auth relay's on-behalf-of access tokens
+    # (jwt_auth_service). [crypto] pulls in cryptography for ES256.
+    "PyJWT[crypto]>=2.10.0,<3",
     # grpcio, its health/reflection packages and xds-protos are held on the
     # 1.82 line. The floor is 1.82.2: 1.82.1 is affected by GHSA-hf3w-6hpw-qp67
     # (gRPC core heap exhaustion: unbounded decompression, GOAWAY parsing),

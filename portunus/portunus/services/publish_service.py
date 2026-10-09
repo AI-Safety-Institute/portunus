@@ -274,6 +274,11 @@ class PublishService:
             project=principal_info.get("project"),
             session_name=principal_info.get("session_name"),
             secret_arn=secret_arn,
+            auth_method=principal_info.get("auth_method"),
+            subject=principal_info.get("subject"),
+            actor=principal_info.get("actor"),
+            teams=principal_info.get("teams"),
+            token_id=principal_info.get("token_id"),
         )
         return config.kinesis.metadata_stream_name, _serialize(record.to_dict())
 

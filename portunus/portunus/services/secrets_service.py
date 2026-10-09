@@ -12,6 +12,7 @@ from aiobotocore.session import get_session
 from portunus.config import config
 from portunus.exceptions import FetchSecretError
 from portunus.models import AuthPayload
+from portunus.services.state_service import PooledBotoSession
 
 logger = logging.getLogger("api.access")
 
@@ -61,3 +62,29 @@ class SecretsService:
             raise FetchSecretError(
                 403, f"Failed to get secret from Secrets Manager: {e}"
             ) from e
+
+    async def fetch_service_secret(self, secret_arn: str) -> str:
+        """Fetch a secret with Portunus's own credentials.
+
+        On-behalf-of (JWT) callers hold no AWS credentials; the proxy serves the
+        key it is configured with, read under its task role.
+
+        Raises:
+            FetchSecretError: If the secret cannot be read
+        """
+        # The client pool is keyed on explicit credential sets; an ambient read
+        # (the task role) goes through the session behind it.
+        session = (
+            self.boto_session.base_session
+            if isinstance(self.boto_session, PooledBotoSession)
+            else self.boto_session
+        )
+        try:
+            async with session.create_client(
+                "secretsmanager", endpoint_url=config.aws.endpoint_url
+            ) as client:
+                response = await client.get_secret_value(SecretId=secret_arn)
+                return response["SecretString"]
+        except Exception as e:
+            logger.error(f"Failed to read the proxy's own secret: {type(e).__name__}")
+            raise FetchSecretError(503, "Proxy key unavailable") from e

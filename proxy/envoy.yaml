@@ -151,6 +151,9 @@ static_resources:
                   envoy.filters.http.ext_proc:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
                     disabled: true
+                  envoy.filters.http.aws_request_signing:
+                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                    disabled: true
               # WS route. Body modes must be STREAMED under the ext_proc
               # filter's observability_mode (see the ext_proc filter below).
               - match:
@@ -168,6 +171,9 @@ static_resources:
                     envoy.filters.http.ext_proc:
                       websocket: true
                 typed_per_filter_config:
+                  envoy.filters.http.aws_request_signing:
+                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                    disabled: true
                   envoy.filters.http.ext_authz:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                     check_settings:
@@ -214,6 +220,12 @@ static_resources:
                   retry_policy:
                     retry_on: reset
                     num_retries: 3
+                typed_per_filter_config:
+                  # SigV4-signed upstreams (Bedrock): a disabled FilterConfig
+                  # unless UPSTREAM_AWS_SIGNING=true, then the per-route signing
+                  # settings (Envoy rejects an enabled-but-empty FilterConfig).
+                  # Rendered by entrypoint.sh; see the filter below.
+                  envoy.filters.http.aws_request_signing: ${UPSTREAM_AWS_SIGNING_ROUTE_CONFIG}
           http_filters:
           # /healthz — the ALB health-check target, answered by this
           # health_check filter gated on the ACTIVE gRPC health check of
@@ -270,12 +282,16 @@ static_resources:
                     key: x-${PORTUNUS_HEADER_PREFIX}-rate-limit
                     value: "true"
               local_rate_limit_per_downstream_connection: false
-          # ext_authz — header-only auth. The request body is never sent:
-          # requests stream end-to-end without buffering.
+          # ext_authz — header-only auth by default: the request body is not
+          # sent and requests stream end-to-end without buffering. With
+          # EXT_AUTHZ_REQUEST_BODY_BYTES set, the request body (not the
+          # response) is buffered and sent too, so Portunus can hold a token
+          # scoped to particular models to the ``model`` the body names.
           - name: envoy.filters.http.ext_authz
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
               transport_api_version: V3
+              with_request_body: ${EXT_AUTHZ_WITH_REQUEST_BODY}
               grpc_service:
                 envoy_grpc:
                   cluster_name: portunus_grpc_cluster
@@ -330,6 +346,26 @@ static_resources:
                 response_body_mode: STREAMED
                 request_trailer_mode: SEND
                 response_trailer_mode: SEND
+          # SigV4 for AWS upstreams (Bedrock). The caller authenticates to
+          # Portunus with an on-behalf-of token and holds no AWS credentials;
+          # ext_authz strips that token (JWT_UPSTREAM_MODE=envoy_sigv4) and
+          # this filter signs the request with the proxy's own credentials.
+          # After ext_proc, so the audit never captures the signature. Disabled
+          # per route unless UPSTREAM_AWS_SIGNING=true; with it off this filter
+          # never runs, so its placeholder credentials are never used.
+          - name: envoy.filters.http.aws_request_signing
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigning
+              service_name: "${UPSTREAM_AWS_SIGNING_SERVICE}"
+              region: "${UPSTREAM_AWS_SIGNING_REGION}"
+              # Sign with the host the router rewrites to, or the signature
+              # covers the wrong Host.
+              host_rewrite: "${TARGET_HOST}"
+              use_unsigned_payload: false
+              credential_provider:
+                inline_credential:
+                  access_key_id: "${UPSTREAM_AWS_SIGNING_ACCESS_KEY_ID}"
+                  secret_access_key: "${UPSTREAM_AWS_SIGNING_SECRET_ACCESS_KEY}"
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

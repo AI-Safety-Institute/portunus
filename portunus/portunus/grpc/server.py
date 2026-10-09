@@ -8,7 +8,7 @@ import logging
 import signal
 import sys
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import grpc
 from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
@@ -29,6 +29,9 @@ from portunus.metrics import (
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
+
+if TYPE_CHECKING:
+    from portunus.services.jwt_auth_service import JwtAuthService
 
 if sys.platform not in {"win32", "cygwin"} and sys.implementation.name == "cpython":
     from uvloop import run as run_event_loop
@@ -90,6 +93,7 @@ async def start_grpc_server(
     auth_service: AuthService,
     publish_service: PublishService,
     metrics_config: Optional[MetricsConfig] = None,
+    jwt_auth_service: Optional["JwtAuthService"] = None,
 ) -> Optional[GrpcRuntime]:
     """Start the Portunus gRPC server.
 
@@ -181,7 +185,9 @@ async def start_grpc_server(
         else None
     )
 
-    auth_servicer = PortunusAuthServicer(auth_service=auth_service)
+    auth_servicer = PortunusAuthServicer(
+        auth_service=auth_service, jwt_auth_service=jwt_auth_service
+    )
     if serves_auth:
         external_auth_pb2_grpc.add_AuthorizationServicer_to_server(
             auth_servicer, server
@@ -438,6 +444,16 @@ async def run() -> None:
     cache_service = CacheService(state_service=state_service)
     publish_service = PublishService(state_service=state_service)
     auth_service = AuthService(cache_service=cache_service)
+    jwt_settings = config.jwt.settings()
+    jwt_auth_service = None
+    if jwt_settings is not None:
+        from portunus.services.jwt_auth_service import JwtAuthService
+
+        jwt_auth_service = JwtAuthService(
+            jwt_settings,
+            fetch_service_secret=auth_service.secrets_service.fetch_service_secret,
+            validation_service=auth_service.validation_service,
+        )
 
     runtime = await start_grpc_server(
         config=config.grpc,
@@ -445,6 +461,7 @@ async def run() -> None:
         auth_service=auth_service,
         publish_service=publish_service,
         metrics_config=config.metrics,
+        jwt_auth_service=jwt_auth_service,
     )
     if runtime is None:
         logger.error(

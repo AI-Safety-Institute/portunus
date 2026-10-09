@@ -20,6 +20,7 @@ from envoy.service.auth.v3 import (
     external_auth_pb2,
     external_auth_pb2_grpc,
 )
+from envoy.type.v3 import http_status_pb2
 from google.protobuf.json_format import MessageToDict
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -987,3 +988,233 @@ async def test_allow_responses_preserve_identity_and_header_policy_over_grpc(
         )
         assert identity["secret_arn"].endswith(":secret:test")
         assert identity["upstream_auth_header"] == key_header.lower()
+
+
+# ---------------------------------------------------------------------------
+# On-behalf-of JWTs
+# ---------------------------------------------------------------------------
+
+_JWT = (
+    "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIiwidHlwIjoiYXQrand0In0"
+    ".eyJzdWIiOiJVMSJ9.c2lnbmF0dXJl"
+)
+_JWT_SECRET_ARN = "arn:aws:secretsmanager:eu-west-2:111111111111:secret:portal/x"
+
+
+class FakeJwtAuthService:
+    def __init__(self, *, error: Optional[Exception] = None) -> None:
+        self.error = error
+        self.calls: list[tuple[str, Optional[str]]] = []
+
+    async def authenticate(self, token, request_id, target_host, request_body=None):
+        self.calls.append((token, target_host))
+        if self.error:
+            raise self.error
+        info = PrincipalInfo(
+            arn=None,
+            account_id=None,
+            principal="test@example.com",
+            project="p",
+            auth_method="jwt",
+            subject="U1",
+            actor="demo-app",
+            teams=["core-tech"],
+            token_id="j1",
+        )
+        return AuthResult(api_key="sk-proxy-key", principal_info=info), _JWT_SECRET_ARN
+
+
+@pytest.mark.asyncio
+async def test_jwt_bearer_takes_the_jwt_path_and_never_the_payload_path():
+    jwt_auth = FakeJwtAuthService()
+    payload_auth = FakeAuthService()
+    servicer = PortunusAuthServicer(
+        auth_service=payload_auth, jwt_auth_service=jwt_auth
+    )  # type: ignore[arg-type]
+
+    context = _FakeContext(
+        metadata=[
+            ("x-portunus-proxy-key", _PROXY_KEY),
+            ("x-portunus-target-host", "api.anthropic.com"),
+        ]
+    )
+    response = await servicer.Check(
+        _check_request(payload_header=f"Bearer {_JWT}"), context
+    )
+
+    assert response.HasField("ok_response")
+    assert jwt_auth.calls == [(_JWT, "api.anthropic.com")]
+    assert payload_auth.auth_calls == []
+    assert (
+        _decoded_headers(response.ok_response.headers)["authorization"]
+        == "Bearer sk-proxy-key"
+    )
+    metadata = MessageToDict(response.dynamic_metadata)
+    assert metadata["secret_arn"] == _JWT_SECRET_ARN
+    assert metadata["principal_info"]["auth_method"] == "jwt"
+    assert metadata["principal_info"]["actor"] == "demo-app"
+    assert metadata["principal_info"]["teams"] == ["core-tech"]
+
+
+@pytest.mark.asyncio
+async def test_payloads_still_use_the_payload_path_when_jwts_are_enabled():
+    jwt_auth = FakeJwtAuthService()
+    servicer = PortunusAuthServicer(
+        auth_service=FakeAuthService(), jwt_auth_service=jwt_auth
+    )  # type: ignore[arg-type]
+    response = await servicer.Check(_check_request(), _ctx_with_key())
+    assert response.HasField("ok_response")
+    assert jwt_auth.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_jwt_is_refused_when_jwt_auth_is_not_configured():
+    servicer, _ = _make_servicer()
+    response = await servicer.Check(
+        _check_request(payload_header=f"Bearer {_JWT}"), _ctx_with_key()
+    )
+    assert response.denied_response.status.code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,status",
+    [
+        (CredentialsError("Access token has expired"), 401),
+        (AuthenticationError("This proxy does not serve that application"), 403),
+        (UpstreamServiceError("Token issuer keys unavailable"), 503),
+    ],
+)
+async def test_jwt_failures_map_to_http_statuses(error, status):
+    servicer = PortunusAuthServicer(
+        auth_service=FakeAuthService(),
+        jwt_auth_service=FakeJwtAuthService(error=error),  # type: ignore[arg-type]
+    )
+    response = await servicer.Check(
+        _check_request(payload_header=f"Bearer {_JWT}"), _ctx_with_key()
+    )
+    assert response.denied_response.status.code == status
+
+
+# ---------------------------------------------------------------------------
+# Entitlements: served by Check itself as a direct response
+# ---------------------------------------------------------------------------
+
+_ENTITLEMENTS_PATH = "/.well-known/portunus/entitlements"
+
+
+class FakeJwtAuthWithEntitlements(FakeJwtAuthService):
+    async def entitlements(self, token, request_id, target_host):
+        if self.error:
+            raise self.error
+        return {
+            "subject": "U1",
+            "project": "p",
+            "models": [{"id": "m1", "display_name": "M1"}],
+        }
+
+
+def _entitlements_request(bearer: str) -> external_auth_pb2.CheckRequest:
+    http_request = attribute_context_pb2.AttributeContext.HttpRequest(
+        id="req-ent",
+        method="GET",
+        path=_ENTITLEMENTS_PATH,
+        host="proxy",
+        headers={"authorization": bearer},
+    )
+    return external_auth_pb2.CheckRequest(
+        attributes=attribute_context_pb2.AttributeContext(
+            request=attribute_context_pb2.AttributeContext.Request(http=http_request)
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_entitlements_are_answered_directly_with_200_and_never_proxied():
+    servicer = PortunusAuthServicer(
+        auth_service=FakeAuthService(),
+        jwt_auth_service=FakeJwtAuthWithEntitlements(),  # type: ignore[arg-type]
+    )
+    response = await servicer.Check(
+        _entitlements_request(f"Bearer {_JWT}"), _ctx_with_key()
+    )
+    # Envoy sends ``denied_response`` as-is; with status 200 it is a direct reply.
+    assert response.HasField("denied_response")
+    assert response.denied_response.status.code == http_status_pb2.OK
+    body = json.loads(response.denied_response.body)
+    assert body["models"] == [{"id": "m1", "display_name": "M1"}]
+    headers = {h.header.key: h.header.value for h in response.denied_response.headers}
+    assert headers["content-type"] == "application/json"
+    assert headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_entitlements_need_a_portunus_access_token():
+    payload_auth = FakeAuthService()
+    servicer = PortunusAuthServicer(
+        auth_service=payload_auth,
+        jwt_auth_service=FakeJwtAuthWithEntitlements(),  # type: ignore[arg-type]
+    )
+    response = await servicer.Check(
+        _entitlements_request(f"Bearer {_VALID_PAYLOAD}"), _ctx_with_key()
+    )
+    assert response.denied_response.status.code == 401
+    assert payload_auth.auth_calls == []  # never forwarded upstream under a payload
+
+
+@pytest.mark.asyncio
+async def test_entitlements_errors_map_like_auth_errors():
+    servicer = PortunusAuthServicer(
+        auth_service=FakeAuthService(),
+        jwt_auth_service=FakeJwtAuthWithEntitlements(error=AuthenticationError("no")),  # type: ignore[arg-type]
+    )
+    response = await servicer.Check(
+        _entitlements_request(f"Bearer {_JWT}"), _ctx_with_key()
+    )
+    assert response.denied_response.status.code == 403
+
+
+class FakeJwtAuthNoCredential(FakeJwtAuthService):
+    async def authenticate(self, token, request_id, target_host, request_body=None):
+        result, _ = await super().authenticate(token, request_id, target_host)
+        return AuthResult(api_key="", principal_info=result.principal_info), None
+
+
+@pytest.mark.asyncio
+async def test_an_envoy_signed_upstream_gets_no_credential_but_loses_the_token():
+    servicer = PortunusAuthServicer(
+        auth_service=FakeAuthService(),
+        jwt_auth_service=FakeJwtAuthNoCredential(),  # type: ignore[arg-type]
+    )
+    response = await servicer.Check(
+        _check_request(payload_header=f"Bearer {_JWT}"), _ctx_with_key()
+    )
+    assert response.HasField("ok_response")
+    assert list(response.ok_response.headers) == []
+    assert list(response.ok_response.headers_to_remove) == ["authorization"]
+    assert "secret_arn" not in MessageToDict(response.dynamic_metadata)
+
+
+class FakeJwtAuthRecordingBody(FakeJwtAuthService):
+    def __init__(self):
+        super().__init__()
+        self.bodies: list = []
+
+    async def authenticate(self, token, request_id, target_host, request_body=None):
+        self.bodies.append(request_body)
+        return await super().authenticate(token, request_id, target_host)
+
+
+@pytest.mark.asyncio
+async def test_the_buffered_request_body_reaches_jwt_auth():
+    jwt_auth = FakeJwtAuthRecordingBody()
+    servicer = PortunusAuthServicer(
+        auth_service=FakeAuthService(), jwt_auth_service=jwt_auth
+    )  # type: ignore[arg-type]
+    request = _check_request(payload_header=f"Bearer {_JWT}")
+    request.attributes.request.http.raw_body = b'{"model": "m"}'
+    await servicer.Check(request, _ctx_with_key())
+    await servicer.Check(
+        _check_request(payload_header=f"Bearer {_JWT}"), _ctx_with_key()
+    )
+    assert jwt_auth.bodies == [b'{"model": "m"}', None]

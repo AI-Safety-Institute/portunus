@@ -383,3 +383,48 @@ def test_body_record_preserves_binary_content_and_json_line_framing(
         True,
         2,
     )
+
+
+def test_build_metadata_carries_on_behalf_of_attribution(monkeypatch) -> None:
+    """JWT callers are attributed to user, app, teams and token at request time."""
+    monkeypatch.setattr(config.kinesis, "metadata_stream_name", "meta-stream")
+    result = _service(_FakeKinesisClient()).build_metadata(
+        request_id="r1",
+        timestamp="2026-01-01T00:00:00Z",
+        principal_info={
+            "arn": None,
+            "account_id": None,
+            "principal": "test@example.com",
+            "session_name": None,
+            "project": "harness-project",
+            "auth_method": "jwt",
+            "subject": "U0123456789",
+            "actor": "demo-app",
+            "teams": ["core-tech"],
+            "token_id": "4b1d0c0e",
+        },
+        secret_arn="arn:aws:secretsmanager:eu-west-2:111111111111:secret:portal/x",
+    )
+    assert result is not None
+    record = json.loads(result[1])
+    assert record["auth_method"] == "jwt"
+    assert record["subject"] == "U0123456789"
+    assert record["actor"] == "demo-app"
+    assert record["teams"] == ["core-tech"]
+    assert record["token_id"] == "4b1d0c0e"
+    assert record["principal"] == "test@example.com"
+    assert record["project"] == "harness-project"
+
+
+def test_build_metadata_leaves_attribution_fields_empty_for_payloads(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(config.kinesis, "metadata_stream_name", "meta-stream")
+    result = _service(_FakeKinesisClient()).build_metadata(
+        request_id="r1",
+        timestamp="t",
+        principal_info={"arn": "arn:aws:sts::1:assumed-role/R/s", "project": "p"},
+    )
+    assert result is not None
+    record = json.loads(result[1])
+    assert record["auth_method"] is None and record["teams"] is None

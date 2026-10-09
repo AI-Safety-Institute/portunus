@@ -379,3 +379,52 @@ def test_healthz_requires_every_portunus_listener(entrypoint_image, audit_port):
             }
         assert health_ports == expected
         assert required == {name: {"value": 100} for name in expected}
+
+
+def _default_route_signing(proxy: Proxy) -> dict:
+    rendered = subprocess.run(
+        ["docker", "exec", proxy.name, "cat", "/envoy/envoy_subst.yaml"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    listeners = yaml.safe_load(rendered.stdout)["static_resources"]["listeners"]
+    http = next(
+        f
+        for listener in listeners
+        for chain in listener["filter_chains"]
+        for f in chain["filters"]
+        if f["name"] == "envoy.filters.network.http_connection_manager"
+    )
+    routes = http["typed_config"]["route_config"]["virtual_hosts"][0]["routes"]
+    # The WebSocket route is also prefix "/" but matched on upgrade headers.
+    default = next(
+        r
+        for r in routes
+        if r["match"].get("prefix") == "/" and "headers" not in r["match"]
+    )
+    return default["typed_per_filter_config"]["envoy.filters.http.aws_request_signing"]
+
+
+@pytest.mark.parametrize("signing", ["false", "true"])
+def test_upstream_signing_renders_a_valid_per_route_config_either_way(
+    entrypoint_image, signing
+):
+    # Envoy rejects an enabled FilterConfig that carries no settings, so the
+    # enabled form must be a full AwsRequestSigningPerRoute; the disabled form
+    # is the plain FilterConfig opt-out. Both must boot.
+    overrides = {
+        "UPSTREAM_AWS_SIGNING": signing,
+        "UPSTREAM_AWS_SIGNING_ACCESS_KEY_ID": "AKIATEST",
+        "UPSTREAM_AWS_SIGNING_SECRET_ACCESS_KEY": "secret",
+    }
+    with running_proxy(entrypoint_image, overrides) as proxy:
+        proxy.wait_for_ping()
+        config = _default_route_signing(proxy)
+    if signing == "true":
+        assert config["@type"].endswith("AwsRequestSigningPerRoute")
+        assert config["aws_request_signing"]["host_rewrite"] == "127.0.0.1"
+        assert config["aws_request_signing"]["service_name"] == "bedrock"
+    else:
+        assert config["@type"].endswith("envoy.config.route.v3.FilterConfig")
+        assert config["disabled"] is True

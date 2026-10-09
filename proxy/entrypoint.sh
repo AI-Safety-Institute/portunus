@@ -24,6 +24,31 @@ esac
 # Trusted proxies in front of Envoy (HCM xff_num_trusted_hops): 1 for the
 # ALB in production, 0 when clients reach Envoy directly.
 export XFF_NUM_TRUSTED_HOPS=${XFF_NUM_TRUSTED_HOPS:-1}
+# Send the (buffered) request body to ext_authz, for tokens scoped to models.
+# 0 (default) keeps the header-only, streaming behaviour.
+if [ "${EXT_AUTHZ_REQUEST_BODY_BYTES:-0}" -gt 0 ]; then
+  export EXT_AUTHZ_WITH_REQUEST_BODY="{\"max_request_bytes\": ${EXT_AUTHZ_REQUEST_BODY_BYTES}, \"allow_partial_message\": false, \"pack_as_bytes\": true}"
+else
+  export EXT_AUTHZ_WITH_REQUEST_BODY=null
+fi
+# SigV4 signing of the upstream request (Bedrock). Off by default: the filter
+# is disabled on every route and its placeholder credentials are never used.
+# Static keys here are the prototype's shortcut; a deployment would give the
+# filter a credential provider chain (task role) instead.
+export UPSTREAM_AWS_SIGNING_SERVICE=${UPSTREAM_AWS_SIGNING_SERVICE:-bedrock}
+export UPSTREAM_AWS_SIGNING_REGION=${UPSTREAM_AWS_SIGNING_REGION:-${AWS_DEFAULT_REGION:-eu-west-2}}
+export UPSTREAM_AWS_SIGNING_ACCESS_KEY_ID=${UPSTREAM_AWS_SIGNING_ACCESS_KEY_ID:-unused}
+export UPSTREAM_AWS_SIGNING_SECRET_ACCESS_KEY=${UPSTREAM_AWS_SIGNING_SECRET_ACCESS_KEY:-unused}
+if [ "${UPSTREAM_AWS_SIGNING:-false}" = "true" ]; then
+  # Envoy rejects an enabled FilterConfig with no settings, so the enabled form
+  # repeats the listener filter's signing settings per route.
+  UPSTREAM_AWS_SIGNING_ROUTE_CONFIG=$(printf '{"@type": "type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigningPerRoute", "stat_prefix": "upstream_aws_signing", "aws_request_signing": {"service_name": "%s", "region": "%s", "host_rewrite": "%s", "use_unsigned_payload": false, "credential_provider": {"inline_credential": {"access_key_id": "%s", "secret_access_key": "%s"}}}}' \
+    "$UPSTREAM_AWS_SIGNING_SERVICE" "$UPSTREAM_AWS_SIGNING_REGION" "$TARGET_HOST" \
+    "$UPSTREAM_AWS_SIGNING_ACCESS_KEY_ID" "$UPSTREAM_AWS_SIGNING_SECRET_ACCESS_KEY")
+else
+  UPSTREAM_AWS_SIGNING_ROUTE_CONFIG='{"@type": "type.googleapis.com/envoy.config.route.v3.FilterConfig", "disabled": true}'
+fi
+export UPSTREAM_AWS_SIGNING_ROUTE_CONFIG
 case "$XFF_NUM_TRUSTED_HOPS" in
   ""|*[!0-9]*|0[0-9]*)
     echo "[entrypoint] FATAL: XFF_NUM_TRUSTED_HOPS must be a non-negative integer" >&2

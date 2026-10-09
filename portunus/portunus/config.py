@@ -6,14 +6,18 @@ It loads configuration from environment variables with reasonable defaults and
 provides validation and documentation for all options.
 """
 
+import json
 import logging
 import os
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from portunus.services.jwt_auth_service import JwtSettings
 
 DEFAULT_FEDERATION_ROLE_PATH_PREFIX = "/portunus-fed/"
 
@@ -414,6 +418,52 @@ class FederationConfig(BaseModel):
         return v
 
 
+class JwtConfig(BaseModel):
+    """On-behalf-of access tokens from the auth relay. Off unless ``issuer`` is set.
+
+    Attributes:
+        issuer: Expected ``iss``, the relay's base URL.
+        audience: Expected ``aud``.
+        jwks_url: Relay JWKS; defaults to ``{issuer}/.well-known/jwks.json``.
+        allowed_clients: Apps this proxy serves. Required when enabled.
+        allowed_projects: Projects this proxy serves (``*`` for any). Required.
+        upstream_secret_arn: The stored provider key JWT callers are served.
+    """
+
+    issuer: Optional[str] = None
+    audience: str = "portunus"
+    jwks_url: Optional[str] = None
+    allowed_clients: list[str] = Field(default_factory=list)
+    allowed_projects: list[str] = Field(default_factory=list)
+    upstream_secret_arn: Optional[str] = None
+    upstream_mode: str = "secret"
+    allow_http_jwks: bool = False
+    models: list[dict] = Field(default_factory=list)
+
+    def settings(self) -> Optional["JwtSettings"]:
+        """Verification settings, or None when JWT auth is off.
+
+        Raises:
+            ValueError: Enabled but missing a required setting.
+        """
+        if not self.issuer:
+            return None
+        from portunus.services.jwt_auth_service import JwtSettings
+
+        return JwtSettings(
+            issuer=self.issuer,
+            audience=self.audience,
+            jwks_url=self.jwks_url
+            or f"{self.issuer.rstrip('/')}/.well-known/jwks.json",
+            allowed_clients=frozenset(self.allowed_clients),
+            allowed_projects=frozenset(self.allowed_projects),
+            upstream_secret_arn=self.upstream_secret_arn or "",
+            upstream_mode=self.upstream_mode,
+            allow_http_jwks=self.allow_http_jwks,
+            models=tuple({"projects": ["*"], **m} for m in self.models),
+        )
+
+
 class PortunusConfig(BaseModel):
     """Main configuration for the Portunus service.
 
@@ -454,6 +504,10 @@ class PortunusConfig(BaseModel):
     federation: FederationConfig = Field(
         default_factory=FederationConfig,
         description="Federation token minting configuration",
+    )
+    jwt: JwtConfig = Field(
+        default_factory=JwtConfig,
+        description="On-behalf-of access tokens from the auth relay",
     )
     log_level: str = Field(
         default="INFO",
@@ -645,6 +699,18 @@ def get_config() -> PortunusConfig:
         grpc=grpc,
         auth_cache=auth_cache,
         federation=federation,
+        jwt=JwtConfig(
+            issuer=os.environ.get("JWT_ISSUER") or None,
+            audience=os.environ.get("JWT_AUDIENCE", "portunus"),
+            jwks_url=os.environ.get("JWT_JWKS_URL") or None,
+            allowed_clients=_split_csv(os.environ.get("JWT_ALLOWED_CLIENTS", "")),
+            allowed_projects=_split_csv(os.environ.get("JWT_ALLOWED_PROJECTS", "")),
+            upstream_secret_arn=os.environ.get("JWT_UPSTREAM_SECRET_ARN") or None,
+            upstream_mode=os.environ.get("JWT_UPSTREAM_MODE", "secret"),
+            allow_http_jwks=os.environ.get("JWT_JWKS_ALLOW_HTTP", "false").lower()
+            == "true",
+            models=json.loads(os.environ.get("JWT_MODELS") or "[]"),
+        ),
     )
 
 

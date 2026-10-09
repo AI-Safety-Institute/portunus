@@ -436,20 +436,37 @@ class AuthPayload:
 
 @dataclass
 class PrincipalInfo:
-    """Principal identity information extracted from AWS ARN.
+    """Who a request is attributed to.
+
+    Payload callers are identified from their AWS ARN. On-behalf-of callers
+    (``auth_method="jwt"``) carry no ARN: the user, the acting app and the
+    teams come from the access token, as issued.
 
     Attributes:
-        account_id (str): The AWS account ID
-        principal (Optional[str]): The principal type and name
+        arn (Optional[str]): The caller's AWS ARN; None for JWT callers
+        account_id (Optional[str]): The AWS account ID; None for JWT callers
+        principal (Optional[str]): The principal type and name, or the
+            user's email for JWT callers
         session_name (Optional[str]): The session name if present
-        project (str): The project name extracted from UserProfile_ roles
+        project (str): From UserProfile_ roles, or the token's project
+        auth_method (Optional[str]): ``"jwt"`` for on-behalf-of callers; None
+            for payloads
+        subject (Optional[str]): The token's ``sub`` (the user)
+        actor (Optional[str]): The app acting for the user (``client_id``)
+        teams (Optional[list[str]]): The user's teams when the token was issued
+        token_id (Optional[str]): The token's ``jti``
     """
 
-    arn: str = "unknown"
-    account_id: str = "unknown"
+    arn: Optional[str] = "unknown"
+    account_id: Optional[str] = "unknown"
     principal: Optional[str] = None
     session_name: Optional[str] = None
     project: Optional[str] = None
+    auth_method: Optional[str] = None
+    subject: Optional[str] = None
+    actor: Optional[str] = None
+    teams: Optional[List[str]] = None
+    token_id: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PrincipalInfo":
@@ -467,6 +484,11 @@ class PrincipalInfo:
             principal=data["principal"],
             session_name=data["session_name"],
             project=data["project"],
+            auth_method=data.get("auth_method"),
+            subject=data.get("subject"),
+            actor=data.get("actor"),
+            teams=data.get("teams"),
+            token_id=data.get("token_id"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -481,6 +503,11 @@ class PrincipalInfo:
             "principal": self.principal,
             "session_name": self.session_name,
             "project": self.project,
+            "auth_method": self.auth_method,
+            "subject": self.subject,
+            "actor": self.actor,
+            "teams": self.teams,
+            "token_id": self.token_id,
         }
 
 
@@ -736,6 +763,12 @@ class MetadataRecord:
         secret_arn: Full ARN of the AWS Secrets Manager secret used for the API
             key. None if not available. Downstream consumers parse the name
             from the ARN when needed.
+        auth_method: ``"jwt"`` for on-behalf-of callers, None for payloads.
+        subject: The access token's ``sub`` (the user). JWT callers only.
+        actor: The app acting for the user (``client_id``). JWT callers only.
+        teams: The user's teams when the token was issued, so attribution
+            reflects membership at request time. JWT callers only.
+        token_id: The access token's ``jti``. JWT callers only.
     """
 
     request_id: str
@@ -747,6 +780,11 @@ class MetadataRecord:
     project: Optional[str] = None
     session_name: Optional[str] = None
     secret_arn: Optional[str] = None
+    auth_method: Optional[str] = None
+    subject: Optional[str] = None
+    actor: Optional[str] = None
+    teams: Optional[List[str]] = None
+    token_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -761,6 +799,11 @@ class MetadataRecord:
             "project": self.project,
             "session_name": self.session_name,
             "secret_arn": self.secret_arn,
+            "auth_method": self.auth_method,
+            "subject": self.subject,
+            "actor": self.actor,
+            "teams": self.teams,
+            "token_id": self.token_id,
         }
 
     @classmethod
@@ -777,6 +820,11 @@ class MetadataRecord:
             {"name": "project", "type": "string"},
             {"name": "session_name", "type": "string"},
             {"name": "secret_arn", "type": "string"},
+            {"name": "auth_method", "type": "string"},
+            {"name": "subject", "type": "string"},
+            {"name": "actor", "type": "string"},
+            {"name": "teams", "type": "array<string>"},
+            {"name": "token_id", "type": "string"},
         ]
 
 
@@ -1362,6 +1410,14 @@ class JoinedLogRecord:
     # ETL metadata (added by Glue when raw data is processed)
     etl_processed_at: Optional[str] = None
 
+    # On-behalf-of attribution (metadata_ prefix; None for payload callers and
+    # for records written before these fields existed)
+    metadata_auth_method: Optional[str] = None
+    metadata_subject: Optional[str] = None
+    metadata_actor: Optional[str] = None
+    metadata_teams: Optional[List[str]] = None
+    metadata_token_id: Optional[str] = None
+
     # Decoded fields (populated by decode/decompress methods during ETL)
     request_headers_decoded: Optional[Dict[str, str | None]] = None
     request_body_decoded: Optional[str] = None
@@ -1447,6 +1503,11 @@ class JoinedLogRecord:
             {"name": "metadata_project", "type": "string"},
             {"name": "metadata_session_name", "type": "string"},
             {"name": "metadata_secret_arn", "type": "string"},
+            {"name": "metadata_auth_method", "type": "string"},
+            {"name": "metadata_subject", "type": "string"},
+            {"name": "metadata_actor", "type": "string"},
+            {"name": "metadata_teams", "type": "array<string>"},
+            {"name": "metadata_token_id", "type": "string"},
             # Request headers data
             {"name": "request_headers_raw_headers", "type": "map<string,string>"},
             {"name": "request_headers_decoded", "type": "map<string,string>"},
