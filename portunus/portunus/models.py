@@ -581,14 +581,16 @@ class AnthropicWifSecret(MintSecretBase):
 
     The federation session requests an STS web identity token for ``audience``
     and exchanges it at ``https://api.anthropic.com/v1/oauth/token`` (RFC 7523
-    JWT bearer grant) using the identifiers below.
+    JWT bearer grant) using the identifiers below. ``workspace_id`` is
+    required when the federation rule covers more than one workspace; omit it
+    for a single-workspace rule.
     """
 
     type: Literal["anthropic_wif"]
     federation_rule_id: str = Field(min_length=1)
     organization_id: str = Field(min_length=1)
     service_account_id: str = Field(min_length=1)
-    workspace_id: str = Field(min_length=1)
+    workspace_id: Optional[str] = Field(default=None, min_length=1)
     audience: str = Field(default="https://api.anthropic.com", min_length=1)
 
 

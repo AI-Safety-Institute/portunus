@@ -663,6 +663,15 @@ class TestAnthropicTokenExchange:
         assert minted.expires_at <= datetime.now(timezone.utc) + timedelta(seconds=3600)
 
     @pytest.mark.asyncio
+    async def test_omits_workspace_id_when_unset(self):
+        adapter, requests = _exchange(_token_response)
+
+        await adapter.exchange("header.payload.signature", _secret(workspace_id=None))
+
+        (request,) = requests
+        assert "workspace_id" not in json.loads(request.content)
+
+    @pytest.mark.asyncio
     async def test_error_status_raises_without_leaking_the_assertion(self):
         adapter, _ = _exchange(
             lambda request: httpx.Response(401, json={"error": "invalid_grant"})

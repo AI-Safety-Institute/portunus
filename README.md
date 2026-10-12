@@ -222,12 +222,12 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
 }
 ```
 
-`audience` (default shown) is optional; unknown fields are rejected. On a cache miss Portunus:
+`audience` (default shown) is optional. `workspace_id` is required when the federation rule covers more than one workspace; omit it for a single-workspace rule. Unknown fields are rejected. On a cache miss Portunus:
 
 1. Verifies the caller with STS and fetches the secret, as for stored keys.
 2. Checks `federation_role_arn` is `arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><name>` with `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS`; `<name>` is any further IAM path plus the role name. Nothing else is called if this fails.
 3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`. The token carries no request tags.
-4. Exchanges the token at `https://api.anthropic.com/v1/oauth/token` (RFC 7523 JWT bearer grant, with the four identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
+4. Exchanges the token at `https://api.anthropic.com/v1/oauth/token` (RFC 7523 JWT bearer grant, with the identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
 If STS or the token endpoint cannot be reached or answers 5xx/429, or steps 3–4 take longer than 6 s, `/authorise` returns 503 rather than 403.
 

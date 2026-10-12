@@ -132,6 +132,14 @@ class TestParseSecret:
         assert secret.workspace_id == "ws_example"
         assert secret.audience == "https://api.anthropic.com"
 
+    def test_anthropic_wif_secret_without_workspace_id(self):
+        data = {k: v for k, v in WIF_SECRET.items() if k != "workspace_id"}
+
+        secret = parse_secret(json.dumps(data))
+
+        assert isinstance(secret, AnthropicWifSecret)
+        assert secret.workspace_id is None
+
     def test_anthropic_wif_audience_override(self):
         raw = json.dumps({**WIF_SECRET, "audience": "https://api.example.com"})
 
@@ -154,7 +162,6 @@ class TestParseSecret:
     @pytest.mark.parametrize(
         "changes",
         [
-            {"workspace_id": None},
             {"workspace_id": ""},
             {"host": None},
             {"host": ""},
