@@ -17,6 +17,7 @@ DEFAULT_SESSION_NAME = "portunus"
 # STS's RoleSessionName rule; the charset is ASCII, so re.ASCII keeps \w from
 # admitting more.
 _ROLE_SESSION_NAME = re.compile(r"^[\w+=,.@-]{2,64}$", re.ASCII)
+_ROLE_ARN = re.compile(r"^arn:aws[a-z-]*:iam::\d{12}:role/\S+$", re.ASCII)
 
 
 def _build_default_policy(
@@ -71,11 +72,19 @@ def _session_name(value: str) -> str:
     return value
 
 
+def _role_arn(value: str) -> str:
+    """Validate an IAM role ARN (argparse ``type``)."""
+    if not _ROLE_ARN.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not an IAM role ARN")
+    return value
+
+
 def encode_credentials(
     secret_arn: str,
     policy: str | None = None,
     federation_role_path: str = DEFAULT_FEDERATION_ROLE_PATH_PREFIX,
     session_name: str = DEFAULT_SESSION_NAME,
+    caller_role_arn: str | None = None,
 ) -> str:
     """Assume role with scoped-down session policy and encode credentials for the proxy.
 
@@ -88,13 +97,16 @@ def encode_credentials(
         federation_role_path: IAM path of the federation roles the default
             policy allows assuming.
         session_name: ``RoleSessionName`` for assuming the caller's own role.
+        caller_role_arn: Role to assume instead of the caller's own. The
+            default is rebuilt from the session ARN, which has no IAM path, so
+            pass this for a caller role with a path.
 
     Returns:
         Base64-encoded payload suitable for the Authorization header.
     """
     sts = boto3.client("sts")
     caller_arn = sts.get_caller_identity()["Arn"]
-    role_arn = get_role_arn(caller_arn)
+    role_arn = caller_role_arn or get_role_arn(caller_arn)
     account_id, _ = extract_arn_parts(caller_arn)
 
     policy_json = (
@@ -150,6 +162,14 @@ def main() -> None:
             f"(default: {DEFAULT_SESSION_NAME})"
         ),
     )
+    encode_cmd.add_argument(
+        "--caller-role-arn",
+        type=_role_arn,
+        help=(
+            "Role to assume instead of the caller's own role, which is rebuilt "
+            "from the session ARN and so loses any IAM path"
+        ),
+    )
 
     args = parser.parse_args()
     if not args.command:
@@ -166,6 +186,7 @@ def main() -> None:
                 policy=policy_json,
                 federation_role_path=args.federation_role_path,
                 session_name=args.session_name,
+                caller_role_arn=args.caller_role_arn,
             )
         )
 

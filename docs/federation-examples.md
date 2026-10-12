@@ -166,8 +166,8 @@ payload with the caller's credentials:
 PAYLOAD=$(portunus encode-credentials <config secret ARN>)
 ```
 
-The CLI requires caller roles without an IAM path, because it rebuilds the
-role ARN from the caller's session ARN, which carries none.
+If the caller role has an IAM path, pass it with `--caller-role-arn`. The CLI
+otherwise rebuilds the role ARN from the session ARN, which carries no path.
 
 Then send it through the lab's proxy wherever the lab expects its API key.
 Each lab section below shows a request.

@@ -9,6 +9,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `anthropic_wif`'s `workspace_id` is optional. Portunus sends it to Anthropic
   only when set; set it only for rules that span more than one workspace.
 
+### Added
+- `portunus encode-credentials --caller-role-arn` sets the role to assume
+  instead of the caller's own. The default is rebuilt from the session ARN,
+  which has no IAM path, so pass it for caller roles with a path.
+
 ## [0.11.0] - 2026-10-02
 
 ### Added
