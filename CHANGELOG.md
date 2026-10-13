@@ -14,6 +14,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   instead of the caller's own. The default is rebuilt from the session ARN,
   which has no IAM path, so pass it for caller roles with a path.
 
+### Fixed
+- The WebSocket route matches the `Upgrade` token case-insensitively
+  (RFC 6455), so clients that send `Upgrade: WebSocket` reach the relay.
+
 ## [0.11.0] - 2026-10-02
 
 ### Added
