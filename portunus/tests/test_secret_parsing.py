@@ -12,6 +12,7 @@ from portunus.models import (
     OPENROUTER_API_AUDIENCE,
     AnthropicWifSecret,
     GcpWifSecret,
+    MintSecretBase,
     OpenAiWifSecret,
     OpenRouterWifSecret,
     SecretsManagerAuthPayload,
@@ -22,6 +23,7 @@ from portunus.services.secret_validation_service import (
 )
 
 ROLE_ARN = "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example"  # noqa: E501
+IDENTITY_ROLE_ARN = "arn:aws:iam::123456789012:role/portunus-fed/identity/example"
 WIF_SECRET = {
     "type": "anthropic_wif",
     "host": "api.example.com",
@@ -345,6 +347,22 @@ class TestParseSecret:
 
         with pytest.raises(AuthenticationError):
             parse_secret(json.dumps(data))
+
+    @pytest.mark.parametrize(
+        "data", [WIF_SECRET, OPENAI_SECRET, OPENROUTER_SECRET, GCP_SECRET]
+    )
+    def test_mint_secrets_take_an_optional_identity_role(self, data: dict):
+        without = parse_secret(json.dumps(data))
+        with_role = parse_secret(
+            json.dumps({**data, "identity_role_arn": IDENTITY_ROLE_ARN})
+        )
+
+        assert isinstance(without, MintSecretBase)
+        assert without.identity_role_arn is None
+        assert isinstance(with_role, MintSecretBase)
+        assert with_role.identity_role_arn == IDENTITY_ROLE_ARN
+        with pytest.raises(AuthenticationError):
+            parse_secret(json.dumps({**data, "identity_role_arn": ""}))
 
     def test_unknown_type_raises(self):
         with pytest.raises(AuthenticationError):
