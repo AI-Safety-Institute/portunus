@@ -568,12 +568,18 @@ class MintSecretBase(BaseModel):
         federation_role_arn: IAM role whose trust policy admits the caller,
             in an allowed account and under the deployment's federation role
             path.
+        identity_role_arn: Optional IAM role, under the same account and path
+            rules, that Portunus assumes from the federation role session and
+            federates instead. The identity token's ``sub`` and
+            ``principal_tags`` are then this role's, not the federation
+            role's.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     host: str = Field(min_length=1)
     federation_role_arn: str = Field(min_length=1)
+    identity_role_arn: Optional[str] = Field(default=None, min_length=1)
 
 
 class AnthropicWifSecret(MintSecretBase):

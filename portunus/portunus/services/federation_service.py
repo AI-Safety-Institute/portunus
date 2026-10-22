@@ -6,7 +6,9 @@ Minting has two independent parts:
 1. Identity proof (:class:`StsFederationService`): with the caller's own
    credentials, assume the secret's federation role, then have that session
    request an STS web identity token. The result is a signed JWT whose subject
-   is the federation role.
+   is the federation role. A secret with an identity role has the federation
+   session assume it and request the token instead, so the subject is the
+   identity role.
 2. Exchange: trade the JWT for a provider bearer token. Each provider has an
    adapter with the same ``exchange(proof, secret)`` shape.
    :class:`AnthropicTokenExchange`, :class:`OpenAiTokenExchange` and
@@ -24,7 +26,7 @@ import logging
 import re
 import urllib.parse
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Protocol, Sequence
 
@@ -119,14 +121,17 @@ class FederationIdentity:
     """An assumed federation-role session acting for one caller.
 
     Attributes:
-        credentials: The federation session's credentials
-        role_arn: The federation role the session assumed
+        credentials: The session's credentials: the identity role session's
+            when ``identity_role_arn`` is set, else the federation session's
+        role_arn: The federation role the caller assumed
         user: The caller's STS source identity, or its IAM role name when its
             session carries none
         principal: The caller's IAM role name (also the federation session's
             RoleSessionName)
         session: The caller's own RoleSessionName
         project: The caller's project, or "" when unknown
+        identity_role_arn: The identity role assumed from the federation
+            session, or None when the secret names none
     """
 
     credentials: AwsCredentials
@@ -135,6 +140,7 @@ class FederationIdentity:
     principal: str
     session: str
     project: str
+    identity_role_arn: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -154,7 +160,10 @@ class MintedToken:
 
 
 def validate_federation_role_arn(
-    arn: str, allowed_account_ids: Sequence[str], role_path_prefix: str
+    arn: str,
+    allowed_account_ids: Sequence[str],
+    role_path_prefix: str,
+    field: str = "federation_role_arn",
 ) -> None:
     """Reject federation role ARNs outside the deployment's allowed set.
 
@@ -163,9 +172,10 @@ def validate_federation_role_arn(
     ``<name>`` is any further IAM path plus a role name.
 
     Args:
-        arn: The secret's ``federation_role_arn``
+        arn: The secret's ``federation_role_arn`` or ``identity_role_arn``
         allowed_account_ids: Accounts a federation role may live in
         role_path_prefix: IAM path the role must sit under
+        field: The secret field ``arn`` came from, for error messages
 
     Raises:
         AuthenticationError: Malformed ARN, account not allowed, or role path
@@ -178,12 +188,12 @@ def validate_federation_role_arn(
         )
     match = _IAM_ROLE_ARN.fullmatch(arn)
     if match is None:
-        raise AuthenticationError("federation_role_arn is not an IAM role ARN")
+        raise AuthenticationError(f"{field} is not an IAM role ARN")
     if match["account_id"] not in allowed_account_ids:
-        raise AuthenticationError("federation_role_arn is not in an allowed account")
+        raise AuthenticationError(f"{field} is not in an allowed account")
     if not match["path"].startswith(role_path_prefix):
         raise AuthenticationError(
-            f"federation_role_arn is not under the {role_path_prefix} role path"
+            f"{field} is not under the {role_path_prefix} role path"
         )
 
 
@@ -253,7 +263,7 @@ def _client_error_code(error: ClientError) -> str:
 class StsFederationService:
     """Identity-proof step: assume the federation role and issue STS JWTs.
 
-    Both calls use a regional STS endpoint. GetWebIdentityToken is not served
+    Every call uses a regional STS endpoint. GetWebIdentityToken is not served
     by the global endpoint, and a deployment's federation-role trust policy
     may pin the request to a specific VPC endpoint.
     """
@@ -282,6 +292,37 @@ class StsFederationService:
             )
         return f"https://sts.{region}.amazonaws.com"
 
+    async def _assume_role(
+        self, credentials: AwsCredentials, role_arn: str, session_name: str
+    ) -> tuple[AwsCredentials, Optional[str]]:
+        """AssumeRole as ``credentials``; returns the session and source identity.
+
+        STS errors propagate for the caller to map.
+        """
+        async with self.boto_session.create_client(
+            "sts",
+            aws_access_key_id=credentials.access_key_id,
+            aws_secret_access_key=credentials.secret_access_key,
+            aws_session_token=credentials.session_token,
+            endpoint_url=self.endpoint_url(),
+            config=_STS_CLIENT_CONFIG,
+        ) as sts:
+            response = await sts.assume_role(
+                RoleArn=role_arn,
+                RoleSessionName=session_name,
+                DurationSeconds=FEDERATION_SESSION_SECONDS,
+            )
+        issued = response["Credentials"]
+        return (
+            AwsCredentials(
+                access_key_id=issued["AccessKeyId"],
+                secret_access_key=issued["SecretAccessKey"],
+                session_token=issued["SessionToken"],
+                expiration=issued["Expiration"],
+            ),
+            response.get("SourceIdentity"),
+        )
+
     @capture_async()
     async def assume_federation_role(
         self, credentials: AwsCredentials, principal: PrincipalInfo, role_arn: str
@@ -298,19 +339,9 @@ class StsFederationService:
         session = caller_session(principal)
         project = caller_project(principal)
         try:
-            async with self.boto_session.create_client(
-                "sts",
-                aws_access_key_id=credentials.access_key_id,
-                aws_secret_access_key=credentials.secret_access_key,
-                aws_session_token=credentials.session_token,
-                endpoint_url=self.endpoint_url(),
-                config=_STS_CLIENT_CONFIG,
-            ) as sts:
-                response = await sts.assume_role(
-                    RoleArn=role_arn,
-                    RoleSessionName=role_name,
-                    DurationSeconds=FEDERATION_SESSION_SECONDS,
-                )
+            issued, source_identity = await self._assume_role(
+                credentials, role_arn, role_name
+            )
         except ClientError as e:
             code = _client_error_code(e)
             if code == "ExpiredToken":
@@ -324,20 +355,46 @@ class StsFederationService:
                 f"AssumeRole on federation role failed: {type(e).__name__}: {e}"
             )
             raise UpstreamServiceError("STS is unavailable") from e
-        issued = response["Credentials"]
         return FederationIdentity(
-            credentials=AwsCredentials(
-                access_key_id=issued["AccessKeyId"],
-                secret_access_key=issued["SecretAccessKey"],
-                session_token=issued["SessionToken"],
-                expiration=issued["Expiration"],
-            ),
+            credentials=issued,
             role_arn=role_arn,
-            user=caller_user(role_name, response.get("SourceIdentity")),
+            user=caller_user(role_name, source_identity),
             principal=role_name,
             session=session,
             project=project,
         )
+
+    @capture_async()
+    async def assume_identity_role(
+        self, identity: FederationIdentity, role_arn: str
+    ) -> FederationIdentity:
+        """Assume ``role_arn`` from the federation session in ``identity``.
+
+        The session name and duration are those of the federation session.
+        The result carries the new session's credentials and otherwise keeps
+        ``identity``'s fields, so identity tokens it requests name
+        ``role_arn``.
+
+        Raises:
+            AuthenticationError: STS refused the assumption. An identity role
+                whose trust policy does not allow ``sts:TagSession`` refuses
+                sessions that carry inherited transitive session tags.
+            UpstreamServiceError: STS could not be reached.
+        """
+        try:
+            issued, _ = await self._assume_role(
+                identity.credentials, role_arn, identity.principal
+            )
+        except ClientError as e:
+            code = _client_error_code(e)
+            logger.error(f"AssumeRole on identity role failed ({code}): {e}")
+            raise AuthenticationError(
+                f"Could not assume identity role ({code or 'unknown error'})"
+            ) from e
+        except BotoCoreError as e:
+            logger.error(f"AssumeRole on identity role failed: {type(e).__name__}: {e}")
+            raise UpstreamServiceError("STS is unavailable") from e
+        return replace(identity, credentials=issued, identity_role_arn=role_arn)
 
     @capture_async()
     async def web_identity_token(
@@ -347,7 +404,7 @@ class StsFederationService:
         signing_algorithm: SigningAlgorithm = IDENTITY_TOKEN_SIGNING_ALGORITHM,
         duration_seconds: int = IDENTITY_TOKEN_SECONDS,
     ) -> WebIdentityToken:
-        """Issue a fresh STS-signed JWT for ``audience`` from the federation session.
+        """Issue a fresh STS-signed JWT for ``audience`` from ``identity``'s session.
 
         Providers treat the JWT ID as single-use, so callers must request a new
         token for every exchange rather than reuse one. ``signing_algorithm``
@@ -773,11 +830,11 @@ class TokenMintService:
         principal: PrincipalInfo,
         secret: MintSecretBase,
     ) -> MintedToken:
-        """Validate the federation role, prove the caller's identity, and exchange.
+        """Validate the roles, prove the caller's identity, and exchange.
 
         Raises:
-            AuthenticationError: Role not allowed, no route for the secret
-                type, STS refused, or the exchange failed.
+            AuthenticationError: Federation or identity role not allowed, no
+                route for the secret type, STS refused, or the exchange failed.
             CredentialsError: Caller credentials expired, not an assumed role,
                 or its role name is not a valid session name.
             UpstreamServiceError: STS or the provider was unavailable, or
@@ -788,6 +845,13 @@ class TokenMintService:
             self.federation_config.allowed_account_ids,
             self.federation_config.role_path_prefix,
         )
+        if secret.identity_role_arn is not None:
+            validate_federation_role_arn(
+                secret.identity_role_arn,
+                self.federation_config.allowed_account_ids,
+                self.federation_config.role_path_prefix,
+                field="identity_role_arn",
+            )
         route = self._routes.get(type(secret))
         if route is None:
             raise AuthenticationError(
@@ -798,6 +862,10 @@ class TokenMintService:
                 identity = await self.sts.assume_federation_role(
                     credentials, principal, secret.federation_role_arn
                 )
+                if secret.identity_role_arn is not None:
+                    identity = await self.sts.assume_identity_role(
+                        identity, secret.identity_role_arn
+                    )
                 proof = await route.prove(identity, secret)
                 minted = await route.adapter.exchange(proof, secret)
         except TimeoutError as e:
@@ -819,6 +887,7 @@ def _log_mint(
     fields = {
         "identity_token_id": token_id,
         "federation_role_arn": identity.role_arn,
+        "identity_role_arn": identity.identity_role_arn,
         "user": identity.user,
         "principal": identity.principal,
         "session": identity.session,
@@ -826,7 +895,8 @@ def _log_mint(
     }
     logger.info(
         f"Minted {type(secret).__name__} token: jti={token_id or '-'} "
-        f"role={identity.role_arn} user={identity.user} "
+        f"role={identity.role_arn} "
+        f"identity_role={identity.identity_role_arn or '-'} user={identity.user} "
         f"principal={identity.principal} session={identity.session} "
         f"project={identity.project}",
         extra=fields,

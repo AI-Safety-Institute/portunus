@@ -156,7 +156,7 @@ Portunus captures **full request and response data** — bodies, headers, and tr
 - **Request and response bodies are stored verbatim**, including prompts, completions, and any data (personal, commercial, or otherwise sensitive) that clients send or receive.
 - **Headers and URLs are stored verbatim**, except the headers that can carry a credential: the provider API key header (`API_KEY_HEADER`), the header the real upstream credential is injected into, and every name in `KNOWN_AUTH_HEADERS`. These are dropped before logging. No other headers are filtered — secrets carried in any *other* header, or embedded in a URL or body, **will be captured**.
 
-For minted tokens, each mint writes one log line pairing the `jti` of the STS identity token (which providers record when they exchange it) with the federation role ARN and the caller's user, principal, session and project. A provider-side record is matched to the caller through that line, and to the caller's requests through the per-request logs for the token's lifetime; the tokens themselves are not logged.
+For minted tokens, each mint writes one log line pairing the `jti` of the STS identity token (which providers record when they exchange it) with the federation role ARN, the identity role ARN if the secret names one, and the caller's user, principal, session and project. A provider-side record is matched to the caller through that line, and to the caller's requests through the per-request logs for the token's lifetime; the tokens themselves are not logged.
 
 Portunus does **not** attempt to redact secrets or sensitive content from what it logs. If you need redaction, filtering, or access tiering, do it downstream of the Kinesis streams (e.g. in the ETL/query layer that consumes the logs) and restrict who can read the raw stream output. Treat the raw log storage as containing everything your clients send and receive.
 
@@ -225,8 +225,8 @@ JSON without a `type` is treated as a stored key (and, if it does not match that
 `audience` (default shown) is optional. `workspace_id` is required when the federation rule covers more than one workspace; omit it for a single-workspace rule. Unknown fields are rejected. On a cache miss Portunus:
 
 1. Verifies the caller with STS and fetches the secret, as for stored keys.
-2. Checks `federation_role_arn` is `arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><name>` with `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS`; `<name>` is any further IAM path plus the role name. Nothing else is called if this fails.
-3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`. The token carries no request tags.
+2. Checks `federation_role_arn` (and `identity_role_arn`, if set) is `arn:aws:iam::<account>:role<FEDERATION_ROLE_PATH_PREFIX><name>` with `<account>` in `FEDERATION_ALLOWED_ACCOUNT_IDS`; `<name>` is any further IAM path plus the role name. Nothing else is called if this fails.
+3. Assumes the federation role with the caller's own credentials (`RoleSessionName` is the caller's IAM role name) through the regional STS endpoint, then from that session requests an STS web identity token for `audience`. With `identity_role_arn` set, that session first assumes the [identity role](#identity-role) and the token is requested from the identity role session. The token carries no request tags.
 4. Exchanges the token at `https://api.anthropic.com/v1/oauth/token` (RFC 7523 JWT bearer grant, with the identifiers above) and returns the bearer token with `output_header: "authorization"` and `output_prefix: "Bearer "`.
 
 If STS or the token endpoint cannot be reached or answers 5xx/429, or steps 3–4 take longer than 6 s, `/authorise` returns 503 rather than 403.
@@ -295,6 +295,10 @@ On the OpenRouter side, all deployment concerns: workload identity federation is
 As for `anthropic_wif`, an unreachable Google endpoint, a 5xx/429 answer or a missed 6 s deadline returns 503.
 
 On the Google side, all deployment concerns: the workload identity pool provider is an OIDC provider whose issuer is the federation role's account's STS issuer URL and whose allowed audience is the provider's own resource name, the secret's `audience`. The token's `sub` is the federation role's IAM ARN including its path (`federation_role_arn`), so the attribute mapping derives `google.subject` from `assertion.sub` with an `extract` that keeps it within Google's 127-character subject limit, and the attribute condition matches the role path prefix. The service account must grant `roles/iam.workloadIdentityUser` to the pool principal the mapping produces. The federation role's identity policy must allow `sts:GetWebIdentityToken` for `audience`, as for the other minted types.
+
+#### Identity role
+
+Every minted type takes an optional `identity_role_arn`, checked like `federation_role_arn`. When it is set, Portunus assumes the identity role from the federation role session, with the same session name and duration, and requests the STS token as the identity role. The token's `sub` and `principal_tags` are then the identity role's, so a deployment's access-control naming, paths and tags on federation roles stay off the token. Where the sections above say the token's `sub` is `federation_role_arn`, or that the federation role needs `sts:GetWebIdentityToken`, read the identity role instead. The identity role's trust policy should admit exactly the federation role. If it does not allow `sts:TagSession`, a caller whose session carries inherited transitive tags (EKS Pod Identity, for example) is refused at this step instead of having those tags sent to the lab. [docs/federation-examples.md](docs/federation-examples.md#optional-identity-role) shows the policies.
 
 #### Caching and the federation role
 

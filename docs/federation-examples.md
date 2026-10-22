@@ -157,6 +157,104 @@ Outputs:
 
 </details>
 
+## Optional: identity role
+
+The JWT names the role that requests it. By default that is the federation
+role, so the token's `sub` is the federation role's ARN, path included, and
+its `principal_tags` claim carries the federation role's tags. If those encode
+your access control, give the grant an identity role and add it to the config
+secret:
+
+```json
+"identity_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/portunus-id-example"
+```
+
+Portunus assumes the identity role from the federation role session and
+requests the JWT as the identity role. The identity role must also be in an
+allowed account and under `/portunus-fed/`. Its name doesn't start with
+`portunus-fed-`, so the deployer's bare-name permissions (above) must also
+cover `role/portunus-id-*`. The template changes like this:
+
+- **Identity role trust policy:** only the federation role can assume it. It
+  leaves out `sts:TagSession`, so a caller whose credentials carry inherited
+  transitive session tags, such as EKS Pod Identity tags, is refused here
+  rather than having those tags reach the lab.
+- **Identity role inline policy and boundary:** the `IssueIdentityToken`
+  policy and the `sts:GetWebIdentityToken` boundary move here from the
+  federation role.
+- **Federation role inline policy and boundary:** these now allow only
+  `sts:AssumeRole` on the identity role.
+
+Tag the identity role only with what the lab may see. Register its ARN with
+the lab wherever the sections below use the federation role's ARN. For Google,
+the binding's subject becomes `portunus-id-example`. Give each
+federation role its own identity role so each grant keeps its own lab-side
+identity.
+
+<details><summary>CloudFormation changes</summary>
+
+In the template above, replace the statement in `FederationRoleBoundary` and
+in the federation role's inline policy with this one:
+
+```yaml
+- Effect: Allow
+  Action: sts:AssumeRole
+  Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/portunus-fed/${IdentityRoleName}'
+```
+
+Then add:
+
+```yaml
+Parameters:
+  IdentityRoleName:
+    Type: String
+    Default: portunus-id-example
+
+Resources:
+  IdentityRoleBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Path: /portunus-fed/
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:GetWebIdentityToken
+            Resource: '*'
+
+  IdentityRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref IdentityRoleName
+      Path: /portunus-fed/
+      MaxSessionDuration: 3600
+      PermissionsBoundary: !Ref IdentityRoleBoundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt FederationRole.Arn
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IssueIdentityToken
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sts:GetWebIdentityToken
+                Resource: '*'
+                Condition:
+                  'ForAllValues:StringEquals':
+                    'sts:IdentityTokenAudience':
+                      - !Ref ProviderAudience
+```
+
+The federation role's policy names the identity role by ARN rather than
+`!GetAtt`, which would make the two roles depend on each other.
+
+</details>
+
 ## Calling a grant
 
 The payload and request steps are the same for every lab. First encode a

@@ -10,6 +10,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from itertools import repeat
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -81,6 +82,7 @@ ROLE_ARN = (
     f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/projects/example/"
     "example-grant@projects.example"
 )
+IDENTITY_ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/portunus-fed/identity/example"
 CALLER_ROLE = "UserProfile_TestUser_example"
 CALLER = PrincipalInfo(
     arn=f"arn:aws:sts::{ACCOUNT}:assumed-role/{CALLER_ROLE}/session",
@@ -188,6 +190,20 @@ def _identity() -> FederationIdentity:
         principal=CALLER_ROLE,
         session="session",
         project="example",
+    )
+
+
+def _identity_session() -> FederationIdentity:
+    """``_identity()`` after assuming ``IDENTITY_ROLE_ARN`` from its session."""
+    return replace(
+        _identity(),
+        credentials=AwsCredentials(
+            access_key_id="ASIAIDENTITY",
+            secret_access_key="identity-secret",
+            session_token="identity-token",
+            expiration=NOW + timedelta(minutes=15),
+        ),
+        identity_role_arn=IDENTITY_ROLE_ARN,
     )
 
 
@@ -350,17 +366,26 @@ class TestIdentityTokenId:
 def _sts_session(
     assume_role: object = None, get_web_identity_token: object = None
 ) -> tuple[MagicMock, list[AsyncMock]]:
-    """A boto session whose STS clients are mocks; returns (session, clients)."""
+    """A boto session whose STS clients are mocks; returns (session, clients).
+
+    A list for ``assume_role`` gives the result of each AssumeRole call in turn.
+    """
     clients: list[AsyncMock] = []
+    assume_role_results = (
+        iter(assume_role) if isinstance(assume_role, list) else repeat(assume_role)
+    )
+
+    def next_assume_role(**kwargs: object) -> object:
+        result = next(assume_role_results)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def create_client(service_name: str, **kwargs: object) -> AsyncMock:
         assert service_name == "sts"
         client = AsyncMock()
         client.create_kwargs = kwargs
-        client.assume_role = AsyncMock(
-            side_effect=assume_role if isinstance(assume_role, Exception) else None,
-            return_value=assume_role,
-        )
+        client.assume_role = AsyncMock(side_effect=next_assume_role)
         client.get_web_identity_token = AsyncMock(
             side_effect=get_web_identity_token
             if isinstance(get_web_identity_token, Exception)
@@ -382,6 +407,14 @@ ASSUME_ROLE_RESPONSE = {
         "AccessKeyId": "ASIAFED",
         "SecretAccessKey": "fed-secret",
         "SessionToken": "fed-token",
+        "Expiration": NOW + timedelta(minutes=15),
+    }
+}
+IDENTITY_ASSUME_ROLE_RESPONSE = {
+    "Credentials": {
+        "AccessKeyId": "ASIAIDENTITY",
+        "SecretAccessKey": "identity-secret",
+        "SessionToken": "identity-token",
         "Expiration": NOW + timedelta(minutes=15),
     }
 }
@@ -488,6 +521,53 @@ class TestStsFederationService:
 
         with pytest.raises(AuthenticationError, match="AccessDenied"):
             await service.assume_federation_role(CALLER_CREDENTIALS, CALLER, ROLE_ARN)
+
+    @pytest.mark.asyncio
+    async def test_identity_role_is_assumed_with_the_federation_session(self):
+        session, clients = _sts_session(assume_role=IDENTITY_ASSUME_ROLE_RESPONSE)
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        identity = await service.assume_identity_role(_identity(), IDENTITY_ROLE_ARN)
+
+        (client,) = clients
+        assert client.create_kwargs["aws_access_key_id"] == "ASIAFED"
+        assert client.create_kwargs["aws_secret_access_key"] == "fed-secret"
+        assert client.create_kwargs["aws_session_token"] == "fed-token"
+        assert client.create_kwargs["endpoint_url"] == STS_ENDPOINT
+        assert client.create_kwargs["config"].retries == {
+            "max_attempts": 1,
+            "mode": "standard",
+        }
+        client.assume_role.assert_awaited_once_with(
+            RoleArn=IDENTITY_ROLE_ARN,
+            RoleSessionName=CALLER_ROLE,
+            DurationSeconds=FEDERATION_SESSION_SECONDS,
+        )
+        assert identity == _identity_session()
+
+    @pytest.mark.asyncio
+    async def test_identity_role_access_denied_raises_authentication_error(self):
+        session, _ = _sts_session(
+            assume_role=_client_error("AccessDenied", "AssumeRole")
+        )
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        with pytest.raises(
+            AuthenticationError, match=r"assume identity role \(AccessDenied\)"
+        ):
+            await service.assume_identity_role(_identity(), IDENTITY_ROLE_ARN)
+
+    @pytest.mark.asyncio
+    async def test_identity_role_unreachable_sts_raises_upstream_service_error(self):
+        session, _ = _sts_session(
+            assume_role=EndpointConnectionError(endpoint_url=STS_ENDPOINT)
+        )
+        service = StsFederationService(session, FEDERATION_CONFIG)
+
+        with pytest.raises(UpstreamServiceError, match="STS is unavailable") as e:
+            await service.assume_identity_role(_identity(), IDENTITY_ROLE_ARN)
+
+        assert STS_ENDPOINT not in e.value.message
 
     @pytest.mark.asyncio
     async def test_web_identity_token_uses_the_federation_session_without_tags(
@@ -1284,6 +1364,7 @@ class TestTokenMintService:
     ) -> tuple[TokenMintService, MagicMock, MagicMock, MagicMock, MagicMock, MagicMock]:
         sts = MagicMock()
         sts.assume_federation_role = AsyncMock(return_value=_identity())
+        sts.assume_identity_role = AsyncMock(return_value=_identity_session())
         tokens = iter(["jwt-1", "jwt-2", "jwt-3"])
         sts.web_identity_token = AsyncMock(
             side_effect=lambda *args, **kwargs: WebIdentityToken(
@@ -1366,8 +1447,28 @@ class TestTokenMintService:
         sts.assume_federation_role.assert_awaited_once_with(
             CALLER_CREDENTIALS, CALLER, ROLE_ARN
         )
+        sts.assume_identity_role.assert_not_awaited()
         sts.web_identity_token.assert_awaited_once_with(
             _identity(), "https://api.anthropic.com"
+        )
+        anthropic.exchange.assert_awaited_once_with("jwt-1", secret)
+        assert minted.token == "token-for-jwt-1"
+
+    @pytest.mark.asyncio
+    async def test_mint_requests_the_token_as_the_identity_role(self):
+        service, sts, anthropic, _, _, _ = self._service()
+        secret = _secret(identity_role_arn=IDENTITY_ROLE_ARN)
+
+        minted = await service.mint(CALLER_CREDENTIALS, CALLER, secret)
+
+        sts.assume_federation_role.assert_awaited_once_with(
+            CALLER_CREDENTIALS, CALLER, ROLE_ARN
+        )
+        sts.assume_identity_role.assert_awaited_once_with(
+            _identity(), IDENTITY_ROLE_ARN
+        )
+        sts.web_identity_token.assert_awaited_once_with(
+            _identity_session(), "https://api.anthropic.com"
         )
         anthropic.exchange.assert_awaited_once_with("jwt-1", secret)
         assert minted.token == "token-for-jwt-1"
@@ -1390,12 +1491,13 @@ class TestTokenMintService:
         assert record.levelno == logging.INFO
         assert record.getMessage() == (
             f"Minted AnthropicWifSecret token: jti={IDENTITY_TOKEN_ID} "
-            f"role={ROLE_ARN} user={SOURCE_IDENTITY} principal={CALLER_ROLE} "
-            "session=session project=example"
+            f"role={ROLE_ARN} identity_role=- user={SOURCE_IDENTITY} "
+            f"principal={CALLER_ROLE} session=session project=example"
         )
         fields = vars(record)
         assert fields["identity_token_id"] == IDENTITY_TOKEN_ID
         assert fields["federation_role_arn"] == ROLE_ARN
+        assert fields["identity_role_arn"] is None
         assert fields["user"] == SOURCE_IDENTITY
         assert fields["principal"] == CALLER_ROLE
         assert fields["session"] == "session"
@@ -1413,6 +1515,24 @@ class TestTokenMintService:
         (record,) = [r for r in caplog.records if r.getMessage().startswith("Minted")]
         assert "Minted AnthropicWifSecret token: jti=- role=" in record.getMessage()
         assert vars(record)["identity_token_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_mint_logs_the_identity_role(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
+        service, *_ = self._service()
+
+        await service.mint(
+            CALLER_CREDENTIALS, CALLER, _secret(identity_role_arn=IDENTITY_ROLE_ARN)
+        )
+
+        (record,) = [r for r in caplog.records if r.getMessage().startswith("Minted")]
+        assert (
+            f" role={ROLE_ARN} identity_role={IDENTITY_ROLE_ARN} user="
+            in record.getMessage()
+        )
+        fields = vars(record)
+        assert fields["federation_role_arn"] == ROLE_ARN
+        assert fields["identity_role_arn"] == IDENTITY_ROLE_ARN
 
     @pytest.mark.asyncio
     async def test_failed_exchange_logs_no_mint(self, caplog):
@@ -1743,3 +1863,156 @@ class TestTokenMintService:
         gcp.exchange.assert_not_awaited()
         openai.exchange.assert_not_awaited()
         openrouter.exchange.assert_not_awaited()
+
+    def _service_over(self, session: MagicMock) -> tuple[TokenMintService, MagicMock]:
+        """Mock adapters over a real STS service; returns (service, adapters).
+
+        ``adapters.<provider>.exchange`` records each adapter's calls.
+        """
+        _, _, anthropic, gcp, openai, openrouter = self._service()
+        service = TokenMintService(
+            sts=StsFederationService(session, FEDERATION_CONFIG),
+            anthropic=anthropic,
+            gcp=gcp,
+            openai=openai,
+            openrouter=openrouter,
+            federation_config=FEDERATION_CONFIG,
+        )
+        adapters = MagicMock(
+            anthropic=anthropic, gcp=gcp, openai=openai, openrouter=openrouter
+        )
+        return service, adapters
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("make_secret", "provider"),
+        [
+            (_secret, "anthropic"),
+            (_openai_secret, "openai"),
+            (_openrouter_secret, "openrouter"),
+            (_gcp_secret, "gcp"),
+        ],
+    )
+    async def test_every_mint_type_requests_the_token_as_the_identity_role(
+        self, make_secret: Callable[..., MintSecretBase], provider: str
+    ):
+        session, clients = _sts_session(
+            assume_role=[ASSUME_ROLE_RESPONSE, IDENTITY_ASSUME_ROLE_RESPONSE],
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        service, adapters = self._service_over(session)
+        secret = make_secret(identity_role_arn=IDENTITY_ROLE_ARN)
+
+        await service.mint(CALLER_CREDENTIALS, CALLER, secret)
+
+        federation, identity, web_identity = clients
+        assert federation.create_kwargs["aws_session_token"] == "caller-token"
+        federation.assume_role.assert_awaited_once_with(
+            RoleArn=ROLE_ARN,
+            RoleSessionName=CALLER_ROLE,
+            DurationSeconds=FEDERATION_SESSION_SECONDS,
+        )
+        assert identity.create_kwargs["aws_session_token"] == "fed-token"
+        identity.assume_role.assert_awaited_once_with(
+            RoleArn=IDENTITY_ROLE_ARN,
+            RoleSessionName=CALLER_ROLE,
+            DurationSeconds=FEDERATION_SESSION_SECONDS,
+        )
+        assert web_identity.create_kwargs["aws_access_key_id"] == "ASIAIDENTITY"
+        assert web_identity.create_kwargs["aws_session_token"] == "identity-token"
+        web_identity.get_web_identity_token.assert_awaited_once()
+        getattr(adapters, provider).exchange.assert_awaited_once_with(
+            "header.payload.signature", secret
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "make_secret", [_secret, _openai_secret, _openrouter_secret, _gcp_secret]
+    )
+    async def test_mint_without_an_identity_role_assumes_only_the_federation_role(
+        self, make_secret: Callable[..., MintSecretBase]
+    ):
+        session, clients = _sts_session(
+            assume_role=ASSUME_ROLE_RESPONSE,
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        service, _ = self._service_over(session)
+
+        await service.mint(CALLER_CREDENTIALS, CALLER, make_secret())
+
+        assert sum(client.assume_role.await_count for client in clients) == 1
+        clients[0].assume_role.assert_awaited_once_with(
+            RoleArn=ROLE_ARN,
+            RoleSessionName=CALLER_ROLE,
+            DurationSeconds=FEDERATION_SESSION_SECONDS,
+        )
+        token_sessions = [
+            client.create_kwargs["aws_session_token"]
+            for client in clients
+            if client.get_web_identity_token.await_count
+        ]
+        assert token_sessions == ["fed-token"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("identity_role_arn", "message"),
+        [
+            (
+                f"arn:aws:iam::{OTHER_ACCOUNT}:role/portunus-fed/identity/example",
+                "identity_role_arn is not in an allowed account",
+            ),
+            (
+                f"arn:aws:iam::{ACCOUNT}:role/other/identity/example",
+                "identity_role_arn is not under the /portunus-fed/ role path",
+            ),
+            (
+                f"arn:aws:iam::{ACCOUNT}:user/portunus-fed/identity/example",
+                "identity_role_arn is not an IAM role ARN",
+            ),
+        ],
+        ids=["other-account", "outside-path-prefix", "not-a-role"],
+    )
+    async def test_disallowed_identity_role_is_rejected_before_any_aws_call(
+        self, identity_role_arn: str, message: str
+    ):
+        service, sts, anthropic, gcp, openai, openrouter = self._service()
+        secret = _secret(identity_role_arn=identity_role_arn)
+
+        with pytest.raises(AuthenticationError, match=message):
+            await service.mint(CALLER_CREDENTIALS, CALLER, secret)
+
+        sts.assume_federation_role.assert_not_awaited()
+        sts.assume_identity_role.assert_not_awaited()
+        sts.web_identity_token.assert_not_awaited()
+        anthropic.exchange.assert_not_awaited()
+        gcp.exchange.assert_not_awaited()
+        openai.exchange.assert_not_awaited()
+        openrouter.exchange.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mint_stops_when_sts_denies_the_identity_role(self, caplog):
+        caplog.set_level(logging.INFO, logger="api.access")
+        session, clients = _sts_session(
+            assume_role=[
+                ASSUME_ROLE_RESPONSE,
+                _client_error("AccessDenied", "AssumeRole"),
+            ],
+            get_web_identity_token=WEB_IDENTITY_RESPONSE,
+        )
+        service, adapters = self._service_over(session)
+
+        with pytest.raises(
+            AuthenticationError, match=r"assume identity role \(AccessDenied\)"
+        ):
+            await service.mint(
+                CALLER_CREDENTIALS,
+                CALLER,
+                _secret(identity_role_arn=IDENTITY_ROLE_ARN),
+            )
+
+        federation, identity = clients
+        assert identity.create_kwargs["aws_session_token"] == "fed-token"
+        assert identity.assume_role.await_args.kwargs["RoleArn"] == IDENTITY_ROLE_ARN
+        assert not any(c.get_web_identity_token.await_count for c in clients)
+        adapters.anthropic.exchange.assert_not_awaited()
+        assert not [r for r in caplog.records if r.getMessage().startswith("Minted")]

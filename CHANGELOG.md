@@ -13,6 +13,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `portunus encode-credentials --caller-role-arn` sets the role to assume
   instead of the caller's own. The default is rebuilt from the session ARN,
   which has no IAM path, so pass it for caller roles with a path.
+- Mint secrets take an optional `identity_role_arn`. Portunus assumes it from
+  the federation role session and requests the identity token as it, so the
+  token's `sub` and `principal_tags` are the identity role's rather than the
+  federation role's. It must pass the same account and path checks as
+  `federation_role_arn`. The mint log line gains `identity_role`. See
+  [Identity role](README.md#identity-role).
 
 ## [0.11.0] - 2026-10-02
 
