@@ -166,12 +166,14 @@ your access control, give the grant an identity role and add it to the config
 secret:
 
 ```json
-"identity_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/portunus-fed-example-identity"
+"identity_role_arn": "arn:aws:iam::123456789012:role/portunus-fed/portunus-id-example"
 ```
 
 Portunus assumes the identity role from the federation role session and
 requests the JWT as the identity role. The identity role must also be in an
-allowed account and under `/portunus-fed/`. The template changes like this:
+allowed account and under `/portunus-fed/`. Its name doesn't start with
+`portunus-fed-`, so the deployer's bare-name permissions (above) must also
+cover `role/portunus-id-*`. The template changes like this:
 
 - **Identity role trust policy:** only the federation role can assume it. It
   leaves out `sts:TagSession`, so a caller whose credentials carry inherited
@@ -185,7 +187,7 @@ allowed account and under `/portunus-fed/`. The template changes like this:
 
 Tag the identity role only with what the lab may see. Register its ARN with
 the lab wherever the sections below use the federation role's ARN. For Google,
-the binding's subject becomes `portunus-fed-example-identity`. Give each
+the binding's subject becomes `portunus-id-example`. Give each
 federation role its own identity role so each grant keeps its own lab-side
 identity.
 
@@ -206,7 +208,7 @@ Then add:
 Parameters:
   IdentityRoleName:
     Type: String
-    Default: portunus-fed-example-identity
+    Default: portunus-id-example
 
 Resources:
   IdentityRoleBoundary:
