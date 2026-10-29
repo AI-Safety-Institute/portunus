@@ -93,6 +93,9 @@ static_resources:
                   - name: "upgrade"
                     string_match:
                       exact: "websocket"
+                      # RFC 6455: the token is case-insensitive, and the Lua
+                      # filter skips any casing of it, so the two must agree.
+                      ignore_case: true
                 # Disable Lua filter for WS — auth is handled by Portunus directly.
                 typed_per_filter_config:
                   envoy.filters.http.lua:

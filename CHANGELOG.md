@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Security
+- Bump Brotli 1.2.0 → 1.2.1 for CVE-2026-111497 (GHSA-9v8h-qqgm-4m35), an
+  out-of-bounds write in the decoder. Portunus decompresses `br`-encoded
+  request and response bodies it logs. The floor is now `>=1.2.1`.
+
 ### Changed
 - `anthropic_wif`'s `workspace_id` is optional. Portunus sends it to Anthropic
   only when set; set it only for rules that span more than one workspace.
@@ -19,6 +24,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   A request carrying different payloads in the two headers is rejected; both
   headers are removed before the request goes upstream and from logged
   headers. (#217)
+
+### Fixed
+- The WebSocket route matches the `Upgrade` token case-insensitively
+  (RFC 6455), so clients that send `Upgrade: WebSocket` reach the relay.
 
 ## [0.11.0] - 2026-10-02
 

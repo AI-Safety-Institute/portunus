@@ -9,6 +9,7 @@ including bidirectional relay and per-message Kinesis logging.
 import asyncio
 import base64
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -234,6 +235,23 @@ class TestEnvoyWebSocketRouting:
                 401,
                 403,
             ), f"Expected auth rejection, got {e.response.status_code}"
+
+    def test_mixed_case_upgrade_reaches_portunus(self, ws_docker_setup):
+        """``Upgrade: WebSocket`` reaches the relay (101), not httpbun's HTTP route."""
+        request = (
+            "GET /ws/echo HTTP/1.1\r\n"
+            "Host: localhost:8888\r\n"
+            "Upgrade: WebSocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"Authorization: {make_auth_header()}\r\n"
+            "\r\n"
+        )
+        with socket.create_connection(("localhost", 8888), timeout=10) as sock:
+            sock.sendall(request.encode())
+            status_line = sock.makefile("rb").readline().decode()
+        assert status_line.startswith("HTTP/1.1 101"), status_line
 
     @pytest.mark.asyncio
     async def test_non_ws_path_still_routes_to_target(self, ws_docker_setup):
