@@ -7,6 +7,26 @@ local portunus = {}
 local portunus_client = {}
 portunus_client.__index = portunus_client
 
+-- Every proxy accepts the payload as "Authorization: Bearer <payload>". It is what
+-- the Anthropic SDK sends from 2.0, what the OpenAI SDK sends, and what the
+-- WebSocket relay reads, so a client never has to know which header a proxy expects.
+local BEARER_AUTH = { header = "authorization", prefix = "Bearer " }
+
+--- Lists the inbound headers the payload may arrive in, each with its prefix
+-- The provider's own header (api_key_header/api_key_prefix) comes first, then
+-- Authorization: Bearer. When the provider's header is Authorization itself, its
+-- configured prefix governs that header alone.
+-- @param api_key_header Configured header name
+-- @param api_key_prefix Configured prefix for that header's value
+-- @return accepted List of { header = lowercased name, prefix = prefix }
+local function accepted_auth_headers(api_key_header, api_key_prefix)
+	local provider = { header = (api_key_header or ""):lower(), prefix = api_key_prefix or "" }
+	if provider.header == BEARER_AUTH.header then
+		return { provider }
+	end
+	return { provider, BEARER_AUTH }
+end
+
 --- Creates a new Portunus client instance
 -- @param config Configuration table
 -- @return A new Portunus client instance
@@ -19,12 +39,15 @@ function portunus.new(config)
 		-- Request auth config
 		request_api_key_header = (config.api_key_header or ""):lower(),
 		request_api_key_prefix = config.api_key_prefix,
+		accepted_auth = accepted_auth_headers(config.api_key_header, config.api_key_prefix),
 		credential_headers = utils.parse_header_set(config.known_auth_headers),
 		target_host = config.target_host,
 		-- Header prefix for proxy-specific response headers
 		header_prefix = config.header_prefix,
 	}
-	instance.credential_headers[instance.request_api_key_header] = true
+	for _, accepted in ipairs(instance.accepted_auth) do
+		instance.credential_headers[accepted.header] = true
+	end
 	setmetatable(instance, portunus_client)
 	return instance
 end
@@ -58,21 +81,33 @@ function portunus_client:send_error_response(request_handle, status_code, messag
 end
 
 --- Extracts the authorization payload from the request headers
+-- Reads every accepted header that is present. Each must carry its prefix, and
+-- when more than one is present they must carry the same payload: the proxy
+-- never guesses which of two credentials a client meant.
 -- @param request_handle The Envoy request handle
 -- @return payload, error The extracted payload or nil and an error message
 function portunus_client:extract_auth_payload(request_handle)
-	local auth_header = request_handle:headers():get(self.request_api_key_header)
+	local headers = request_handle:headers()
+	local payload, payload_header
 
-	if not auth_header then
+	for _, accepted in ipairs(self.accepted_auth) do
+		local value = headers:get(accepted.header)
+		if value then
+			if value:sub(1, #accepted.prefix) ~= accepted.prefix then
+				return nil, "Invalid authorization format"
+			end
+			local candidate = value:sub(#accepted.prefix + 1)
+			if payload and candidate ~= payload then
+				return nil, "Conflicting credentials in " .. payload_header .. " and " .. accepted.header
+			end
+			payload, payload_header = candidate, accepted.header
+		end
+	end
+
+	if not payload then
 		return nil, "Authorization header is required"
 	end
-
-	if not auth_header:find("^" .. self.request_api_key_prefix) then
-		return nil, "Invalid authorization format"
-	end
-
-	-- Remove the prefix (e.g., "Bearer ")
-	return auth_header:sub(#self.request_api_key_prefix + 1), nil
+	return payload, nil
 end
 
 --- Makes a synchronous call to Portunus /authorise endpoint
@@ -263,17 +298,19 @@ function portunus_client:resolve_upstream_auth(auth_response)
 	return header:lower(), prefix .. auth_response.api_key
 end
 
---- Sets the upstream auth header and removes the header the payload arrived in
--- Every other header is forwarded untouched; when the two names match this is
--- a plain overwrite.
+--- Sets the upstream auth header and removes every accepted inbound header
+-- Every other header is forwarded untouched; an accepted header that is also
+-- the upstream header is overwritten rather than removed.
 -- @param request_handle The Envoy request handle
 -- @param auth_response Parsed AuthorizationResponse
 -- @return header Lowercased name of the header that now carries the credential
 function portunus_client:apply_upstream_auth(request_handle, auth_response)
 	local header, value = self:resolve_upstream_auth(auth_response)
 	local headers = request_handle:headers()
-	if header ~= self.request_api_key_header then
-		headers:remove(self.request_api_key_header)
+	for _, accepted in ipairs(self.accepted_auth) do
+		if accepted.header ~= header then
+			headers:remove(accepted.header)
+		end
 	end
 	headers:replace(header, value)
 	return header

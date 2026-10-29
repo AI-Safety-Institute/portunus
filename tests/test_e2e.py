@@ -9,7 +9,9 @@ import pytest
 import requests
 
 # Import from conftest
-from conftest import encode_base64, read_kinesis_records
+from conftest import X_API_KEY_PROXY_PORT, encode_base64, read_kinesis_records
+
+X_API_KEY_PROXY = f"http://localhost:{X_API_KEY_PROXY_PORT}"
 
 
 def test_custom_header_prefix_on_ping(docker_setup):
@@ -185,6 +187,111 @@ def test_credential_headers_are_not_logged(
         assert docker_setup not in value
         assert payload not in value
         assert "client-supplied" not in value
+
+
+def _upstream_headers(response: requests.Response) -> dict[str, str]:
+    return {k.lower(): v for k, v in response.json()["headers"].items()}
+
+
+def _logged_headers(request_id: str) -> dict[str, str]:
+    record = _wait_for_request_headers_record(request_id)
+    return {
+        name.lower(): base64.b64decode(value).decode()
+        for name, value in record["raw_headers"].items()
+    }
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("header", "prefix"),
+    [("X-Api-Key", ""), ("Authorization", "Bearer ")],
+    ids=["anthropic-sdk-1.x", "anthropic-sdk-2.x"],
+)
+def test_x_api_key_proxy_accepts_payload_from_either_header(
+    header: str, prefix: str, docker_setup
+):
+    """Only the real key reaches upstream, in the configured header."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    response = requests.get(
+        f"{X_API_KEY_PROXY}/get", headers={header: f"{prefix}{payload}"}
+    )
+
+    assert response.status_code == 200, response.content
+    upstream = _upstream_headers(response)
+    assert upstream["x-api-key"] == docker_setup
+    assert "authorization" not in upstream
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_x_api_key_proxy_accepts_the_same_payload_in_both_headers(docker_setup):
+    """Neither copy of the payload reaches upstream or the logs."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    marker = f"marker-{uuid.uuid4()}"
+    response = requests.get(
+        f"{X_API_KEY_PROXY}/get",
+        headers={
+            "x-api-key": payload,
+            "authorization": f"Bearer {payload}",
+            "x-test-marker": marker,
+        },
+    )
+
+    assert response.status_code == 200, response.content
+    upstream = _upstream_headers(response)
+    assert upstream["x-api-key"] == docker_setup
+    assert "authorization" not in upstream
+
+    logged = _logged_headers(response.headers["X-Amzn-Trace-Id"])
+    assert logged["x-test-marker"] == marker
+    assert "x-api-key" not in logged
+    assert "authorization" not in logged
+    for value in logged.values():
+        assert docker_setup not in value
+        assert payload not in value
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_x_api_key_proxy_rejects_different_payloads_in_both_headers(docker_setup):
+    """Two credentials for one request is an error, not a guess."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    response = requests.get(
+        f"{X_API_KEY_PROXY}/get",
+        headers={"x-api-key": payload, "authorization": f"Bearer other-{uuid.uuid4()}"},
+    )
+
+    assert response.status_code == 401, response.content
+    assert (
+        response.json()["error"]["message"]
+        == "Conflicting credentials in x-api-key and authorization"
+    )
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_x_api_key_proxy_rejects_wrong_bearer_prefix(docker_setup):
+    """An Authorization header without the Bearer prefix is rejected."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    response = requests.get(
+        f"{X_API_KEY_PROXY}/get", headers={"authorization": f"Basic {payload}"}
+    )
+
+    assert response.status_code == 401, response.content
+    assert "Invalid authorization format" in response.json()["error"]["message"]
 
 
 # Manually test with:

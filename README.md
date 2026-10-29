@@ -8,7 +8,7 @@ It consists of two main components:
 
 - **Envoy Proxies**: Envoy deployments (one per target) which interact with the Portunus backend
 - **Portunus Backend**: A FastAPI service which authenticates requests using temporary AWS credentials and logs all traffic
-  - A client inserts a special payload into the authorization header expected by the upstream API
+  - A client sends a special payload as `Authorization: Bearer <payload>`, or in the API key header the upstream API expects
     - The payload is a base64-encoded JSON blob containing temporary AWS credentials and a reference to a Secrets Manager secret ARN
   - A Lua filter within Envoy forwards this payload to the Portunus `/authorise` endpoint
   - Portunus uses the credentials from the payload to fetch the referenced secret, which should contain the actual API key. Network restrictions prevent clients from doing this directly.
@@ -17,7 +17,7 @@ It consists of two main components:
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
       - **Minted token**: `{"type":"anthropic_wif", ...}`, `{"type":"openai_wif", ...}`, `{"type":"openrouter_wif", ...}` or `{"type":"gcp_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
   - If successful, Portunus returns the real API key to the Envoy instance
-  - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default), removing the `API_KEY_HEADER` header when the two differ, before allowing the request to proceed. Every other header is forwarded untouched
+  - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default), removing the inbound credential headers other than that one, before allowing the request to proceed. Every other header is forwarded untouched
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
   - As the above is happening, Envoy also sends request and response data to the Portunus `/log/..` endpoints for storage
 
@@ -154,7 +154,7 @@ Do not expose Portunus directly to clients or the public internet.
 Portunus captures **full request and response data** — bodies, headers, and trailers — and publishes it to Kinesis for the audit trail. This is deliberate: the logs are an audit record of everything that passed through the proxy. Be aware that this means:
 
 - **Request and response bodies are stored verbatim**, including prompts, completions, and any data (personal, commercial, or otherwise sensitive) that clients send or receive.
-- **Headers and URLs are stored verbatim**, except the headers that can carry a credential: the provider API key header (`API_KEY_HEADER`), the header the real upstream credential is injected into, and every name in `KNOWN_AUTH_HEADERS`. These are dropped before logging. No other headers are filtered — secrets carried in any *other* header, or embedded in a URL or body, **will be captured**.
+- **Headers and URLs are stored verbatim**, except the headers that can carry a credential: the provider API key header (`API_KEY_HEADER`), `Authorization`, the header the real upstream credential is injected into, and every name in `KNOWN_AUTH_HEADERS`. These are dropped before logging. No other headers are filtered — secrets carried in any *other* header, or embedded in a URL or body, **will be captured**.
 
 For minted tokens, each mint writes one log line pairing the `jti` of the STS identity token (which providers record when they exchange it) with the federation role ARN and the caller's user, principal, session and project. A provider-side record is matched to the caller through that line, and to the caller's requests through the per-request logs for the token's lifetime; the tokens themselves are not logged.
 
@@ -169,9 +169,9 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `AWS_REGION` | AWS region for all service clients | *(required)* |
 | `PORTUNUS_API_KEY` | Shared secret the proxy attaches to every Portunus service call, in the `PORTUNUS_API_KEY_HEADER` header. Portunus does not validate it — see [Security Model](#security-model) | - |
 | `PORTUNUS_API_KEY_HEADER` | Header carrying the shared secret | `x-api-key` |
-| `API_KEY_HEADER` | Header name for the API key | `authorization` |
-| `API_KEY_PREFIX` | Prefix for the API key value | `Bearer ` |
-| `KNOWN_AUTH_HEADERS` | Comma-separated header names excluded from header logging, in addition to `API_KEY_HEADER` and the header the credential is written to. Does not affect which headers are forwarded | `authorization,x-api-key,x-goog-api-key,api-key` |
+| `API_KEY_HEADER` | The provider's own header for the API key. The payload is accepted here, or as `Authorization: Bearer <payload>` on every proxy; if both are present they must carry the same payload. This header is also where the real key goes by default | `authorization` |
+| `API_KEY_PREFIX` | Prefix for the value in `API_KEY_HEADER` | `Bearer ` |
+| `KNOWN_AUTH_HEADERS` | Comma-separated header names excluded from header logging, in addition to `API_KEY_HEADER`, `Authorization` and the header the credential is written to. Does not affect which headers are forwarded | `authorization,x-api-key,x-goog-api-key,api-key` |
 | `PORTUNUS_HEADER_PREFIX` | Prefix for proxy response headers (`x-{prefix}-*`) | `portunus` |
 | `RATE_LIMIT_PERCENT_ENABLED` | Percentage of traffic to rate limit (0 = disabled) | `0` |
 | `RATE_LIMIT_INTERVAL_SECONDS` | Rate limit time window (seconds) | - |
