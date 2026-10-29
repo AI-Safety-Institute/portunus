@@ -26,10 +26,10 @@ proxy/
 
 1. **Client** sends request with special auth header containing AWS credentials + secret ARN
 2. **Envoy Lua filter** (`lua.lua`) intercepts request:
-   - Extracts auth payload from header
+   - Extracts auth payload from `Authorization: Bearer` or the provider's `API_KEY_HEADER` (both must agree if both are present)
    - Calls Portunus `/authorise` endpoint (with caching)
    - Retrieves real API key from response
-   - Sets the upstream auth header (the response's `output_header`, else `API_KEY_HEADER`) to the real API key and removes the inbound `API_KEY_HEADER` when it differs; every other header passes through
+   - Sets the upstream auth header (the response's `output_header`, else `API_KEY_HEADER`) to the real API key and removes the other inbound credential header; every other header passes through
 3. **Envoy** forwards modified request to target API
 4. **Target API** processes request with real credentials
 5. **Envoy** streams response back to client, logging request/response data to Portunus
