@@ -23,8 +23,7 @@ This repo implements a secure API key proxy system with two main components:
    - Format: `API_KEY_PREFIX + base64(json({"credentials": {...}, "expiration": "...", "secret_arn": "..."}))`
    - Generate one with the `portunus encode-credentials <secret-arn> [--policy <file-or-json>]` CLI (`cli.py`), which assumes the caller's role with a scoped-down session policy and encodes the temporary credentials, or programmatically with `encode_payload(credentials, secret_arn)` in `services/payload_service.py`
 2. Envoy proxy intercepts the request via Lua script (`lua.lua`)
-   - Extracts the `Authorization` header
-   - Removes the Bearer prefix from the payload
+   - Extracts the payload from `Authorization: Bearer`, which every proxy accepts, or from the provider's own `API_KEY_HEADER` (removing `API_KEY_PREFIX`); the two must agree if both are present
    - Makes a synchronous call to `/authorise` endpoint
    - Passes the extracted payload in the request body: `{"authorization": "<payload>"}`
 3. Portunus (`app.py` → `services.auth_service` → `AuthService.get_api_key_from_payload`):
@@ -43,7 +42,7 @@ This repo implements a secure API key proxy system with two main components:
 4. Proxy moves the credential into one upstream header
    - `portunus:apply_upstream_auth(request_handle, auth_response)` in `lua.lua`
    - The header is the response's optional `output_header` (else `API_KEY_HEADER`), the value is the optional `output_prefix` (else `API_KEY_PREFIX`) followed by the key
-   - The inbound `API_KEY_HEADER` (which carries the caller's AWS credentials) is removed when it differs from that header; every other header is forwarded untouched
+   - Both accepted inbound headers (either may carry the caller's AWS credentials) are removed unless one is that header; every other header is forwarded untouched
 5. Proxy forwards the modified request to target API
 6. Target API processes request using the real API key
 
@@ -80,13 +79,13 @@ The proxy is designed to handle streaming responses efficiently:
 ### Security Model
 Portunus service endpoints (`/authorise`, `/log/*`, `/cache/flush`, WebSocket relay) do not authenticate callers. The proxy sends `PORTUNUS_API_KEY` in the `PORTUNUS_API_KEY_HEADER` header (default `x-api-key`) on every service call, but Portunus does not validate it — deployments must enforce access in front of the service (authenticating sidecar and/or network isolation). Documented in README "Security Model".
 
-Logging captures full request/response bodies, headers, and trailers verbatim — everything except the headers that can carry a credential (`API_KEY_HEADER`, the upstream auth header, and every name in `KNOWN_AUTH_HEADERS`), which are dropped in Lua before logging. The WebSocket relay applies the same exclusions to logged upgrade headers. This is intentional (comprehensive audit trail); no secret redaction happens in Portunus. Any redaction/filtering/access-tiering is a downstream (ETL/query-layer) concern. Documented in README "Security Model" → "Logged data".
+Logging captures full request/response bodies, headers, and trailers verbatim — everything except the headers that can carry a credential (`API_KEY_HEADER`, `Authorization`, the upstream auth header, and every name in `KNOWN_AUTH_HEADERS`), which are dropped in Lua before logging. The WebSocket relay applies the same exclusions to logged upgrade headers. This is intentional (comprehensive audit trail); no secret redaction happens in Portunus. Any redaction/filtering/access-tiering is a downstream (ETL/query-layer) concern. Documented in README "Security Model" → "Logged data".
 
 ### Environment Variables
 - `PORTUNUS_API_KEY`: Shared secret the proxy attaches to Portunus service calls (validated by the deployment layer, not by Portunus)
 - `PORTUNUS_API_KEY_HEADER`: Header carrying the shared secret (default: "x-api-key")
-- `API_KEY_HEADER`: Header name to use for API key (default: "authorization")
-- `API_KEY_PREFIX`: Prefix for API key (default: "Bearer ")
+- `API_KEY_HEADER`: The provider's own API key header, accepted inbound alongside `Authorization: Bearer` and used as the default upstream header (default: "authorization")
+- `API_KEY_PREFIX`: Prefix for the value in `API_KEY_HEADER` (default: "Bearer ")
 - `KNOWN_AUTH_HEADERS`: Comma-separated header names excluded from header logging; does not affect forwarding (default: "authorization,x-api-key,x-goog-api-key,api-key")
 - `RATE_LIMIT_PERCENT_ENABLED`: Enable rate limiting (0-100 percentage of traffic)
 - `RATE_LIMIT_INTERVAL_SECONDS`: Time window for rate limiting (seconds)

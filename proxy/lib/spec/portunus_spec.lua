@@ -28,6 +28,9 @@ describe("proxy_utils.portunus", function()
 			store[name:lower()] = value
 		end
 		local headers = { store = store }
+		headers.get = function(_, name)
+			return store[name:lower()]
+		end
 		headers.remove = spy.new(function(_, name)
 			store[name:lower()] = nil
 		end)
@@ -188,6 +191,16 @@ describe("proxy_utils.portunus", function()
 
 			assert.same({ authorization = true }, client.credential_headers)
 		end)
+
+		it("should always include authorization alongside api_key_header", function()
+			local client = portunus_module.new({
+				api_key_header = "x-api-key",
+				api_key_prefix = "",
+				known_auth_headers = "",
+			})
+
+			assert.same({ authorization = true, ["x-api-key"] = true }, client.credential_headers)
+		end)
 	end)
 
 	describe("resolve_upstream_auth - header and prefix selection", function()
@@ -279,7 +292,7 @@ describe("proxy_utils.portunus", function()
 			assert.spy(headers.remove).was.called_with(match._, "authorization")
 		end)
 
-		it("should forward a client authorization header when the inbound header is x-api-key", function()
+		it("should remove a Bearer copy of the payload when the inbound header is x-api-key", function()
 			local client = portunus_module.new({
 				api_key_header = "x-api-key",
 				api_key_prefix = "",
@@ -287,18 +300,16 @@ describe("proxy_utils.portunus", function()
 			})
 			local headers = fake_headers({
 				["x-api-key"] = "payload",
-				authorization = "Bearer client-supplied",
+				authorization = "Bearer payload",
 				accept = "*/*",
 			})
 
-			client:apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
+			local result = client:apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
 
-			assert.same({
-				["x-api-key"] = "sk-1",
-				authorization = "Bearer client-supplied",
-				accept = "*/*",
-			}, headers.store)
-			assert.spy(headers.remove).was_not.called()
+			assert.equals("x-api-key", result)
+			assert.same({ ["x-api-key"] = "sk-1", accept = "*/*" }, headers.store)
+			assert.spy(headers.remove).was.called(1)
+			assert.spy(headers.remove).was.called_with(match._, "authorization")
 		end)
 
 		it("should remove an inbound header that is not in the known list", function()
@@ -366,6 +377,129 @@ describe("proxy_utils.portunus", function()
 			local result = client:strip_credential_headers({
 				["x-api-key"] = "sk-1",
 				authorization = "Bearer client-supplied",
+				accept = "*/*",
+			}, "x-api-key")
+
+			assert.same({ accept = "*/*" }, result)
+		end)
+	end)
+
+	describe("accepted inbound headers", function()
+		-- A proxy configured the way the Anthropic proxy is: the provider's own
+		-- header carries the payload bare, and Authorization: Bearer is accepted too.
+		local function x_api_key_client()
+			return portunus_module.new({
+				api_key_header = "x-api-key",
+				api_key_prefix = "",
+				known_auth_headers = "",
+			})
+		end
+
+		local function extract(client, request_headers)
+			return client:extract_auth_payload(handle_for(fake_headers(request_headers)))
+		end
+
+		it("accepts the payload bare in the configured header", function()
+			local payload, err = extract(x_api_key_client(), { ["x-api-key"] = "payload-1" })
+
+			assert.is_nil(err)
+			assert.equals("payload-1", payload)
+		end)
+
+		it("accepts the payload as Authorization: Bearer on any proxy", function()
+			local payload, err = extract(x_api_key_client(), { Authorization = "Bearer payload-2" })
+
+			assert.is_nil(err)
+			assert.equals("payload-2", payload)
+		end)
+
+		it("accepts the same payload in both headers", function()
+			local payload, err = extract(x_api_key_client(), {
+				["x-api-key"] = "payload-3",
+				authorization = "Bearer payload-3",
+			})
+
+			assert.is_nil(err)
+			assert.equals("payload-3", payload)
+		end)
+
+		it("rejects different payloads in both headers and names them", function()
+			local payload, err = extract(x_api_key_client(), {
+				["x-api-key"] = "payload-a",
+				authorization = "Bearer payload-b",
+			})
+
+			assert.is_nil(payload)
+			assert.equals("Conflicting credentials in x-api-key and authorization", err)
+		end)
+
+		it("rejects a present header with the wrong prefix even when the other is valid", function()
+			local payload, err = extract(x_api_key_client(), {
+				["x-api-key"] = "payload-4",
+				authorization = "Basic abc",
+			})
+
+			assert.is_nil(payload)
+			assert.equals("Invalid authorization format", err)
+		end)
+
+		it("rejects a request carrying neither header", function()
+			local payload, err = extract(x_api_key_client(), { accept = "*/*" })
+
+			assert.is_nil(payload)
+			assert.equals("Authorization header is required", err)
+		end)
+
+		it("lets a configured Authorization prefix govern that header alone", function()
+			local client = portunus_module.new({
+				api_key_header = "authorization",
+				api_key_prefix = "Token ",
+				known_auth_headers = "",
+			})
+
+			assert.equals("payload-5", extract(client, { authorization = "Token payload-5" }))
+			local payload, err = extract(client, { authorization = "Bearer payload-5" })
+			assert.is_nil(payload)
+			assert.equals("Invalid authorization format", err)
+		end)
+
+		it("is case-insensitive about the configured header name", function()
+			local client = portunus_module.new({
+				api_key_header = "X-Api-Key",
+				api_key_prefix = "",
+				known_auth_headers = "",
+			})
+
+			assert.equals("payload-6", extract(client, { ["x-api-key"] = "payload-6" }))
+		end)
+
+		it("injects into the configured header and removes a Bearer payload", function()
+			local headers = fake_headers({ authorization = "Bearer payload", accept = "*/*" })
+
+			local result = x_api_key_client():apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
+
+			assert.equals("x-api-key", result)
+			assert.same({ ["x-api-key"] = "sk-1", accept = "*/*" }, headers.store)
+		end)
+
+		it("removes x-api-key when the credential goes to output_header authorization", function()
+			local headers = fake_headers({ ["x-api-key"] = "payload", accept = "*/*" })
+
+			local result = x_api_key_client():apply_upstream_auth(handle_for(headers), {
+				api_key = "token-1",
+				request_id = "r",
+				output_header = "authorization",
+				output_prefix = "Bearer ",
+			})
+
+			assert.equals("authorization", result)
+			assert.same({ authorization = "Bearer token-1", accept = "*/*" }, headers.store)
+		end)
+
+		it("keeps both headers out of the logged headers without a known list", function()
+			local result = x_api_key_client():strip_credential_headers({
+				["X-Api-Key"] = "sk-1",
+				Authorization = "Bearer payload",
 				accept = "*/*",
 			}, "x-api-key")
 

@@ -4,92 +4,27 @@ Regression test to verify portunus.models can be imported in AWS Glue environmen
 This test ensures that lazy loading of non-standard imports (like pydantic) works
 correctly, allowing JoinedLogRecord and other dataclasses to be imported in
 AWS Glue jobs where pydantic is not available.
+
+The Glue job imports the module from a zip on PYTHONPATH, so the test does the
+same, on an interpreter with nothing but the standard library installed. That is
+the whole invariant; it does not need the 5 GB Glue image, whose pull from ECR
+Public was rate limited on most CI runs.
 """
 
+import os
+import shutil
 import subprocess
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 
-import pytest
+# AWS Glue 5.0 runs Python 3.11: https://docs.aws.amazon.com/glue/latest/dg/release-notes.html
+GLUE_PYTHON = "3.11"
 
-GLUE_IMAGE = "public.ecr.aws/glue/aws-glue-libs:5"
-
-
-def _pull_glue_image() -> None:
-    """Pull the Glue image, retrying with backoff on registry rate limits.
-
-    ECR Public rate-limits unauthenticated pulls per source IP. GitHub-hosted
-    runners share egress IPs across tenants, so CI pulls intermittently fail
-    with "toomanyrequests: Rate exceeded" through no fault of ours; backing
-    off and retrying is normally enough to ride it out.
-    """
-    attempts = 5
-    for attempt in range(1, attempts + 1):
-        result = subprocess.run(
-            ["docker", "pull", GLUE_IMAGE],
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
-        )
-        if result.returncode == 0:
-            return
-        output = f"{result.stdout}\n{result.stderr}"
-        rate_limited = "toomanyrequests" in output or "Rate exceeded" in output
-        if not rate_limited:
-            pytest.fail(f"docker pull {GLUE_IMAGE} failed:\n{output}")
-        if attempt < attempts:
-            backoff = 30 * attempt
-            print(
-                f"Rate limited pulling {GLUE_IMAGE} "
-                f"(attempt {attempt}/{attempts}), retrying in {backoff}s"
-            )
-            time.sleep(backoff)
-    pytest.fail(
-        f"docker pull {GLUE_IMAGE} still rate limited after {attempts} attempts"
-    )
-
-
-@pytest.mark.slow
-def test_glue_import_without_pydantic():
-    """Test JoinedLogRecord import in AWS Glue without pydantic."""
-    _pull_glue_image()
-
-    # Get path to models.py
-    models_path = Path(__file__).parent.parent / "portunus" / "models.py"
-    assert models_path.exists(), f"models.py not found at {models_path}"
-
-    # Create temporary directory for test files
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-
-        # Create portunus package structure (matches AWS Glue zip structure)
-        portunus_dir = temp_path / "portunus"
-        portunus_dir.mkdir()
-
-        # Create __init__.py
-        (portunus_dir / "__init__.py").write_text(
-            '"""Portunus models package for Glue jobs."""\n'
-        )
-
-        # Copy models.py
-        (portunus_dir / "models.py").write_text(models_path.read_text())
-
-        # Create zip file with same structure as AWS Glue
-        zip_path = temp_path / "portunus_models.zip"
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.write(portunus_dir / "__init__.py", "portunus/__init__.py")
-            zf.write(portunus_dir / "models.py", "portunus/models.py")
-
-        # Create Python test script
-        test_script = temp_path / "test_import.py"
-        test_script.write_text(
-            """
+GLUE_IMPORT_SCRIPT = """
 import sys
 
-# Verify pydantic is not available in Glue environment
+# Verify pydantic is not available, as in the Glue environment
 try:
     import pydantic
     print("WARNING: pydantic is available (unexpected)")
@@ -107,49 +42,62 @@ schema = JoinedLogRecord.glue_schema()
 assert len(schema) > 0, "glue_schema() returned empty list"
 
 print(f"✓ Successfully imported JoinedLogRecord with {len(schema)} schema fields")
+print(f"✓ Python {sys.version.split()[0]}")
 """
-        )
 
-        # Run the test in AWS Glue Docker container
-        # Use bash to invoke Python (Glue image has custom Python setup)
-        bash_cmd = (
-            "export PYTHONPATH=/home/hadoop/workspace/portunus_models.zip && "
-            "python3 /home/hadoop/workspace/test_import.py"
-        )
 
-        cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{zip_path}:/home/hadoop/workspace/portunus_models.zip:ro",
-            "-v",
-            f"{test_script}:/home/hadoop/workspace/test_import.py:ro",
-            "--entrypoint",
-            "bash",
-            GLUE_IMAGE,
-            "-c",
-            bash_cmd,
-        ]
+def test_glue_import_without_pydantic():
+    """Test JoinedLogRecord import from a zip, on Glue's Python, without pydantic."""
+    uv = shutil.which("uv")
+    assert uv, "uv is required to provide a bare Python interpreter"
 
-        # Run and capture output (the image was pulled above)
+    models_path = Path(__file__).parent.parent / "portunus" / "models.py"
+    assert models_path.exists(), f"models.py not found at {models_path}"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+
+        # Zip with the same structure as the one shipped to AWS Glue
+        zip_path = temp_path / "portunus_models.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "portunus/__init__.py", '"""Portunus models package for Glue jobs."""\n'
+            )
+            zf.write(models_path, "portunus/models.py")
+
+        test_script = temp_path / "test_import.py"
+        test_script.write_text(GLUE_IMPORT_SCRIPT)
+
+        # --no-project gives an environment with only the standard library;
+        # uv downloads the interpreter if it is not installed.
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600, check=False
+            [
+                uv,
+                "run",
+                "--no-project",
+                "--python",
+                GLUE_PYTHON,
+                "python",
+                str(test_script),
+            ],
+            env={**os.environ, "PYTHONPATH": str(zip_path)},
+            cwd=temp_path,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
         )
 
-        # Print output for debugging
         if result.stdout:
             print("STDOUT:", result.stdout)
         if result.stderr:
             print("STDERR:", result.stderr)
 
-        # Check that the test passed
         assert result.returncode == 0, (
             f"Glue import test failed with exit code {result.returncode}\n"
             f"STDOUT: {result.stdout}\n"
             f"STDERR: {result.stderr}"
         )
-
-        # Verify expected output
         assert "✓ pydantic is not available" in result.stdout
         assert "✓ Successfully imported JoinedLogRecord" in result.stdout
+        assert f"✓ Python {GLUE_PYTHON}." in result.stdout

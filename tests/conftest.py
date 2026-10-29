@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from base64 import b64decode, b64encode
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +46,22 @@ DEFAULT_LOCAL_API_KEY = "xyz"
 # Set custom header prefix to test configurability (doubles as backwards-compat check)
 COMPOSE_FILE["services"]["proxy"]["environment"]["PORTUNUS_HEADER_PREFIX"] = (
     "aisi-proxy"
+)
+
+# A second proxy configured like the Anthropic one: the payload arrives bare in
+# x-api-key, or as Authorization: Bearer, which every proxy accepts. Its known
+# list names neither header, so logging exclusion must come from the auth config.
+X_API_KEY_PROXY_PORT = 8889
+COMPOSE_FILE["services"]["proxy-x-api-key"] = deepcopy(
+    COMPOSE_FILE["services"]["proxy"]
+)
+COMPOSE_FILE["services"]["proxy-x-api-key"]["ports"] = [f"{X_API_KEY_PROXY_PORT}:8888"]
+COMPOSE_FILE["services"]["proxy-x-api-key"]["environment"].update(
+    {
+        "API_KEY_HEADER": "x-api-key",
+        "API_KEY_PREFIX": "",
+        "KNOWN_AUTH_HEADERS": "x-goog-api-key",
+    }
 )
 
 # Redis setup for testing
@@ -125,7 +142,7 @@ def docker_setup(request, compose_file):
         yield DEFAULT_LOCAL_API_KEY
 
     # Stop the Docker Compose file
-    subprocess.run(["docker", "compose", "down"])
+    subprocess.run(["docker", "compose", "down", "--remove-orphans"])
 
 
 @pytest.fixture

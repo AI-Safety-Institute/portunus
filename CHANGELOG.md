@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `portunus encode-credentials --caller-role-arn` sets the role to assume
   instead of the caller's own. The default is rebuilt from the session ARN,
   which has no IAM path, so pass it for caller roles with a path.
+- Every proxy accepts the payload as `Authorization: Bearer <payload>` as well
+  as in its configured `API_KEY_HEADER`, so one deployment serves clients on
+  `anthropic` SDK 1.x (`X-Api-Key`) and 2.x (`Authorization: Bearer`) at once.
+  A request carrying different payloads in the two headers is rejected; both
+  headers are removed before the request goes upstream and from logged
+  headers. (#217)
 
 ### Fixed
 - The WebSocket route matches the `Upgrade` token case-insensitively
