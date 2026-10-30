@@ -51,6 +51,61 @@ logger = logging.getLogger("api.access")
 # the STS identity call, the secret fetch, then up to MINT_DEADLINE_SECONDS.
 _AUTH_TIMEOUT_S = 9.0
 
+# Every proxy accepts the payload as "Authorization: Bearer <payload>". It is
+# what the Anthropic SDK sends from 2.0 and what the OpenAI SDK has always
+# sent, so a client never has to know which header a proxy expects.
+_BEARER_HEADER = "authorization"
+_BEARER_PREFIX = "Bearer "
+
+
+def accepted_payload_headers() -> tuple[tuple[str, str], ...]:
+    """Inbound headers the payload may arrive in, each with its prefix.
+
+    The provider's own header (``API_KEY_HEADER`` / ``API_KEY_PREFIX``) comes
+    first, then ``Authorization: Bearer``. When the provider's header is
+    ``Authorization`` itself, its configured prefix governs that header alone.
+    The audit path redacts every name listed here.
+    """
+    provider = (config.api_key_header.lower(), config.api_key_prefix)
+    if provider[0] == _BEARER_HEADER:
+        return (provider,)
+    return (provider, (_BEARER_HEADER, _BEARER_PREFIX))
+
+
+def extract_payload(headers: dict[str, str]) -> tuple[Optional[str], Optional[str]]:
+    """Pull the payload out of the accepted headers.
+
+    Reads every accepted header that is present. The provider's header keeps
+    its tolerant prefix handling (a bare payload still works); the
+    always-accepted ``Authorization`` must carry ``Bearer``. When more than one
+    header is present they must carry the same payload: the proxy never
+    guesses which of two credentials a client meant.
+
+    Returns:
+        ``(payload, None)`` on success, else ``(None, error_message)``.
+    """
+    provider_header = config.api_key_header.lower()
+    payload: Optional[str] = None
+    payload_header: Optional[str] = None
+    for name, prefix in accepted_payload_headers():
+        value = headers.get(name, "")
+        if not value:
+            continue
+        if name == provider_header:
+            candidate = (
+                value[len(prefix) :] if prefix and value.startswith(prefix) else value
+            )
+        elif value.startswith(prefix):
+            candidate = value[len(prefix) :]
+        else:
+            return None, "Invalid authorization format"
+        if payload is not None and candidate != payload:
+            return None, f"Conflicting credentials in {payload_header} and {name}"
+        payload, payload_header = candidate, name
+    if payload is None:
+        return None, "Missing authorization header"
+    return payload, None
+
 
 class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
     """Envoy ext_authz v3 ``AuthorizationServicer`` implementation."""
@@ -114,16 +169,9 @@ class PortunusAuthServicer(external_auth_pb2_grpc.AuthorizationServicer):
     ) -> external_auth_pb2.CheckResponse:
         """Authenticate the bearer payload carried in the request headers."""
         try:
-            raw_payload = headers.get(config.api_key_header.lower(), "")
-            if not raw_payload:
-                return _denied(
-                    code=401,
-                    body="Missing authorization header",
-                    request_id=request_id,
-                )
-
-            if config.api_key_prefix and raw_payload.startswith(config.api_key_prefix):
-                raw_payload = raw_payload[len(config.api_key_prefix) :]
+            raw_payload, error = extract_payload(headers)
+            if raw_payload is None:
+                return _denied(code=401, body=error or "", request_id=request_id)
 
             # target_host comes from Envoy-controlled route context / gRPC
             # initial_metadata, never client-controllable headers.
@@ -229,8 +277,8 @@ def _ok(
 ) -> external_auth_pb2.CheckResponse:
     """Build a CheckResponse that allows the request with header mutations.
 
-    Sets the upstream credential header and removes the header the payload
-    arrived in when the two differ; every other header is forwarded as-is.
+    Sets the upstream credential header and removes every accepted inbound
+    header other than it; every other header is forwarded as-is.
     The upstream header name goes into dynamic metadata so the audit path can
     redact it even when it is not a well-known credential header.
     """
@@ -244,9 +292,9 @@ def _ok(
     added.header.key = header
     added.header.value = value
     added.append_action = base_pb2.HeaderValueOption.OVERWRITE_IF_EXISTS_OR_ADD
-    inbound_header = config.api_key_header.lower()
-    if header != inbound_header:
-        ok.headers_to_remove.append(inbound_header)
+    for inbound_header, _prefix in accepted_payload_headers():
+        if header != inbound_header:
+            ok.headers_to_remove.append(inbound_header)
 
     response.dynamic_metadata.update({"upstream_auth_header": header})
     if principal_info is not None:

@@ -975,7 +975,12 @@ async def test_allow_responses_preserve_identity_and_header_policy_over_grpc(
         assert _decoded_headers(response.ok_response.headers) == {
             key_header.lower(): f"{prefix}synthetic-key-{request_id}"
         }
-        assert list(response.ok_response.headers_to_remove) == []
+        # Authorization is accepted on every proxy, so it is stripped whenever
+        # the credential goes elsewhere.
+        expected_removed = (
+            [] if key_header.lower() == "authorization" else ["authorization"]
+        )
+        assert list(response.ok_response.headers_to_remove) == expected_removed
         identity = MessageToDict(response.dynamic_metadata)
         assert (
             identity["principal_info"]
@@ -987,3 +992,157 @@ async def test_allow_responses_preserve_identity_and_header_policy_over_grpc(
         )
         assert identity["secret_arn"].endswith(":secret:test")
         assert identity["upstream_auth_header"] == key_header.lower()
+
+
+# ---------------------------------------------------------------------------
+# Authorization: Bearer is accepted on every proxy
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def x_api_key_proxy(monkeypatch):
+    """Configure the servicer like the Anthropic proxy: bare payload in x-api-key."""
+    monkeypatch.setattr(portunus_config, "api_key_header", "x-api-key")
+    monkeypatch.setattr(portunus_config, "api_key_prefix", "")
+
+
+def _error_message(response) -> str:
+    return json.loads(response.denied_response.body)["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_bearer_authorization_is_accepted_on_an_x_api_key_proxy(x_api_key_proxy):
+    """Anthropic SDK 2.x sends Authorization: Bearer; the key goes to x-api-key."""
+    servicer, auth = _make_servicer()
+
+    response = await servicer.Check(
+        _check_request(payload_header=f"Bearer {_VALID_PAYLOAD}"), _ctx_with_key()
+    )
+
+    assert response.HasField("ok_response"), response.denied_response.body
+    assert auth.auth_calls
+    assert _decoded_headers(response.ok_response.headers).get("x-api-key") == (
+        "sk-upstream-test-key"
+    )
+    assert list(response.ok_response.headers_to_remove) == ["authorization"]
+
+
+@pytest.mark.asyncio
+async def test_bare_x_api_key_payload_still_works_on_an_x_api_key_proxy(
+    x_api_key_proxy,
+):
+    servicer, auth = _make_servicer()
+
+    response = await servicer.Check(
+        _check_request(
+            payload_header=None, extra_headers={"x-api-key": _VALID_PAYLOAD}
+        ),
+        _ctx_with_key(),
+    )
+
+    assert response.HasField("ok_response"), response.denied_response.body
+    assert auth.auth_calls
+    assert _decoded_headers(response.ok_response.headers).get("x-api-key") == (
+        "sk-upstream-test-key"
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_payload_in_both_headers_is_authorised_once(x_api_key_proxy):
+    servicer, auth = _make_servicer()
+
+    response = await servicer.Check(
+        _check_request(
+            payload_header=f"Bearer {_VALID_PAYLOAD}",
+            extra_headers={"x-api-key": _VALID_PAYLOAD},
+        ),
+        _ctx_with_key(),
+    )
+
+    assert response.HasField("ok_response"), response.denied_response.body
+    assert len(auth.auth_calls) == 1
+    assert list(response.ok_response.headers_to_remove) == ["authorization"]
+
+
+@pytest.mark.asyncio
+async def test_different_payloads_in_both_headers_are_rejected(x_api_key_proxy):
+    """Two credentials for one request is an error, not a guess."""
+    servicer, auth = _make_servicer()
+
+    response = await servicer.Check(
+        _check_request(
+            payload_header="Bearer some-other-credential",
+            extra_headers={"x-api-key": _VALID_PAYLOAD},
+        ),
+        _ctx_with_key(),
+    )
+
+    assert response.HasField("denied_response")
+    assert response.denied_response.status.code == 401
+    assert _error_message(response) == (
+        "Conflicting credentials in x-api-key and authorization"
+    )
+    assert not auth.auth_calls
+
+
+@pytest.mark.asyncio
+async def test_non_bearer_authorization_is_rejected_even_with_a_valid_x_api_key(
+    x_api_key_proxy,
+):
+    servicer, auth = _make_servicer()
+
+    response = await servicer.Check(
+        _check_request(
+            payload_header="Basic dXNlcjpwYXNz",
+            extra_headers={"x-api-key": _VALID_PAYLOAD},
+        ),
+        _ctx_with_key(),
+    )
+
+    assert response.HasField("denied_response")
+    assert response.denied_response.status.code == 401
+    assert _error_message(response) == "Invalid authorization format"
+    assert not auth.auth_calls
+
+
+@pytest.mark.asyncio
+async def test_x_api_key_is_not_a_payload_header_on_a_bearer_proxy():
+    """On an Authorization-configured proxy x-api-key is just a client header."""
+    servicer, auth = _make_servicer()
+
+    response = await servicer.Check(
+        _check_request(
+            payload_header=None, extra_headers={"x-api-key": _VALID_PAYLOAD}
+        ),
+        _ctx_with_key(),
+    )
+
+    assert response.HasField("denied_response")
+    assert response.denied_response.status.code == 401
+    assert _error_message(response) == "Missing authorization header"
+    assert not auth.auth_calls
+
+
+@pytest.mark.asyncio
+async def test_x_api_key_is_removed_when_the_credential_goes_to_authorization(
+    x_api_key_proxy,
+):
+    """A minted token names Authorization as output header; x-api-key must not leak."""
+    servicer, _ = _make_servicer(
+        auth=FakeAuthService(
+            result=_result_with(output_header="authorization", output_prefix="Bearer ")
+        )
+    )
+
+    response = await servicer.Check(
+        _check_request(
+            payload_header=None, extra_headers={"x-api-key": _VALID_PAYLOAD}
+        ),
+        _ctx_with_key(),
+    )
+
+    assert response.HasField("ok_response"), response.denied_response.body
+    assert _decoded_headers(response.ok_response.headers).get("authorization") == (
+        "Bearer sk-upstream-test-key"
+    )
+    assert list(response.ok_response.headers_to_remove) == ["x-api-key"]
