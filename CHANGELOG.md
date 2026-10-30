@@ -24,6 +24,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Joined log records decode request bodies with the request content type, as
   response bodies already did, so `application/vnd.amazon.eventstream` request
   bodies decode.
+- Cached results are capped at the earliest of
+  `CACHE_DURATION`, the credential expiry and, for minted tokens, one minute
+  before the token expires.
 - Authentication rejects Redis connection-probe and read timeouts, and
   requests whose wait for a pooled Redis connection expires, without starting
   further identity or secret lookups. Other Redis failures still fall back to
