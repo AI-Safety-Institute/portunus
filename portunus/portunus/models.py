@@ -452,9 +452,12 @@ class AuthPayload:
             if not isinstance(decoded_payload, dict):
                 raise PayloadError("Invalid payload format")
 
-            credentials = AwsCredentials.from_dict(
-                decoded_payload.get("credentials", {})
-            )
+            credentials_data = dict(decoded_payload.get("credentials", {}))
+            # ``encode_payload`` (and so the CLI) writes ``expiration`` beside
+            # ``credentials``, not inside it. Without this the credential
+            # expiry is unknown and never bounds a cache entry.
+            credentials_data.setdefault("expiration", decoded_payload.get("expiration"))
+            credentials = AwsCredentials.from_dict(credentials_data)
             secret_arn = decoded_payload.get("secret_arn", "")
 
             return cls(raw_payload, credentials, secret_arn, target_host)
