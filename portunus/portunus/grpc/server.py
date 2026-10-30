@@ -11,12 +11,17 @@ from typing import Optional
 
 import grpc
 from envoy.service.auth.v3 import external_auth_pb2, external_auth_pb2_grpc
+from envoy.service.ext_proc.v3 import external_processor_pb2 as proc_pb2
+from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
-from portunus.config import GrpcConfig
+from portunus.config import GrpcConfig, KinesisConfig
 from portunus.grpc.auth_servicer import PortunusAuthServicer
+from portunus.grpc.proc_servicer import PortunusProcessServicer
 from portunus.services.auth_service import AuthService
+from portunus.services.publish_queue import BoundedPublishQueue
+from portunus.services.publish_service import PublishService
 
 if sys.platform not in {"win32", "cygwin"} and sys.implementation.name == "cpython":
     from uvloop import run as run_event_loop
@@ -24,6 +29,11 @@ else:
     from asyncio import run as run_event_loop
 
 logger = logging.getLogger("api.grpc")
+
+# ext_proc streams body chunks of up to Envoy's per-connection buffer
+# (``per_connection_buffer_limit_bytes``, 50 MiB in envoy.yaml); headers and
+# protobuf framing ride on top, so the gRPC message limit needs headroom.
+_MAX_GRPC_MSG_BYTES = 64 * 1024 * 1024
 
 # Minimum proxy-key length. The empty-key guard passes a 1-char placeholder
 # that gives no real channel-identity protection — refuse it too.
@@ -35,21 +45,27 @@ class GrpcRuntime:
     """Aggregates the gRPC server and components needing orderly shutdown."""
 
     server: grpc.aio.Server
+    proc_servicer: PortunusProcessServicer
+    publish_queue: BoundedPublishQueue
+    publish_service: PublishService
     health_servicer: health.aio.HealthServicer
 
 
 async def start_grpc_server(
     *,
     config: GrpcConfig,
+    kinesis: KinesisConfig,
     auth_service: AuthService,
+    publish_service: PublishService,
 ) -> Optional[GrpcRuntime]:
     """Start the Portunus gRPC server.
 
-    Registers ext_authz, the health service, and reflection. Returns None when
-    ``config.enabled`` is False.
+    Registers ext_authz, ext_proc, the health service, and reflection. Returns
+    None when ``config.enabled`` is False.
 
-    Raises ``RuntimeError`` when the channel-identity key is misconfigured, so
-    a task that would accept unauthenticated callers never comes up serving.
+    Raises ``RuntimeError`` when the channel-identity key or the Kinesis audit
+    sink is misconfigured, so a task that would accept unauthenticated callers
+    or silently drop all audit records never comes up serving.
     """
     if not config.enabled:
         logger.info("gRPC server disabled (config.grpc.enabled=false); skipping start")
@@ -84,19 +100,63 @@ async def start_grpc_server(
             "gives a false sense of a channel-identity gate."
         )
 
+    # Fail fast if the Kinesis audit sink is misconfigured: each ``build_*``
+    # short-circuits to ``None`` (warning only) when its stream is unset, so a
+    # task with ``KINESIS_*`` unset would serve while silently dropping all
+    # audit records. Refuse to serve instead — there is no opt-out.
+    missing_streams = kinesis.missing_required_streams()
+    if missing_streams:
+        raise RuntimeError(
+            "Refusing to start the gRPC server: Kinesis audit publishing is "
+            "misconfigured. Missing required delivery stream env vars: "
+            f"{', '.join(missing_streams)}. Serving with these unset would "
+            "silently drop 100% of audit records while reporting success "
+            "(most likely a task still carrying the pre-migration KINESIS_* "
+            "env vars)."
+        )
+
     options = [
         ("grpc.max_concurrent_streams", config.max_concurrent_streams),
         ("grpc.keepalive_time_ms", 30_000),
         ("grpc.keepalive_timeout_ms", 10_000),
         ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.max_send_message_length", _MAX_GRPC_MSG_BYTES),
+        ("grpc.max_receive_message_length", _MAX_GRPC_MSG_BYTES),
     ]
     server = grpc.aio.server(options=options)
 
     auth_servicer = PortunusAuthServicer(auth_service=auth_service)
     external_auth_pb2_grpc.add_AuthorizationServicer_to_server(auth_servicer, server)
 
+    publish_queue = BoundedPublishQueue(
+        maxsize=config.publish_queue_maxsize,
+        body_capacity=config.publish_queue_body_capacity,
+        # Byte budget alongside the record-count cap: each body task retains its
+        # raw chunk by closure, so the record count alone (10k × ~750 KB ≈
+        # 6.4 GiB) would blow past the container memory cap.
+        max_bytes=config.publish_queue_max_bytes,
+        num_workers=(
+            config.publish_workers
+            if config.publish_workers is not None
+            else max(4, config.max_concurrent_streams // 64)
+        ),
+        max_batch=config.publish_batch_size,
+        coalesce_seconds=config.publish_coalesce_ms / 1000,
+        drop_on_pressure=config.audit_drop_on_pressure,
+        # Workers drain in stream-grouped Kinesis PutRecords calls, packing
+        # records to keep KDS records/s low without an unbounded buffer.
+        batch_sender=publish_service.put_records,
+    )
+    await publish_queue.start()
+
+    proc_servicer = PortunusProcessServicer(
+        publish_service=publish_service,
+        publish_queue=publish_queue,
+    )
+    proc_grpc.add_ExternalProcessorServicer_to_server(proc_servicer, server)
+
     # Standard gRPC health service — the one health signal (default service
-    # ""), read by the container probe.
+    # ""), read by the container probe and Envoy's /healthz cluster.
     health_servicer = health.aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
@@ -105,9 +165,17 @@ async def start_grpc_server(
     auth_service_name = external_auth_pb2.DESCRIPTOR.services_by_name[
         "Authorization"
     ].full_name
+    proc_service_name = proc_pb2.DESCRIPTOR.services_by_name[
+        "ExternalProcessor"
+    ].full_name
     health_service_name = health_pb2.DESCRIPTOR.services_by_name["Health"].full_name
     reflection.enable_server_reflection(
-        (auth_service_name, health_service_name, reflection.SERVICE_NAME),
+        (
+            auth_service_name,
+            proc_service_name,
+            health_service_name,
+            reflection.SERVICE_NAME,
+        ),
         server,
     )
 
@@ -117,13 +185,14 @@ async def start_grpc_server(
         await server.start()
     except BaseException:
         await server.stop(0)
+        await publish_queue.stop(drain_timeout=0)
         raise
 
     # SERVING only once the listener is up, NOT_SERVING from drain start.
     # Deliberately not tied to Redis or any other shared dependency: every task
     # shares one Redis, so a Redis-gated health signal would pull the whole
     # fleet out of rotation at once and turn a Redis problem into a total
-    # outage.
+    # outage. Redis trouble shows in the auth and cache metrics instead.
     await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
 
     logger.info(
@@ -131,23 +200,97 @@ async def start_grpc_server(
         listen_addr,
         config.max_concurrent_streams,
     )
-    return GrpcRuntime(server=server, health_servicer=health_servicer)
+    return GrpcRuntime(
+        server=server,
+        proc_servicer=proc_servicer,
+        publish_queue=publish_queue,
+        publish_service=publish_service,
+        health_servicer=health_servicer,
+    )
 
 
 async def stop_grpc_server(
     runtime: Optional[GrpcRuntime],
     grace_seconds: int,
+    *,
+    flush_reserve_seconds: float = 5.0,
 ) -> None:
-    """Stop the gRPC server, waiting up to ``grace_seconds`` for active RPCs."""
+    """Stop the gRPC server, drain the publish queue, close the AWS client.
+
+    ``server.stop(grace=N)`` waits up to N seconds for active streams.
+    Completed HTTP capture ends after both directions finish; unfinished HTTP
+    and successful WebSocket streams may remain open until the deadline.
+    Reserve part of the shared deadline to flush their queued audit records
+    after cancellation, even when those streams use the full drain budget.
+    These phases share ``grace_seconds``.
+    """
     if runtime is None:
         return
-    logger.info("gRPC drain starting: %ds grace", grace_seconds)
+    logger.info(
+        "gRPC drain starting: %d active streams, %ds grace "
+        "(%.1fs reserved for the audit flush)",
+        runtime.proc_servicer.active_stream_count,
+        grace_seconds,
+        min(flush_reserve_seconds, grace_seconds),
+    )
 
     # NOT_SERVING first so a probe sees the drain immediately and the load
     # balancer stops routing new connections here.
     await runtime.health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
-    await runtime.server.stop(grace=grace_seconds)
-    logger.info("gRPC drain complete")
+
+    # Share a SINGLE drain budget across both stops: a full grace each would let
+    # a wedged sink + active stream consume up to 2×grace, risking SIGKILL (137)
+    # if grace approaches the ECS ``stopTimeout``. The server drain gets grace
+    # minus the flush reserve, the queue gets what remains, so the total stays
+    # bounded by ``grace_seconds`` and the flush is never starved to zero.
+    loop = asyncio.get_running_loop()
+    reserve = min(max(0.0, flush_reserve_seconds), float(grace_seconds))
+    deadline = loop.time() + grace_seconds
+
+    await runtime.server.stop(grace=max(0.0, grace_seconds - reserve))
+
+    # The queue gets the remaining grace to flush to Kinesis — accepted
+    # records should not be dropped while grace remains. ``stop`` reports how
+    # many accepted records it had to cancel so the loss is observable.
+    queue_drain_budget = max(0.0, deadline - loop.time())
+    cancelled = await runtime.publish_queue.stop(drain_timeout=queue_drain_budget)
+    if cancelled:
+        # ERROR, not WARNING: a clean ``exit 0`` would otherwise mask audit
+        # loss. The ``extra`` fields give a stable key
+        # (``event=audit_records_lost_on_drain``) for a CloudWatch alarm.
+        logger.error(
+            "AUDIT LOSS on drain: %d accepted audit records were never "
+            "flushed within the %.1fs flush window of the %ds grace "
+            "(flush budget exhausted — sink wedged/slow, or too much "
+            "buffered for the window); they are permanently lost",
+            cancelled,
+            queue_drain_budget,
+            grace_seconds,
+            extra={
+                "event": "audit_records_lost_on_drain",
+                "lost_audit_records": cancelled,
+                "grace_seconds": grace_seconds,
+                "flush_budget_seconds": queue_drain_budget,
+            },
+        )
+
+    try:
+        await runtime.publish_service.state_service.close()
+    except AttributeError:
+        pass
+
+    logger.info(
+        "gRPC drain complete: submitted=%d published=%d queue_dropped=%d "
+        "delivery_failed=%d build_failed=%d skipped_unconfigured=%d "
+        "drain_cancelled=%d",
+        runtime.publish_queue.submitted_total,
+        runtime.publish_queue.published_total,
+        runtime.publish_queue.dropped_total,
+        runtime.publish_queue.delivery_failed_total,
+        runtime.publish_queue.build_failed_total,
+        runtime.publish_queue.skipped_unconfigured_total,
+        runtime.publish_queue.cancelled_total,
+    )
 
 
 async def run() -> None:
@@ -162,16 +305,24 @@ async def run() -> None:
     from portunus.config import config
     from portunus.services.auth_service import AuthService
     from portunus.services.cache_service import CacheService
+    from portunus.services.publish_service import PublishService
     from portunus.services.state_service import StateService
 
     state_service = StateService()
     cache_service = CacheService(state_service=state_service)
+    publish_service = PublishService(state_service=state_service)
     auth_service = AuthService(cache_service=cache_service)
 
-    runtime = await start_grpc_server(config=config.grpc, auth_service=auth_service)
+    runtime = await start_grpc_server(
+        config=config.grpc,
+        kinesis=config.kinesis,
+        auth_service=auth_service,
+        publish_service=publish_service,
+    )
     if runtime is None:
         logger.error(
-            "gRPC server disabled (GRPC_ENABLED=false); nothing to serve. Exiting."
+            "gRPC server disabled (GRPC_ENABLED=false) but it is now the "
+            "only Portunus surface; nothing to serve. Exiting."
         )
         return
 
@@ -184,7 +335,11 @@ async def run() -> None:
     await stop_event.wait()
     logger.info("Termination signal received; draining")
 
-    await stop_grpc_server(runtime, grace_seconds=config.grpc.graceful_shutdown_seconds)
+    await stop_grpc_server(
+        runtime,
+        grace_seconds=config.grpc.graceful_shutdown_seconds,
+        flush_reserve_seconds=config.grpc.drain_flush_reserve_seconds,
+    )
     await auth_service.mint_service.aclose()
     await state_service.close_redis_client()
     logger.info("Portunus gRPC process shut down cleanly")
