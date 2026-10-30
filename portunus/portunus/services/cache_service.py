@@ -234,12 +234,3 @@ class CacheService:
         except Exception as e:
             logger.error(f"Error flushing cache: {e}")
             raise CacheError(f"Failed to flush cache: {e}")
-
-    async def health_check(self) -> bool:
-        """
-        Check if Redis cache is available.
-
-        Returns:
-            True if Redis is available, False otherwise.
-        """
-        return await self.state_service.health_check()
