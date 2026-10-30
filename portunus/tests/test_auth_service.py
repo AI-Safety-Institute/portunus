@@ -234,15 +234,14 @@ class TestAuthenticateCacheRead:
         redis_client.get = AsyncMock(
             side_effect=redis.exceptions.TimeoutError("Timeout reading from socket")
         )
-        state_service = MagicMock()
-        state_service.acquire_redis_connection = AsyncMock(return_value=redis_client)
+        state_service = StateService()
+        state_service.redis_client = redis_client
         secrets_service = MagicMock()
         secrets_service.boto_session = MagicMock()
         secrets_service.fetch_secret = AsyncMock()
         service = AuthService(
             secrets_service=secrets_service,
             cache_service=CacheService(state_service=state_service),
-            validation_service=MagicMock(),
         )
 
         with pytest.raises(TimeoutError):
@@ -250,6 +249,67 @@ class TestAuthenticateCacheRead:
 
         secrets_service.boto_session.create_client.assert_not_called()
         secrets_service.fetch_secret.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pool_wait_expiry_rejects_without_full_auth(self, payload):
+        """A pool wait that expires rejects the request, not full auth.
+
+        Falling through to STS and Secrets Manager for every queued request is
+        the stampede the blocking pool exists to prevent.
+        """
+        pool_wait_expired = redis.exceptions.ConnectionError("No connection available.")
+        pool_wait_expired.__cause__ = TimeoutError()
+        redis_client = MagicMock()
+        redis_client.get = AsyncMock(side_effect=pool_wait_expired)
+        state_service = StateService()
+        state_service.redis_client = redis_client
+        secrets_service = MagicMock()
+        secrets_service.boto_session = MagicMock()
+        secrets_service.fetch_secret = AsyncMock()
+        service = AuthService(
+            secrets_service=secrets_service,
+            cache_service=CacheService(state_service=state_service),
+        )
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await service.authenticate(payload, "req-id")
+
+        assert type(exc_info.value) is TimeoutError
+        secrets_service.boto_session.create_client.assert_not_called()
+        secrets_service.fetch_secret.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_redis_connect_failure_still_falls_back_to_full_auth(self, payload):
+        """Only a pool wait rejects; Redis being down degrades to full auth."""
+        redis_client = MagicMock()
+        redis_client.get = AsyncMock(
+            side_effect=redis.exceptions.ConnectionError(
+                "Error 111 connecting to redis:6379. Connection refused."
+            )
+        )
+        redis_client.psetex = AsyncMock(return_value=True)
+        state_service = StateService()
+        state_service.redis_client = redis_client
+        secrets_service = MagicMock()
+        secrets_service.boto_session = MagicMock()
+        secrets_service.fetch_secret = AsyncMock(return_value='{"api_key": "sk-live"}')
+        validation_service = MagicMock()
+        validation_service.validate_secret.return_value = SecretsManagerAuthPayload(
+            secret="sk-live"
+        )
+        service = AuthService(
+            secrets_service=secrets_service,
+            cache_service=CacheService(state_service=state_service),
+            validation_service=validation_service,
+        )
+        install_sts_client(service)
+
+        result = await service.authenticate(payload, "req-id")
+
+        assert result.api_key == "sk-live"
+        assert result.principal_info.arn == PRINCIPAL_ARN
+        service.boto_session.create_client.assert_called_once()
+        secrets_service.fetch_secret.assert_awaited_once_with(payload)
 
 
 ROLE_ARN = "arn:aws:iam::123456789012:role/portunus-fed/projects/example/example-grant@projects.example"  # noqa: E501
@@ -289,8 +349,11 @@ def _payload(expires_in: timedelta = timedelta(hours=12)) -> AuthPayload:
 
 
 def _cache_backed_by(client: fakeredis.aioredis.FakeRedis) -> CacheService:
+    async def execute_redis(operation):
+        return await operation(client)
+
     state_service = MagicMock(spec=StateService)
-    state_service.acquire_redis_connection = AsyncMock(return_value=client)
+    state_service.execute_redis = execute_redis
     return CacheService(state_service=state_service)
 
 

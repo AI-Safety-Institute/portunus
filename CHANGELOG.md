@@ -7,7 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 - AWS clients for STS and Secrets Manager are pooled per credential set
-  instead of being created on every cache miss.
+  instead of being created on every cache miss. Redis connections come from
+  a blocking pool (`REDIS_POOL_TIMEOUT_SECONDS`, default 1.0) with idle
+  health checks (`REDIS_HEALTH_CHECK_INTERVAL_SECONDS`, default 30), and
+  cached authentication no longer probes Redis before each operation.
 
 ### Fixed
 - An authorization payload that fails to decode is no longer included in the
@@ -21,6 +24,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Joined log records decode request bodies with the request content type, as
   response bodies already did, so `application/vnd.amazon.eventstream` request
   bodies decode.
+- Authentication rejects Redis connection-probe and read timeouts, and
+  requests whose wait for a pooled Redis connection expires, without starting
+  further identity or secret lookups. Other Redis failures still fall back to
+  full authentication.
 
 ### Removed
 - AWS X-Ray tracing: the `aws-xray-sdk` dependency, Envoy's X-Ray tracer,

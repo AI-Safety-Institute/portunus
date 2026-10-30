@@ -15,7 +15,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
 from portunus.exceptions import CacheError
-from portunus.models import AuthResult, PrincipalInfo
+from portunus.models import AuthResult
 from portunus.services.state_service import StateService
 
 logger = logging.getLogger("api.access")
@@ -103,121 +103,30 @@ class CacheService:
 
         Raises:
             redis.exceptions.TimeoutError: If the Redis read times out.
+            TimeoutError: If waiting for a pooled connection times out.
             CacheError: If there's any other error accessing the cache.
         """
-        client = await self.state_service.acquire_redis_connection()
-        if not client:
-            logger.warning("Redis client unavailable for cache lookup")
-            return None
-
         try:
             cache_key = self.generate_cache_key(payload, target_host)
-            cached_data = await client.get(cache_key)
+            cached_data = await self.state_service.execute_redis(
+                lambda client: client.get(cache_key)
+            )
 
-            if cached_data:
-                logger.info(f"Cache hit for key {cache_key[:8]}...")
-                auth_response = json.loads(cached_data)
+            if not cached_data:
+                logger.debug("Cache miss for key %s...", cache_key[:8])
+                return None
 
-                principal_info = PrincipalInfo.from_dict(
-                    auth_response["principal_info"]
-                )
-
-                expires_at = auth_response.get("expires_at")
-                return AuthResult(
-                    api_key=auth_response["api_key"],
-                    principal_info=principal_info,
-                    output_header=auth_response.get("output_header"),
-                    output_prefix=auth_response.get("output_prefix"),
-                    expires_at=(
-                        datetime.fromisoformat(expires_at) if expires_at else None
-                    ),
-                )
-
-            logger.info(f"Cache miss for key {cache_key[:8]}...")
-            return None
+            logger.debug("Cache hit for key %s...", cache_key[:8])
+            return AuthResult.from_dict(json.loads(cached_data))
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding cached data: {e}")
             return None
         # Left unwrapped so AuthService can tell a timeout from other failures.
-        except RedisTimeoutError:
+        except (RedisTimeoutError, TimeoutError):
             raise
         except Exception as e:
             logger.error(f"Error getting from cache: {e}")
             raise CacheError(f"Failed to retrieve from cache: {e}")
-
-    async def cache_auth_response(
-        self,
-        payload: str,
-        target_host: Optional[str],
-        api_key: str,
-        principal_info: PrincipalInfo,
-        ttl_seconds: Optional[int] = None,
-        output_header: Optional[str] = None,
-        output_prefix: Optional[str] = None,
-        expires_at: Optional[datetime] = None,
-    ) -> bool:
-        """
-        Cache an authentication response including API key and principal info.
-
-        Args:
-            payload: The payload to use as a cache key.
-            target_host: The proxy's target host the payload was authorised for.
-            api_key: The API key to cache.
-            principal_info: Principal information to cache and log.
-            ttl_seconds: Optional TTL override
-            output_header: Upstream header that should carry the credential
-            output_prefix: Prefix for the credential value
-            expires_at: When a minted credential expires
-
-        Returns:
-            True if successfully cached, False otherwise.
-
-        Raises:
-            CacheError: If there's an error storing in the cache.
-        """
-        client = await self.state_service.acquire_redis_connection()
-        if not client:
-            logger.warning("Redis client unavailable for caching")
-            return False
-
-        try:
-            cache_key = self.generate_cache_key(payload, target_host)
-            effective_ttl = (
-                ttl_seconds if ttl_seconds is not None else self.cache_duration
-            )
-
-            # Skip caching if TTL is 0 or negative (credentials already expired)
-            if effective_ttl <= 0:
-                logger.info(
-                    f"Skipping cache for principal {principal_info.arn}: "
-                    f"TTL is {effective_ttl}s"
-                )
-                return False
-
-            # Store both API key and principal info as JSON
-            principal_info_dict = principal_info.to_dict()
-            auth_response = {
-                "api_key": api_key,
-                "principal_info": principal_info_dict,
-                "output_header": output_header,
-                "output_prefix": output_prefix,
-                "expires_at": expires_at.isoformat() if expires_at else None,
-            }
-
-            result = await client.setex(
-                cache_key, effective_ttl, json.dumps(auth_response)
-            )
-
-            logger.info(
-                f"Cached auth response for principal: "
-                f"{principal_info.arn}, "
-                f"expires in {effective_ttl}s)"
-            )
-
-            return bool(result)
-        except Exception as e:
-            logger.error(f"Error caching auth response: {e}")
-            raise CacheError(f"Failed to store in cache: {e}")
 
     async def cache_auth_result(
         self,
@@ -237,17 +146,56 @@ class CacheService:
 
         Returns:
             True if successfully cached, False otherwise.
+
+        Raises:
+            CacheError: If there's an error storing in the cache.
         """
-        return await self.cache_auth_response(
-            payload,
-            target_host,
-            auth_result.api_key,
-            auth_result.principal_info,
-            ttl_seconds,
-            output_header=auth_result.output_header,
-            output_prefix=auth_result.output_prefix,
-            expires_at=auth_result.expires_at,
-        )
+        try:
+            cache_key = self.generate_cache_key(payload, target_host)
+            effective_ttl = (
+                ttl_seconds if ttl_seconds is not None else self.cache_duration
+            )
+
+            # Skip caching if TTL is 0 or negative (credentials already expired)
+            if effective_ttl <= 0:
+                logger.info(
+                    f"Skipping cache for principal {auth_result.principal_info.arn}: "
+                    f"TTL is {effective_ttl}s"
+                )
+                return False
+
+            # Store both API key and principal info as JSON
+            auth_response = {
+                "api_key": auth_result.api_key,
+                "principal_info": auth_result.principal_info.to_dict(),
+                "output_header": auth_result.output_header,
+                "output_prefix": auth_result.output_prefix,
+                "expires_at": (
+                    auth_result.expires_at.isoformat()
+                    if auth_result.expires_at
+                    else None
+                ),
+            }
+
+            encoded_response = json.dumps(auth_response)
+            result = await self.state_service.execute_redis(
+                lambda client: client.psetex(
+                    cache_key, effective_ttl * 1000, encoded_response
+                )
+            )
+            if not result:
+                return False
+
+            logger.info(
+                f"Cached auth response for principal: "
+                f"{auth_result.principal_info.arn}, "
+                f"TTL capped at {effective_ttl}s"
+            )
+
+            return bool(result)
+        except Exception as e:
+            logger.error(f"Error caching auth response: {e}")
+            raise CacheError(f"Failed to store in cache: {e}")
 
     async def flush_all(self) -> bool:
         """
@@ -259,13 +207,12 @@ class CacheService:
         Raises:
             CacheError: If there's an error flushing the cache.
         """
-        client = await self.state_service.acquire_redis_connection()
-        if not client:
-            logger.warning("Redis client unavailable for cache flush")
-            return False
-
         try:
-            await client.flushdb()
+            result = await self.state_service.execute_redis(
+                lambda client: client.flushdb()
+            )
+            if not result:
+                return False
             logger.info("Flushed all auth cache entries")
             return True
         except Exception as e:
