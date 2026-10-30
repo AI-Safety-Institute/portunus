@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
+import yaml
 
 pytestmark = pytest.mark.slow
 
@@ -312,3 +313,69 @@ def test_shutdown_remains_bounded_when_admin_stops_responding(entrypoint_image):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize("audit_port", [None, "19001"])
+def test_audit_listener_can_be_routed_separately(entrypoint_image, audit_port):
+    overrides = {"PORTUNUS_GRPC_PORT": "19000"}
+    if audit_port is not None:
+        overrides["PORTUNUS_AUDIT_GRPC_PORT"] = audit_port
+    with running_proxy(entrypoint_image, overrides) as proxy:
+        proxy.wait_for_ping()
+        rendered = subprocess.run(
+            ["docker", "exec", proxy.name, "cat", "/envoy/envoy_subst.yaml"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        clusters = yaml.safe_load(rendered.stdout)["static_resources"]["clusters"]
+        ports = {
+            cluster["name"]: cluster["load_assignment"]["endpoints"][0]["lb_endpoints"][
+                0
+            ]["endpoint"]["address"]["socket_address"]["port_value"]
+            for cluster in clusters
+            if cluster["name"] in ("portunus_grpc_cluster", "portunus_extproc_cluster")
+        }
+        assert ports["portunus_grpc_cluster"] == 19000
+        assert ports["portunus_extproc_cluster"] == int(audit_port or "19000")
+
+
+@pytest.mark.parametrize("audit_port", [None, "19000", "19001"])
+def test_healthz_requires_every_portunus_listener(entrypoint_image, audit_port):
+    overrides = {"PORTUNUS_GRPC_PORT": "19000"}
+    if audit_port is not None:
+        overrides["PORTUNUS_AUDIT_GRPC_PORT"] = audit_port
+    with running_proxy(entrypoint_image, overrides) as proxy:
+        proxy.wait_for_ping()
+        rendered = subprocess.run(
+            ["docker", "exec", proxy.name, "cat", "/envoy/envoy_subst.yaml"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        config = yaml.safe_load(rendered.stdout)["static_resources"]
+        health_ports = {
+            cluster["name"]: cluster["load_assignment"]["endpoints"][0]["lb_endpoints"][
+                0
+            ]["endpoint"]["address"]["socket_address"]["port_value"]
+            for cluster in config["clusters"]
+            if "health_checks" in cluster
+        }
+        (health_filter,) = [
+            http_filter
+            for listener in config["listeners"]
+            for chain in listener["filter_chains"]
+            for network_filter in chain["filters"]
+            for http_filter in network_filter["typed_config"].get("http_filters", [])
+            if http_filter["name"] == "envoy.filters.http.health_check"
+        ]
+        required = health_filter["typed_config"]["cluster_min_healthy_percentages"]
+        if audit_port in (None, "19000"):
+            expected = {"portunus_health_cluster": 19000}
+        else:
+            expected = {
+                "portunus_health_cluster": 19000,
+                "portunus_audit_health_cluster": 19001,
+            }
+        assert health_ports == expected
+        assert required == {name: {"value": 100} for name in expected}
