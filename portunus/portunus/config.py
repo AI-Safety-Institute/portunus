@@ -204,6 +204,25 @@ class KinesisConfig(BaseModel):
         return [env_var for env_var, value in required.items() if not value]
 
 
+class MetricsConfig(BaseModel):
+    """CloudWatch EMF metrics; off by default so local runs and tests stay quiet."""
+
+    enabled: bool = Field(default=False, description="Emit CloudWatch EMF metrics")
+    namespace: str = Field(
+        default="Portunus", description="CloudWatch namespace", min_length=1
+    )
+    service_name: str = Field(
+        default="portunus",
+        description="Value of the ServiceName dimension (Role comes from GRPC_ROLE)",
+        min_length=1,
+    )
+    flush_interval_seconds: float = Field(
+        default=60.0,
+        description="Seconds between EMF flushes (CloudWatch stores 60 s periods)",
+        gt=0.0,
+    )
+
+
 class AwsConfig(BaseModel):
     """AWS-related configuration settings."""
 
@@ -452,6 +471,10 @@ class PortunusConfig(BaseModel):
         default_factory=AwsConfig,
         description="AWS configuration",
     )
+    metrics: MetricsConfig = Field(
+        default_factory=MetricsConfig,
+        description="CloudWatch EMF metrics configuration",
+    )
     kinesis: KinesisConfig = Field(
         default_factory=KinesisConfig,
         description="Kinesis Data Streams audit publishing configuration",
@@ -551,6 +574,15 @@ def get_config() -> PortunusConfig:
 
     aws = AwsConfig(
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL", None),
+    )
+
+    metrics = MetricsConfig(
+        enabled=os.environ.get("METRICS_ENABLED", "false").lower() == "true",
+        namespace=os.environ.get("METRICS_NAMESPACE", "Portunus"),
+        flush_interval_seconds=float(
+            os.environ.get("METRICS_FLUSH_INTERVAL_SECONDS", "60")
+        ),
+        service_name=os.environ.get("METRICS_SERVICE_NAME", "portunus"),
     )
 
     kinesis = KinesisConfig(
@@ -657,6 +689,7 @@ def get_config() -> PortunusConfig:
         proxy_header_prefix=os.environ.get("PORTUNUS_HEADER_PREFIX", "portunus"),
         redis=redis,
         aws=aws,
+        metrics=metrics,
         kinesis=kinesis,
         relay=relay,
         grpc=grpc,

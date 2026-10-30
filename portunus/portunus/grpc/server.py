@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal
 import sys
@@ -16,9 +17,15 @@ from envoy.service.ext_proc.v3 import external_processor_pb2_grpc as proc_grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
-from portunus.config import GrpcConfig, KinesisConfig
+from portunus.config import GrpcConfig, KinesisConfig, MetricsConfig
 from portunus.grpc.auth_servicer import PortunusAuthServicer
 from portunus.grpc.proc_servicer import PortunusProcessServicer
+from portunus.metrics import (
+    EVENT_LOOP_LAG,
+    PUBLISH_QUEUE_DEPTH,
+    MetricsAggregator,
+    configure_metrics,
+)
 from portunus.services.auth_service import AuthService
 from portunus.services.publish_queue import BoundedPublishQueue
 from portunus.services.publish_service import PublishService
@@ -49,7 +56,31 @@ class GrpcRuntime:
     publish_queue: BoundedPublishQueue
     publish_service: PublishService
     health_servicer: health.aio.HealthServicer
+    # EMF reporter and event-loop probe; None when metrics are disabled.
+    metrics_reporter: Optional[asyncio.Task] = field(default=None)
+    event_loop_probe: Optional[asyncio.Task] = field(default=None)
+    metrics: Optional[MetricsAggregator] = field(default=None)
     audit_server: Optional[grpc.aio.Server] = field(default=None)
+
+
+async def _event_loop_lag_probe(metrics: MetricsAggregator) -> None:
+    """Sample how late the loop wakes a 1 s sleep: the CPU-starvation signal."""
+    loop = asyncio.get_running_loop()
+    while True:
+        before = loop.time()
+        await asyncio.sleep(1.0)
+        lag_ms = (loop.time() - before - 1.0) * 1000
+        if lag_ms > 0:
+            metrics.observe(EVENT_LOOP_LAG, lag_ms)
+
+
+async def _metrics_reporter_loop(
+    metrics: MetricsAggregator, *, interval_seconds: float
+) -> None:
+    """Flush the aggregated interval every ``interval_seconds``."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        metrics.flush()
 
 
 async def start_grpc_server(
@@ -58,11 +89,16 @@ async def start_grpc_server(
     kinesis: KinesisConfig,
     auth_service: AuthService,
     publish_service: PublishService,
+    metrics_config: Optional[MetricsConfig] = None,
 ) -> Optional[GrpcRuntime]:
     """Start the Portunus gRPC server.
 
     Registers ext_authz, ext_proc, the health service, and reflection. Returns
     None when ``config.enabled`` is False.
+
+    ``metrics_config`` defaults to a disabled :class:`MetricsConfig`, so an
+    embedded server (tests, local harnesses) never writes EMF to stdout
+    unless it asks to.
 
     Raises ``RuntimeError`` when the channel-identity key or the Kinesis audit
     sink is misconfigured, so a task that would accept unauthenticated callers
@@ -242,12 +278,39 @@ async def start_grpc_server(
         config.role,
         config.max_concurrent_streams,
     )
+    # CloudWatch EMF. Each role pre-registers only the counters it owns, so a
+    # split deployment never reports the other half's structural zeroes.
+    metrics_config = metrics_config or MetricsConfig()
+    metrics = configure_metrics(
+        enabled=metrics_config.enabled,
+        namespace=metrics_config.namespace,
+        service_name=metrics_config.service_name,
+        role=config.role,
+    )
+    metrics_reporter: Optional[asyncio.Task] = None
+    event_loop_probe: Optional[asyncio.Task] = None
+    if metrics.enabled:
+        if serves_audit:
+            metrics.register_gauge(lambda: {PUBLISH_QUEUE_DEPTH: publish_queue.qsize()})
+        metrics_reporter = asyncio.create_task(
+            _metrics_reporter_loop(
+                metrics, interval_seconds=metrics_config.flush_interval_seconds
+            ),
+            name="metrics-reporter",
+        )
+        event_loop_probe = asyncio.create_task(
+            _event_loop_lag_probe(metrics), name="event-loop-lag-probe"
+        )
+
     return GrpcRuntime(
         server=server,
         proc_servicer=proc_servicer,
         publish_queue=publish_queue,
         publish_service=publish_service,
         health_servicer=health_servicer,
+        metrics_reporter=metrics_reporter,
+        event_loop_probe=event_loop_probe,
+        metrics=metrics if metrics.enabled else None,
         audit_server=audit_server,
     )
 
@@ -276,6 +339,15 @@ async def stop_grpc_server(
         grace_seconds,
         min(flush_reserve_seconds, grace_seconds),
     )
+
+    # Stop the reporter and the probe before draining, then flush once at the
+    # very end (below) so the final partial interval — including whatever the
+    # drain itself reports — still reaches CloudWatch.
+    for task in (runtime.metrics_reporter, runtime.event_loop_probe):
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     # NOT_SERVING first so a probe sees the drain immediately and the load
     # balancer stops routing new connections here.
@@ -340,6 +412,12 @@ async def stop_grpc_server(
         runtime.publish_queue.cancelled_total,
     )
 
+    # Final flush AFTER the drain accounting above: the last interval's
+    # counters (including the drain's own drops) would otherwise die with
+    # the process.
+    if runtime.metrics is not None:
+        runtime.metrics.flush()
+
 
 async def run() -> None:
     """Process entrypoint: build services, serve gRPC, drain on SIGTERM.
@@ -366,6 +444,7 @@ async def run() -> None:
         kinesis=config.kinesis,
         auth_service=auth_service,
         publish_service=publish_service,
+        metrics_config=config.metrics,
     )
     if runtime is None:
         logger.error(
