@@ -24,9 +24,14 @@ class SecretsService:
     including API keys.
     """
 
-    def __init__(self):
-        """Initialize the SecretsService."""
-        self.boto_session = get_session()
+    def __init__(self, boto_session=None):
+        """Initialize the SecretsService.
+
+        Args:
+            boto_session: Optional aiobotocore session. Defaults to
+                ``get_session()``; tests pass a fake to avoid real AWS.
+        """
+        self.boto_session = boto_session if boto_session is not None else get_session()
 
     async def fetch_secret(self, payload: AuthPayload) -> str:
         """
