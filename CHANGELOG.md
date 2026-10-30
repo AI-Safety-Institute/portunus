@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- The ext_authz servicer accepts the payload as `Authorization: Bearer
+  <payload>` on every proxy, as the Lua filter did from 0.12.0 (#217), so one
+  deployment serves clients on `anthropic` SDK 1.x (`X-Api-Key`) and 2.x
+  (`Authorization: Bearer`) at once. A request carrying different payloads in
+  the two headers is rejected; both headers are removed before the request
+  goes upstream and from audit header capture.
 - An in-process auth cache in front of Redis (`AUTH_LOCAL_CACHE_TTL_SECONDS`,
   default 30; `AUTH_LOCAL_CACHE_MAX_ENTRIES`, default 10000; a TTL of 0
   disables it). A revoked credential can keep working for up to the TTL per
