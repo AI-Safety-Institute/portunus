@@ -17,7 +17,6 @@ from portunus.config import config
 from portunus.exceptions import CacheError
 from portunus.models import AuthResult, PrincipalInfo
 from portunus.services.state_service import StateService
-from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -220,7 +219,6 @@ class CacheService:
             logger.error(f"Error caching auth response: {e}")
             raise CacheError(f"Failed to store in cache: {e}")
 
-    @capture_async()
     async def cache_auth_result(
         self,
         payload: str,
@@ -251,59 +249,6 @@ class CacheService:
             expires_at=auth_result.expires_at,
         )
 
-    @capture_async()
-    async def cache_api_key(
-        self,
-        payload: str,
-        target_host: Optional[str],
-        api_key: str,
-        principal_info: PrincipalInfo,
-    ) -> bool:
-        """
-        Cache an API key and principal info.
-
-        Args:
-            payload: The payload to use as a cache key.
-            target_host: The proxy's target host the payload was authorised for.
-            api_key: The API key to cache.
-            principal_info: Principal information to cache and log.
-
-        Returns:
-            True if successfully cached, False otherwise.
-        """
-        return await self.cache_auth_response(
-            payload, target_host, api_key, principal_info
-        )
-
-    @capture_async()
-    async def invalidate_cache_entry(
-        self, payload: str, target_host: Optional[str]
-    ) -> bool:
-        """
-        Invalidate a cache entry.
-
-        Args:
-            payload: The payload whose cache entry should be invalidated.
-            target_host: The proxy's target host the payload was authorised for.
-
-        Returns:
-            True if successfully invalidated or entry didn't exist, False on error.
-        """
-        client = await self.state_service.acquire_redis_connection()
-        if not client:
-            logger.warning("Redis client unavailable for cache invalidation")
-            return False
-
-        try:
-            cache_key = self.generate_cache_key(payload, target_host)
-            await client.delete(cache_key)
-            logger.info(f"Invalidated cache key {cache_key[:8]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error invalidating cache entry: {e}")
-            return False
-
-    @capture_async()
     async def flush_all(self) -> bool:
         """
         Flush the entire auth cache.
@@ -327,7 +272,6 @@ class CacheService:
             logger.error(f"Error flushing cache: {e}")
             raise CacheError(f"Failed to flush cache: {e}")
 
-    @capture_async()
     async def health_check(self) -> bool:
         """
         Check if Redis cache is available.

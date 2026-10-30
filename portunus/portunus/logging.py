@@ -10,19 +10,76 @@ import json
 import logging
 import sys
 import time
+import uuid
+from contextvars import ContextVar, Token
+from typing import Optional, Tuple
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from portunus.config import config
-from portunus.services.xray_service import (
-    XRayContext,
-    get_trace_id,
-    parse_trace_header,
-)
 
 logger = logging.getLogger("api.access")
+
+# The correlation id of the request being served, set by ``LoggingMiddleware``:
+# the ``Root=`` id of the inbound ``X-Amzn-Trace-Id`` header when there is one,
+# otherwise a fresh uuid4. ``/authorise`` returns it as the ``request_id`` that
+# ties every audit record for the proxied request together, so it must be
+# unique per request.
+trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
+
+
+def parse_trace_header(
+    header: str,
+) -> Tuple[Optional[str], Optional[str], Optional[bool]]:
+    """
+    Parse the X-Amzn-Trace-Id header and extract components.
+
+    Args:
+        header: The X-Amzn-Trace-Id header value
+
+    Returns:
+        Tuple containing:
+            - trace_id: The trace ID
+            - parent_id: The parent segment ID
+            - sampled: Boolean indicating if this request is sampled
+    """
+    if not header:
+        return None, None, None
+
+    trace_id = None
+    parent_id = None
+    sampled = None
+
+    components = header.split(";")
+    for component in components:
+        if component.startswith("Root="):
+            trace_id = component[5:]  # Extract value after "Root="
+        elif component.startswith("Parent="):
+            parent_id = component[7:]  # Extract value after "Parent="
+        elif component.startswith("Sampled="):
+            sampled = component[8:] == "1"  # Convert to boolean
+
+    return trace_id, parent_id, sampled
+
+
+def get_trace_id() -> str:
+    """Get the current trace ID from context.
+
+    Returns:
+        str: The current trace ID, or "No-Trace-Id" if not set
+    """
+    return trace_id_var.get() or "No-Trace-Id"
+
+
+def set_trace_id(trace_id: str) -> Token:
+    """Set the trace ID in the context.
+
+    Args:
+        trace_id (str): The trace ID to set
+    """
+    return trace_id_var.set(trace_id)
 
 
 class StructuredLogFormatter(logging.Formatter):
@@ -92,7 +149,7 @@ class StructuredLogFormatter(logging.Formatter):
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware that adds logging and set up x-ray context.
+    """Middleware that adds logging and sets the trace ID context.
 
     This middleware captures request information, sets context variables,
     and logs request and response details with performance metrics.
@@ -118,34 +175,24 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         """
         start_time = time.time()
 
-        # Extract and set trace ID from the request header
+        # Correlate on the caller's trace id when it sent one, else mint one.
+        # Nothing upstream supplies a trace id any more (the Envoy X-Ray tracer
+        # used to), and a shared placeholder would collapse every request's
+        # audit records onto one request_id.
         aws_trace_header = request.headers.get("x-amzn-trace-id", "")
         trace_id, parent_id, sampled = parse_trace_header(aws_trace_header)
-        app_title = request.app.title.replace(" ", "_").lower()
-
-        # turn /log/<id> into just /log for segment name
-        if len(request.url.path.split("/")) > 1:
-            safe_path = request.url.path.split("/")[1]
-        else:
-            safe_path = ""
-
-        segment_name = f"{app_title}/{safe_path}"
 
         if not trace_id:
-            trace_id = "No-Trace-Id"
+            trace_id = str(uuid.uuid4())
             sampled = False
 
         logger.info(
-            f"Entering x-ray context: trace_id={trace_id}, "
-            f"parent_id={parent_id}, sampled={sampled}, segment_name={segment_name}"
+            f"Request trace context: trace_id={trace_id}, "
+            f"parent_id={parent_id}, sampled={sampled}"
         )
 
-        async with XRayContext(
-            trace_id=trace_id,
-            segment_name=segment_name,
-            parent_id=parent_id,
-            sampled=sampled,
-        ):
+        token = set_trace_id(trace_id)
+        try:
             # Get client IP
             if "x-forwarded-for" in request.headers:
                 client_ip = request.headers["x-forwarded-for"].split(",")[0]
@@ -209,6 +256,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     exc_info=True,
                 )
                 raise
+        finally:
+            trace_id_var.reset(token)
 
 
 def configure_logging():
