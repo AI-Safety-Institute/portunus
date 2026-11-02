@@ -210,6 +210,29 @@ class TestWebSocketRelay:
         assert "account_id" in record
         assert "timestamp" in record
 
+    @pytest.mark.asyncio
+    async def test_aisi_tags_reach_the_relay_log(self, ws_docker_setup):
+        """Envoy's WS route passes x-aisi-tags to the relay, which logs it."""
+        tags = f"session={time.time()},experiment=e2e"
+        ws = await websockets.connect(
+            PROXY_WS_URL,
+            additional_headers={
+                "Authorization": make_auth_header(),
+                "x-aisi-tags": tags,
+            },
+            open_timeout=5,
+        )
+        await ws.close()
+
+        # The relay logs upgrade header values in plaintext, once per connection
+        deadline = time.time() + 30
+        while not any(
+            r.get("raw_headers", {}).get("x-aisi-tags") == tags
+            for r in read_kinesis_records("portunus-stream-request-headers")
+        ):
+            assert time.time() < deadline, f"No request headers record has {tags}"
+            await asyncio.sleep(1)
+
 
 @pytest.mark.slow
 class TestEnvoyWebSocketRouting:
