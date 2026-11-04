@@ -906,8 +906,9 @@ class RequestHeadersRecord:
             Indicates compression applied to request body. None if not present or
             decoding fails.
         project: Project of the caller, as the proxy learned it from /authorise.
-            Firehose partitions the stream by it. None when the role name did not
-            carry one or the record came from a path that does not know it.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -993,8 +994,9 @@ class RequestBodyRecord:
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
         project: Project of the caller, as the proxy learned it from /authorise.
-            Firehose partitions the stream by it. None when the role name did not
-            carry one or the record came from a path that does not know it.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -1051,8 +1053,9 @@ class RequestTrailersRecord:
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
         project: Project of the caller, as the proxy learned it from /authorise.
-            Firehose partitions the stream by it. None when the role name did not
-            carry one or the record came from a path that does not know it.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -1116,8 +1119,9 @@ class ResponseHeadersRecord:
             Indicates compression applied to response body. None if not present or
             decoding fails.
         project: Project of the caller, as the proxy learned it from /authorise.
-            Firehose partitions the stream by it. None when the role name did not
-            carry one or the record came from a path that does not know it.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -1204,8 +1208,9 @@ class ResponseBodyRecord:
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
         project: Project of the caller, as the proxy learned it from /authorise.
-            Firehose partitions the stream by it. None when the role name did not
-            carry one or the record came from a path that does not know it.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -1263,8 +1268,9 @@ class ResponseTrailersRecord:
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
         project: Project of the caller, as the proxy learned it from /authorise.
-            Firehose partitions the stream by it. None when the role name did not
-            carry one or the record came from a path that does not know it.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str

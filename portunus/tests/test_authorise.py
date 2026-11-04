@@ -7,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from portunus.app import AuthorizationResponse, portunus
 from portunus.models import AuthResult, PrincipalInfo
+from portunus.services.arn_service import parse_identity_from_arn
 
 
 @pytest.fixture
@@ -69,13 +70,15 @@ class TestAuthorise:
         assert body["request_id"] == "test-trace-id"
 
     @pytest.mark.asyncio
-    async def test_unknown_project_is_null_not_a_default(self, mock_segment):
-        """No project means null in the JSON; the query layer maps null to unknown."""
-        body = await _post_authorise(
-            AuthResult(api_key="sk-test", principal_info=PrincipalInfo.empty())
+    async def test_role_without_project_returns_unknown(self, mock_segment):
+        """A role name with no project parses to "unknown", which the proxy echoes."""
+        principal_info = parse_identity_from_arn(
+            "arn:aws:sts::123456789012:assumed-role/PlainRole/session"
         )
-        assert "project" in body
-        assert body["project"] is None
+        body = await _post_authorise(
+            AuthResult(api_key="sk-test", principal_info=principal_info)
+        )
+        assert body["project"] == "unknown"
 
     @pytest.mark.asyncio
     async def test_authenticate_timeout_returns_503(self, mock_segment):

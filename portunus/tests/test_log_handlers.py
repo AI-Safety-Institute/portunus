@@ -111,3 +111,30 @@ class TestLogHandlersProject:
         kwargs = publish.await_args.kwargs
         assert kwargs["body_bytes"] == b""
         assert kwargs["project"] == "alpha"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("alpha", "alpha"),
+            # ".." is inside the IAM role-name charset, so it passes unchanged.
+            ("..", ".."),
+            ("a/b", None),
+            ("", None),
+            ("a" * 100, None),
+        ],
+    )
+    async def test_header_outside_role_name_charset_is_none(
+        self, mock_segment, header, expected
+    ):
+        """A header /authorise could not have produced is treated as absent."""
+        publish = AsyncMock(return_value=True)
+        with patch("portunus.app.publish_service.publish_request_headers", new=publish):
+            resp = await _post_log(
+                f"/log/{REQUEST_ID}/request/headers",
+                HEADERS_PAYLOAD,
+                {"x-portunus-project": header},
+            )
+
+        assert resp.status_code == 200
+        assert publish.await_args.kwargs["project"] == expected

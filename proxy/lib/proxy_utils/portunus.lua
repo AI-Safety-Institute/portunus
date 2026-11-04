@@ -140,8 +140,7 @@ function portunus_client:authorise(handle, auth_payload)
 end
 
 --- Makes an async log call to Portunus, logging errors instead of silently swallowing them.
--- The project rides on our outgoing httpCall, never on the client's request headers,
--- so Envoy's header-modification timing rule does not apply here.
+-- Sends the proxy's own headers, plus the project header when the project is known.
 -- @param handle Request/response handle
 -- @param request_id Request ID for error context
 -- @param path URL path for the log endpoint

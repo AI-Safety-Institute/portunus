@@ -7,6 +7,7 @@ It implements the authentication logic and log event publishing to Kinesis.
 
 import asyncio
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
@@ -14,7 +15,7 @@ from typing import Annotated, Optional
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
 from fastapi import APIRouter, FastAPI, Header, Request, Response, WebSocket
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from portunus.config import config  # noqa: E402 — also used by XRayService
 from portunus.exceptions import (
@@ -79,8 +80,8 @@ class AuthorizationResponse(BaseModel):
         output_prefix: Prefix for the credential value. When None the proxy uses
             its configured API_KEY_PREFIX; an empty string means no prefix.
         project: Caller's project from the role name. The proxy echoes it on
-            every /log call so each record carries it. None when unknown; the
-            query layer maps null to "unknown", so no default is invented here.
+            every /log call so each record carries it. "unknown" when the
+            caller's role name carries no project.
     """
 
     api_key: str
@@ -90,9 +91,24 @@ class AuthorizationResponse(BaseModel):
     project: Optional[str] = None
 
 
+# /authorise only produces IAM role-name characters, so any other value is
+# treated as no header rather than written into a Firehose partition key.
+_PROJECT_PATTERN = re.compile(r"[\w+=,.@-]{1,64}", re.ASCII)
+
+
+def _project_or_none(value: object) -> Optional[str]:
+    if isinstance(value, str) and _PROJECT_PATTERN.fullmatch(value):
+        return value
+    return None
+
+
 # The proxy sends the project back on each /log call; the header name is fixed
 # because Portunus and the Lua client must agree on it without shared config.
-ProjectHeader = Annotated[Optional[str], Header(alias="x-portunus-project")]
+ProjectHeader = Annotated[
+    Optional[str],
+    BeforeValidator(_project_or_none),
+    Header(alias="x-portunus-project"),
+]
 
 
 @portunus_router.post("/authorise")
