@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Every request and response log record carries the caller's `project`, so
+  Firehose can partition each stream by it instead of filing the six
+  non-metadata streams under `project=unknown`. `/authorise` returns it and
+  the proxy echoes it on each `/log` call as `x-portunus-project`. The Glue
+  schemas gain a trailing `project` column; the WebSocket relay still sends
+  none.
+
 ## [0.12.0] - 2026-10-27
 
 ### Security

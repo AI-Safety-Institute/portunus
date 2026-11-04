@@ -7,14 +7,15 @@ It implements the authentication logic and log event publishing to Kinesis.
 
 import asyncio
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Annotated, Optional
 
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
-from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, FastAPI, Header, Request, Response, WebSocket
+from pydantic import BaseModel, BeforeValidator, Field
 
 from portunus.config import config  # noqa: E402 — also used by XRayService
 from portunus.exceptions import (
@@ -78,12 +79,36 @@ class AuthorizationResponse(BaseModel):
             None the proxy uses its configured API_KEY_HEADER.
         output_prefix: Prefix for the credential value. When None the proxy uses
             its configured API_KEY_PREFIX; an empty string means no prefix.
+        project: Caller's project from the role name. The proxy echoes it on
+            every /log call so each record carries it. "unknown" when the
+            caller's role name carries no project.
     """
 
     api_key: str
     request_id: str
     output_header: Optional[str] = Field(default=None, min_length=1)
     output_prefix: Optional[str] = None
+    project: Optional[str] = None
+
+
+# /authorise only produces IAM role-name characters, so any other value is
+# treated as no header rather than written into a Firehose partition key.
+_PROJECT_PATTERN = re.compile(r"[\w+=,.@-]{1,64}", re.ASCII)
+
+
+def _project_or_none(value: object) -> Optional[str]:
+    if isinstance(value, str) and _PROJECT_PATTERN.fullmatch(value):
+        return value
+    return None
+
+
+# The proxy sends the project back on each /log call; the header name is fixed
+# because Portunus and the Lua client must agree on it without shared config.
+ProjectHeader = Annotated[
+    Optional[str],
+    BeforeValidator(_project_or_none),
+    Header(alias="x-portunus-project"),
+]
 
 
 @portunus_router.post("/authorise")
@@ -182,6 +207,7 @@ async def authorise(
                 request_id=trace_id,
                 output_header=auth_result.output_header,
                 output_prefix=auth_result.output_prefix,
+                project=auth_result.principal_info.project,
             )
 
     except PayloadError as e:
@@ -219,6 +245,7 @@ async def log_request_headers(
     request_id: str,
     content: HeadersPayload,
     response: Response,
+    project: ProjectHeader = None,
 ) -> Optional[ErrorResponse]:
     """Store request headers."""
     segment = xray_service.recorder.current_segment()
@@ -230,6 +257,7 @@ async def log_request_headers(
             request_id=request_id,
             headers=content.headers,
             timestamp=content.get_iso_timestamp(),
+            project=project,
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
@@ -246,6 +274,7 @@ async def log_request_body(
     request_id: str,
     request: Request,
     response: Response,
+    project: ProjectHeader = None,
 ) -> Optional[ErrorResponse]:
     """Store request body as raw bytes."""
     segment = xray_service.recorder.current_segment()
@@ -269,6 +298,7 @@ async def log_request_body(
                     timestamp=timestamp,
                     chunk_id=chunk_id,
                     num_chunks=len(chunks),
+                    project=project,
                 )
         else:
             # Handle empty body case by sending a single empty chunk
@@ -278,6 +308,7 @@ async def log_request_body(
                 timestamp=timestamp,
                 chunk_id=0,
                 num_chunks=1,
+                project=project,
             )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
@@ -294,6 +325,7 @@ async def log_request_trailers(
     request_id: str,
     content: TrailersPayload,
     response: Response,
+    project: ProjectHeader = None,
 ) -> Optional[ErrorResponse]:
     """Store request trailers."""
     segment = xray_service.recorder.current_segment()
@@ -305,6 +337,7 @@ async def log_request_trailers(
             request_id=request_id,
             trailers=content.trailers,
             timestamp=content.get_iso_timestamp(),
+            project=project,
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
@@ -323,6 +356,7 @@ async def log_response_headers(
     request_id: str,
     content: HeadersPayload,
     response: Response,
+    project: ProjectHeader = None,
 ) -> Optional[ErrorResponse]:
     """Store response headers."""
     segment = xray_service.recorder.current_segment()
@@ -334,6 +368,7 @@ async def log_response_headers(
             request_id=request_id,
             headers=content.headers,
             timestamp=content.get_iso_timestamp(),
+            project=project,
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
@@ -352,6 +387,7 @@ async def log_response_body(
     request_id: str,
     request: Request,
     response: Response,
+    project: ProjectHeader = None,
 ) -> Optional[ErrorResponse]:
     """Store response body as raw bytes."""
     segment = xray_service.recorder.current_segment()
@@ -375,6 +411,7 @@ async def log_response_body(
                     timestamp=timestamp,
                     chunk_id=chunk_id,
                     num_chunks=len(chunks),
+                    project=project,
                 )
         else:
             # Handle empty body case by sending a single empty chunk
@@ -384,6 +421,7 @@ async def log_response_body(
                 timestamp=timestamp,
                 chunk_id=0,
                 num_chunks=1,
+                project=project,
             )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]
@@ -400,6 +438,7 @@ async def log_response_trailers(
     request_id: str,
     content: TrailersPayload,
     response: Response,
+    project: ProjectHeader = None,
 ) -> Optional[ErrorResponse]:
     """Store response trailers."""
     segment = xray_service.recorder.current_segment()
@@ -411,6 +450,7 @@ async def log_response_trailers(
             request_id=request_id,
             trailers=content.trailers,
             timestamp=content.get_iso_timestamp(),
+            project=project,
         )
     except Exception as e:
         segment.add_exception(e, stacktrace.get_stacktrace())  # type: ignore[invalid-argument-type]  # stubs type stack as StackSummary but runtime accepts list[FrameSummary]

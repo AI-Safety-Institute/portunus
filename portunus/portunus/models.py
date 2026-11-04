@@ -905,6 +905,10 @@ class RequestHeadersRecord:
         content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
             Indicates compression applied to request body. None if not present or
             decoding fails.
+        project: Project of the caller, as the proxy learned it from /authorise.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -917,6 +921,7 @@ class RequestHeadersRecord:
     authority: Optional[str] = None
     user_agent: Optional[str] = None
     content_encoding: Optional[str] = None
+    project: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Decode headers from base64 after initialization."""
@@ -941,6 +946,7 @@ class RequestHeadersRecord:
             "authority": self.authority,
             "user_agent": self.user_agent,
             "content_encoding": self.content_encoding,
+            "project": self.project,
         }
 
     @classmethod
@@ -958,6 +964,7 @@ class RequestHeadersRecord:
             {"name": "authority", "type": "string"},
             {"name": "user_agent", "type": "string"},
             {"name": "content_encoding", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -986,6 +993,10 @@ class RequestBodyRecord:
             was split across multiple records. ETL jobs set a 'truncated' flag when
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Project of the caller, as the proxy learned it from /authorise.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -995,6 +1006,7 @@ class RequestBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    project: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -1007,6 +1019,7 @@ class RequestBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "project": self.project,
         }
 
     @classmethod
@@ -1021,6 +1034,7 @@ class RequestBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1038,12 +1052,17 @@ class RequestTrailersRecord:
             names. Values may be base64-encoded depending on implementation.
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Project of the caller, as the proxy learned it from /authorise.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
     trailers: Dict[str, str]
     timestamp: str
     published_at: str
+    project: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -1053,6 +1072,7 @@ class RequestTrailersRecord:
             "trailers": self.trailers,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "project": self.project,
         }
 
     @classmethod
@@ -1064,6 +1084,7 @@ class RequestTrailersRecord:
             {"name": "trailers", "type": "map<string,string>"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1097,6 +1118,10 @@ class ResponseHeadersRecord:
         content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
             Indicates compression applied to response body. None if not present or
             decoding fails.
+        project: Project of the caller, as the proxy learned it from /authorise.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -1108,6 +1133,7 @@ class ResponseHeadersRecord:
     content_length: Optional[str] = None
     content_type: Optional[str] = None
     content_encoding: Optional[str] = None
+    project: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Decode headers from base64 after initialization."""
@@ -1130,6 +1156,7 @@ class ResponseHeadersRecord:
             "content_length": self.content_length,
             "content_type": self.content_type,
             "content_encoding": self.content_encoding,
+            "project": self.project,
         }
 
     @classmethod
@@ -1146,6 +1173,7 @@ class ResponseHeadersRecord:
             {"name": "content_length", "type": "string"},
             {"name": "content_type", "type": "string"},
             {"name": "content_encoding", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1179,6 +1207,10 @@ class ResponseBodyRecord:
             be known until the final chunk. ETL jobs set a 'truncated' flag when
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Project of the caller, as the proxy learned it from /authorise.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
@@ -1188,6 +1220,7 @@ class ResponseBodyRecord:
     chunk_id: int
     num_chunks: int
     published_at: str
+    project: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -1200,6 +1233,7 @@ class ResponseBodyRecord:
             "num_chunks": self.num_chunks,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "project": self.project,
         }
 
     @classmethod
@@ -1214,6 +1248,7 @@ class ResponseBodyRecord:
             {"name": "num_chunks", "type": "bigint"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1232,12 +1267,17 @@ class ResponseTrailersRecord:
             names. Values may be base64-encoded depending on implementation.
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Project of the caller, as the proxy learned it from /authorise.
+            Firehose partitions the stream by it. "unknown" when the caller's
+            role name carries no project; None only when no header arrived (an
+            older proxy image, or the WebSocket relay, which sends none).
     """
 
     request_id: str
     trailers: Dict[str, str]
     timestamp: str
     published_at: str
+    project: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -1247,6 +1287,7 @@ class ResponseTrailersRecord:
             "trailers": self.trailers,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "project": self.project,
         }
 
     @classmethod
@@ -1258,6 +1299,7 @@ class ResponseTrailersRecord:
             {"name": "trailers", "type": "map<string,string>"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
