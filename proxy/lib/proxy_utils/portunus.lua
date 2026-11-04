@@ -12,6 +12,10 @@ portunus_client.__index = portunus_client
 -- WebSocket relay reads, so a client never has to know which header a proxy expects.
 local BEARER_AUTH = { header = "authorization", prefix = "Bearer " }
 
+-- Header that carries the caller's project on every /log call. Portunus reads it
+-- by this exact name, so it is fixed rather than derived from header_prefix.
+local PROJECT_HEADER = "x-portunus-project"
+
 --- Lists the inbound headers the payload may arrive in, each with its prefix
 -- The provider's own header (api_key_header/api_key_prefix) comes first, then
 -- Authorization: Bearer. When the provider's header is Authorization itself, its
@@ -136,22 +140,29 @@ function portunus_client:authorise(handle, auth_payload)
 end
 
 --- Makes an async log call to Portunus, logging errors instead of silently swallowing them.
+-- The project rides on our outgoing httpCall, never on the client's request headers,
+-- so Envoy's header-modification timing rule does not apply here.
 -- @param handle Request/response handle
 -- @param request_id Request ID for error context
 -- @param path URL path for the log endpoint
 -- @param content_type Content-Type header value
 -- @param body Request body (string or bytes)
-function portunus_client:_async_log(handle, request_id, path, content_type, body)
+-- @param project Caller's project, or nil when /authorise did not return one
+function portunus_client:_async_log(handle, request_id, path, content_type, body, project)
+	local headers = {
+		[":method"] = "POST",
+		[":path"] = path,
+		[":authority"] = self.host,
+		["content-type"] = content_type,
+		[self.api_key_header] = self.api_key,
+	}
+	if project and project ~= "" then
+		headers[PROJECT_HEADER] = project
+	end
 	local ok, err = pcall(function()
 		handle:httpCall(
 			self.host,
-			{
-				[":method"] = "POST",
-				[":path"] = path,
-				[":authority"] = self.host,
-				["content-type"] = content_type,
-				[self.api_key_header] = self.api_key,
-			},
+			headers,
 			body,
 			10000,
 			true -- async
@@ -166,64 +177,70 @@ end
 -- @param handle Request handle
 -- @param request_id Request ID
 -- @param body Request body (raw bytes)
-function portunus_client:log_request_body(handle, request_id, body)
-	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/body", "application/octet-stream", body)
+-- @param project Caller's project, or nil when unknown
+function portunus_client:log_request_body(handle, request_id, body, project)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/body", "application/octet-stream", body, project)
 end
 
 --- Logs request headers to Portunus
 -- @param handle Request handle
 -- @param request_id Request ID
 -- @param headers Headers table (already base64-encoded)
-function portunus_client:log_request_headers(handle, request_id, headers)
+-- @param project Caller's project, or nil when unknown
+function portunus_client:log_request_headers(handle, request_id, headers, project)
 	local payload = {
 		timestamp = os.time(),
 		headers = headers,
 	}
-	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/headers", "application/json", dkjson.encode(payload))
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/headers", "application/json", dkjson.encode(payload), project)
 end
 
 --- Logs request trailers to Portunus
 -- @param handle Request handle
 -- @param request_id Request ID
 -- @param trailers Trailers table (already base64-encoded)
-function portunus_client:log_request_trailers(handle, request_id, trailers)
+-- @param project Caller's project, or nil when unknown
+function portunus_client:log_request_trailers(handle, request_id, trailers, project)
 	local payload = {
 		timestamp = os.time(),
 		trailers = trailers,
 	}
-	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/trailers", "application/json", dkjson.encode(payload))
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/request/trailers", "application/json", dkjson.encode(payload), project)
 end
 
 --- Logs response body to Portunus
 -- @param handle Response handle
 -- @param request_id Request ID
 -- @param body Response body (raw bytes)
-function portunus_client:log_response_body(handle, request_id, body)
-	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/body", "application/octet-stream", body)
+-- @param project Caller's project, or nil when unknown
+function portunus_client:log_response_body(handle, request_id, body, project)
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/body", "application/octet-stream", body, project)
 end
 
 --- Logs response headers to Portunus
 -- @param handle Response handle
 -- @param request_id Request ID
 -- @param headers Headers table (already base64-encoded)
-function portunus_client:log_response_headers(handle, request_id, headers)
+-- @param project Caller's project, or nil when unknown
+function portunus_client:log_response_headers(handle, request_id, headers, project)
 	local payload = {
 		timestamp = os.time(),
 		headers = headers,
 	}
-	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/headers", "application/json", dkjson.encode(payload))
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/headers", "application/json", dkjson.encode(payload), project)
 end
 
 --- Logs response trailers to Portunus
 -- @param handle Response handle
 -- @param request_id Request ID
 -- @param trailers Trailers table (already base64-encoded)
-function portunus_client:log_response_trailers(handle, request_id, trailers)
+-- @param project Caller's project, or nil when unknown
+function portunus_client:log_response_trailers(handle, request_id, trailers, project)
 	local payload = {
 		timestamp = os.time(),
 		trailers = trailers,
 	}
-	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/trailers", "application/json", dkjson.encode(payload))
+	self:_async_log(handle, request_id, "/log/" .. request_id .. "/response/trailers", "application/json", dkjson.encode(payload), project)
 end
 
 --- Parses an ErrorResponse from Portunus service
@@ -262,7 +279,8 @@ end
 --   "api_key": "The real API key retrieved from Secrets Manager",
 --   "request_id": "Trace or request ID for logging correlation",
 --   "output_header": "Optional upstream header to carry the credential",
---   "output_prefix": "Optional prefix for the credential value"
+--   "output_prefix": "Optional prefix for the credential value",
+--   "project": "Optional caller project, echoed on every /log call"
 -- }
 -- dkjson decodes JSON null as nil, so absent and null optional fields are equivalent.
 -- @param body Raw response body string

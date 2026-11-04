@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from portunus.app import portunus
+from portunus.app import AuthorizationResponse, portunus
+from portunus.models import AuthResult, PrincipalInfo
 
 
 @pytest.fixture
@@ -18,7 +19,64 @@ def mock_segment():
         yield segment
 
 
+async def _post_authorise(auth_result: AuthResult) -> dict:
+    """Run /authorise with authenticate and the metadata publish stubbed out."""
+    payload = MagicMock()
+    payload.secret_arn = "arn:aws:secretsmanager:eu-west-2:123456789012:secret:s"
+    with (
+        patch("portunus.app.AuthPayload.from_contents", return_value=payload),
+        patch(
+            "portunus.app.auth_service.authenticate",
+            new=AsyncMock(return_value=auth_result),
+        ),
+        patch(
+            "portunus.app.publish_service.publish_metadata",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=portunus), base_url="http://test"
+        ) as http:
+            resp = await http.post(
+                "/authorise",
+                json={"payload": "opaque", "target_host": "api.example.com"},
+            )
+    assert resp.status_code == 200
+    return resp.json()
+
+
+class TestAuthorizationResponseModel:
+    def test_project_defaults_to_none(self):
+        """Older callers that omit project still build a valid response."""
+        assert AuthorizationResponse(api_key="k", request_id="r").project is None
+
+
 class TestAuthorise:
+    @pytest.mark.asyncio
+    async def test_returns_project_from_principal_info(self, mock_segment):
+        """The proxy learns the caller's project from the authorise response."""
+        body = await _post_authorise(
+            AuthResult(
+                api_key="sk-test",
+                principal_info=PrincipalInfo(
+                    arn="arn:aws:sts::123456789012:assumed-role/UserProfile_me_alpha/s",
+                    account_id="123456789012",
+                    project="alpha",
+                ),
+            )
+        )
+        assert body["project"] == "alpha"
+        assert body["request_id"] == "test-trace-id"
+
+    @pytest.mark.asyncio
+    async def test_unknown_project_is_null_not_a_default(self, mock_segment):
+        """No project means null in the JSON; the query layer maps null to unknown."""
+        body = await _post_authorise(
+            AuthResult(api_key="sk-test", principal_info=PrincipalInfo.empty())
+        )
+        assert "project" in body
+        assert body["project"] is None
+
     @pytest.mark.asyncio
     async def test_authenticate_timeout_returns_503(self, mock_segment):
         """A TimeoutError from authenticate maps to a 503 overloaded response."""
