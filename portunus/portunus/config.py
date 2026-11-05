@@ -167,6 +167,10 @@ class KinesisConfig(BaseModel):
         default=None,
         description="Kinesis data stream for response trailers",
     )
+    ws_summary_stream_name: Optional[str] = Field(
+        default=None,
+        description="Kinesis data stream for per-WebSocket-connection summary records",
+    )
     max_record_size: int = Field(
         # Must match get_config()'s env-loader default (1_000_000).
         default=1_000_000,
@@ -180,6 +184,10 @@ class KinesisConfig(BaseModel):
         Used to fail fast at gRPC startup: with a stream unset, the build path
         short-circuits to None and the task serves traffic while dropping 100%
         of that audit record type.
+
+        ``ws_summary_stream_name`` is excluded from the required set: its frame
+        payloads are still captured via the required request/response body
+        streams, so an unset summary loses only connection-level stats.
 
         Returns:
             Unset required ``KINESIS_*`` env-var names (empty when all set).
@@ -561,6 +569,7 @@ def get_config() -> PortunusConfig:
         response_trailers_stream_name=os.environ.get(
             "KINESIS_RESPONSE_TRAILERS_STREAM", None
         ),
+        ws_summary_stream_name=os.environ.get("KINESIS_WS_SUMMARY_STREAM", None),
         max_record_size=int(os.environ.get("KINESIS_MAX_RECORD_SIZE", "1000000")),
     )
 

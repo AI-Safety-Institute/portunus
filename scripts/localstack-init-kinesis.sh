@@ -17,6 +17,7 @@ STREAM_NAMES=(
     "response-headers"
     "response-body"
     "response-trailers"
+    "ws-summary"
 )
 
 # Create S3 bucket for logs

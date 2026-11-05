@@ -108,3 +108,61 @@ async def test_early_response_does_not_discard_remaining_request_body():
         b"".join(item.payload["body_bytes"] for item in publish.of_kind("request_body"))
         == b"late upload"
     )
+
+
+@pytest.mark.asyncio
+async def test_websocket_stays_open_after_upgrade_headers():
+    servicer, publish, queue = _make_servicer()
+    waiting, release = asyncio.Event(), asyncio.Event()
+
+    async def incoming():
+        yield headers(True, True, True)
+        yield headers(False, True, True)
+        waiting.set()
+        await release.wait()
+        yield _http_body_message(body=b"\x81\x04echo", is_request=False)
+
+    await queue.start()
+    task = asyncio.create_task(consume(servicer, incoming()))
+    try:
+        await asyncio.wait_for(waiting.wait(), 0.5)
+        assert not task.done()
+        release.set()
+        await asyncio.wait_for(task, 0.5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert await queue.stop() == 0
+    assert b"echo" in [
+        item.payload["body_bytes"] for item in publish.of_kind("response_body")
+    ]
+    assert publish.of_kind("ws_summary")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["headers", "body", "trailers"])
+async def test_rejected_upgrade_releases_after_pre_response_request_completion(ending):
+    servicer, publish, queue = _make_servicer()
+
+    async def incoming():
+        yield headers(True, end=ending == "headers", websocket=True)
+        if ending != "headers":
+            yield _http_body_message(
+                body=b"upgrade payload", is_request=True, end_of_stream=ending == "body"
+            )
+        if ending == "trailers":
+            yield pb.ProcessingRequest(request_trailers=pb.HttpTrailers())
+        response = _http_headers_message(headers={":status": "403"}, is_request=False)
+        response.response_headers.end_of_stream = True
+        yield response
+        await asyncio.Event().wait()
+
+    await queue.start()
+    try:
+        await asyncio.wait_for(consume(servicer, incoming()), 0.5)
+    finally:
+        assert await queue.stop() == 0
+    assert servicer.active_stream_count == 0
+    assert not publish.of_kind("ws_summary")
+    for kind in ("request_body", "response_body"):
+        assert publish.of_kind(kind)[-1].payload["final_chunk"]

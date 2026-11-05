@@ -143,6 +143,7 @@ services:
       KINESIS_RESPONSE_HEADERS_STREAM: portunus-stream-response-headers
       KINESIS_RESPONSE_BODY_STREAM: portunus-stream-response-body
       KINESIS_RESPONSE_TRAILERS_STREAM: portunus-stream-response-trailers
+      KINESIS_WS_SUMMARY_STREAM: portunus-stream-ws-summary
       # Header prefix; passed to portunus too so denied responses carry
       # x-{prefix}-error: true.
       PORTUNUS_HEADER_PREFIX: aisi-proxy
