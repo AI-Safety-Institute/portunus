@@ -49,6 +49,23 @@ def effective_cache_ttl(
     return max(0, min(cache_duration, token_ttl))
 
 
+def auth_cache_key(payload: str, target_host: Optional[str]) -> str:
+    """Hash payload + target_host into a Redis-safe cache key.
+
+    The one definition of the key, for Redis and any in-process tier in
+    front of it. ``target_host`` is part of the key so a cached result is
+    only reused for the upstream it was authorised for — the host
+    restriction ``SecretValidationService.validate_secret`` enforces on a
+    miss.
+
+    The value is deliberately the formula Portunus has always used: changing
+    it would invalidate every Redis entry on deploy and cost a burst of full
+    authentications. The newline join is unambiguous because HTTP header
+    values cannot contain a newline and the host is operator configuration.
+    """
+    return hashlib.sha256(f"{payload}\n{target_host or ''}".encode("utf-8")).hexdigest()
+
+
 class CacheService:
     """
     Service for caching and retrieving authentication responses.
@@ -70,10 +87,11 @@ class CacheService:
         """
         Generate a secure cache key from a payload and its target host.
 
-        Creates a SHA-256 hash over the payload and the target host to use
-        as a Redis key, so keys are of consistent length, don't contain
-        sensitive information, and a result authorised for one proxy's
-        upstream is never a hit for a proxy with a different one.
+        Creates a SHA-256 hash over the payload and the target host (see
+        :func:`auth_cache_key`) to use as a Redis key, so keys are of
+        consistent length, don't contain sensitive information, and a result
+        authorised for one proxy's upstream is never a hit for a proxy with a
+        different one.
 
         Args:
             payload: The payload to use for the cache key.
@@ -82,9 +100,7 @@ class CacheService:
         Returns:
             A hash of the payload and target host to use as a cache key.
         """
-        return hashlib.sha256(
-            f"{payload}\n{target_host or ''}".encode("utf-8")
-        ).hexdigest()
+        return auth_cache_key(payload, target_host)
 
     async def get_cached_auth_result(
         self, payload: str, target_host: Optional[str]
