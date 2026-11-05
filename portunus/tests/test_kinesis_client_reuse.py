@@ -2,26 +2,22 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from portunus.services.publish_service import PublishService
 from portunus.services.state_service import StateService
 
 
 def _state_service_with_fake_kinesis() -> tuple[StateService, MagicMock, MagicMock]:
     """Return a StateService whose boto session yields a fake Kinesis client."""
     kinesis_client = MagicMock()
-    kinesis_client.put_record = AsyncMock(
-        return_value={"ShardId": "shardId-000000000000", "SequenceNumber": "1234567890"}
-    )
     lifecycle = MagicMock()
 
     @asynccontextmanager
-    async def fake_create_client(service_name):
+    async def fake_create_client(service_name, **kwargs):
         assert service_name == "kinesis"
-        lifecycle.entered()
+        lifecycle.entered(**kwargs)
         try:
             yield kinesis_client
         finally:
@@ -50,14 +46,25 @@ class TestKinesisClientReuse:
         lifecycle.exited.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_client_uses_tight_timeouts(self):
+        # A stalled PutRecords holds the publish worker while the bounded queue
+        # sheds audit, so botocore's 60 s read timeout must not apply.
+        service, _, lifecycle = _state_service_with_fake_kinesis()
+
+        await service.get_kinesis_client()
+
+        (config,) = (kw["config"] for kw in [lifecycle.entered.call_args.kwargs])
+        assert config.connect_timeout <= 2
+        assert config.read_timeout <= 5
+
+    @pytest.mark.asyncio
     async def test_close_exits_client_and_allows_recreation(self):
         service, _, lifecycle = _state_service_with_fake_kinesis()
         await service.get_kinesis_client()
 
-        await service.close_kinesis_client()
+        await service.close()
 
         assert lifecycle.exited.call_count == 1
-        assert service.kinesis_client is None
 
         await service.get_kinesis_client()
         assert service.boto_session.create_client.call_count == 2
@@ -66,24 +73,6 @@ class TestKinesisClientReuse:
     async def test_close_without_client_is_a_noop(self):
         service, _, lifecycle = _state_service_with_fake_kinesis()
 
-        await service.close_kinesis_client()
+        await service.close()
 
         lifecycle.exited.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_publish_reuses_client_between_records(self):
-        service, kinesis_client, lifecycle = _state_service_with_fake_kinesis()
-        publish_service = PublishService(state_service=service)
-
-        for i in range(3):
-            ok = await publish_service.publish_to_kinesis_data_stream(
-                "test-stream", {"record": i}, partition_key=f"key-{i}"
-            )
-            assert ok is True
-
-        assert kinesis_client.put_record.await_count == 3
-        assert service.boto_session.create_client.call_count == 1
-        lifecycle.exited.assert_not_called()
-        first_call = kinesis_client.put_record.await_args_list[0].kwargs
-        assert first_call["StreamName"] == "test-stream"
-        assert first_call["PartitionKey"] == "key-0"

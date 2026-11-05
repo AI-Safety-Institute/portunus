@@ -11,18 +11,15 @@ import hashlib
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 import aiobotocore.session
 import redis.asyncio as aioredis
+from aiobotocore.config import AioConfig
 from redis.exceptions import ConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from portunus.config import config
-
-if TYPE_CHECKING:
-    from types_aiobotocore_kinesis import KinesisClient
 
 logger = logging.getLogger("api.access")
 
@@ -139,16 +136,18 @@ class StateService:
 
     Attributes:
         redis_client: The Redis client instance
-        kinesis_client: The shared Kinesis client, created on first use
     """
 
     def __init__(self) -> None:
         """Initialize the StateService."""
         self.redis_client: Optional[aioredis.Redis] = None
         self.boto_session = aiobotocore.session.get_session()
-        self.kinesis_client: Optional["KinesisClient"] = None
-        self._kinesis_exit_stack = AsyncExitStack()
-        self._kinesis_lock = asyncio.Lock()
+        # Kinesis client is a singleton per process: opened once via an
+        # AsyncExitStack (avoiding the ~200ms per-entry aiohttp+TLS setup)
+        # and closed in ``close()``.
+        self._aws_stack: Optional[contextlib.AsyncExitStack] = None
+        self._kinesis_client: Optional[Any] = None
+        self._aws_client_lock = asyncio.Lock()
         # Credential-keyed AWS client pool (STS / Secrets Manager): built with
         # the *caller's* temporary creds, so pooled per (service, credential
         # set) with a bounded LRU. Values are ``(ctx, client)``; ``ctx`` must
@@ -364,7 +363,16 @@ class StateService:
             logger.error(f"Redis health check failed: {e}")
             return False
 
-    async def get_kinesis_client(self) -> "KinesisClient":
+    async def _ensure_aws_stack(self) -> contextlib.AsyncExitStack:
+        """Lazily open the shared exit stack used by the AWS client singletons."""
+        if self._aws_stack is None:
+            async with self._aws_client_lock:
+                if self._aws_stack is None:
+                    self._aws_stack = contextlib.AsyncExitStack()
+                    await self._aws_stack.__aenter__()
+        return self._aws_stack
+
+    async def get_kinesis_client(self):
         """
         Get the shared Kinesis Data Streams client, creating it on first use.
 
@@ -372,38 +380,30 @@ class StateService:
         aiobotocore client builds a fresh SSL context and parses the CA bundle
         (~30-40 ms of CPU), so never create one per call.
 
+        Tight timeouts and a single SDK retry: a hung or throttled PutRecords
+        call holds the publish worker, and while it waits the bounded queue
+        fills and sheds audit. botocore's defaults (60 s read, legacy retries)
+        turned one stalled call into a minute of dropped records.
+
         Returns:
             A Kinesis Data Streams client instance
         """
-        client = self.kinesis_client
-        if client is None:
-            async with self._kinesis_lock:
-                client = self.kinesis_client
-                if client is None:
-                    client = await self._kinesis_exit_stack.enter_async_context(
-                        self.boto_session.create_client("kinesis")
+        if self._kinesis_client is None:
+            stack = await self._ensure_aws_stack()
+            async with self._aws_client_lock:
+                if self._kinesis_client is None:
+                    self._kinesis_client = await stack.enter_async_context(
+                        self.boto_session.create_client(
+                            "kinesis",
+                            config=AioConfig(
+                                user_agent="portunus-audit",
+                                connect_timeout=2,
+                                read_timeout=5,
+                                retries={"mode": "standard", "max_attempts": 2},
+                            ),
+                        )
                     )
-                    self.kinesis_client = client
-        return client
-
-    async def close_kinesis_client(self) -> None:
-        """
-        Close the shared Kinesis client.
-
-        This method should be called during application shutdown to release
-        the client's HTTP connection pool.
-        """
-        async with self._kinesis_lock:
-            if self.kinesis_client is None:
-                return
-            try:
-                await self._kinesis_exit_stack.aclose()
-                logger.info("Kinesis client closed")
-            except Exception as e:
-                logger.error(f"Error closing Kinesis client: {e}")
-            finally:
-                self.kinesis_client = None
-                self._kinesis_exit_stack = AsyncExitStack()
+        return self._kinesis_client
 
     async def close(self) -> None:
         """Tear down cached AWS clients. Called on graceful shutdown."""
@@ -424,4 +424,7 @@ class StateService:
             for _, retirement in retiring:
                 await retirement.close()
 
-        await self.close_kinesis_client()
+        if self._aws_stack is not None:
+            await self._aws_stack.__aexit__(None, None, None)
+            self._aws_stack = None
+            self._kinesis_client = None
