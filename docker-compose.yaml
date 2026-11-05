@@ -46,22 +46,6 @@ services:
       - "./scripts/localstack-init-kinesis.sh:/etc/localstack/init/ready.d/01-init-kinesis.sh"
       - "./scripts/localstack-init-async-analysis.sh:/etc/localstack/init/ready.d/02-init-async-analysis.sh"
 
-  xray-daemon:
-    image: amazon/aws-xray-daemon
-    container_name: xray-daemon
-    init: true
-    networks:
-      app_network:
-        ipv4_address: 172.20.0.10  # Fixed IP address for X-Ray daemon
-    ports:
-      - "2000:2000/udp"
-    environment:
-      AWS_REGION: 'eu-west-2'
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
-    command: -o
-
   proxy:
     build: proxy/
     init: true
@@ -84,14 +68,11 @@ services:
       TARGET_PORT: 80
       WS_TARGET_HOST: ws-echo  # Override for local WS testing (defaults to TARGET_HOST in prod)
       ENVOY_LOG_LEVEL: info
-      AWS_XRAY_DAEMON_ADDRESS: 172.20.0.10 # note that DNS resolution does not work here
       # Uncomment the three env vars below to
       # enable rate-limiting
       # RATE_LIMIT_PERCENT_ENABLED: 100
       # RATE_LIMIT_INTERVAL_SECONDS: 2
       # RATE_LIMIT_REQUESTS_PER_INTERVAL: 1
-    depends_on:
-      - xray-daemon
 
   redis:
     image: redis:alpine
@@ -108,14 +89,12 @@ services:
     depends_on:
       - proxy
       - redis
-      - xray-daemon
     build: portunus/
     container_name: portunus
     init: true
     networks:
       app_network:
-    # x-ray console can automatically display relevant cloudwatch logs by querying
-    # the group for a matching trace id. If you want to log docker to cloudwatch,
+    # If you want to log docker to cloudwatch,
     # you must put credentials in /root/.aws/credentials default profile
     # in order to override aninstance profile.
     # It is not enough to paste them in as env vars.
@@ -138,9 +117,6 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: redis_secure_password
       CACHE_DURATION: 172800
-      AWS_XRAY_SDK_ENABLED: true
-      AWS_XRAY_DAEMON_ADDRESS: "172.20.0.10:2000"
-      AWS_XRAY_LOG_GROUP: /aws/portunus
       # Localstack endpoint. Unset to make real AWS requests
       AWS_ENDPOINT_URL: http://localstack:4566
       REDIS_USE_TLS: "false"

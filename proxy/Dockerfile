@@ -45,7 +45,6 @@ COPY --from=builder /usr/bin/yq /usr/bin/yq
 # Copy the Envoy configuration files
 COPY envoy.yaml /envoy/envoy.yaml
 COPY lua.lua /envoy/lua.lua
-COPY xray.json /envoy/xray.json
 
 RUN chown -R envoy:envoy /envoy
 ENV ENVOY_LOG_LEVEL=info

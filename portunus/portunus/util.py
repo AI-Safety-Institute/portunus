@@ -5,12 +5,8 @@ This module contains utility functions that are used throughout the Portunus,
 particularly for AWS interactions like getting temporary credentials.
 """
 
-import asyncio
 import datetime
 import logging
-import time
-
-import boto3
 
 # Import function for implementation
 # Re-export these functions for backwards compatibility
@@ -22,7 +18,6 @@ from portunus.services.arn_service import (
 from portunus.services.payload_service import (
     decode_payload,
 )
-from portunus.services.xray_service import capture_async
 
 logger = logging.getLogger("api.access")
 
@@ -32,71 +27,10 @@ __all__ = [
     "get_role_arn",
     "parse_identity_from_arn",
     "decode_payload",
-    "get_current_session_arn",
     "generate_iso_timestamp",
     "unix_timestamp_to_iso",
     "chunk_body_data",
 ]
-
-
-def get_current_session_arn() -> str:
-    """Get the ARN of the current session.
-
-    Returns:
-        str: The ARN of the current session.
-    """
-    sts_client = boto3.client("sts")
-    response = sts_client.get_caller_identity()
-    return response["Arn"]
-
-
-@capture_async()
-async def wait_until(
-    condition_func, timeout=3.0, interval=0.05, error_message=None
-) -> None:
-    """
-    Wait until a condition function returns True or timeout is reached.
-
-    Args:
-        condition_func: A callable async function that returns a boolean.
-        timeout: Maximum time to wait in seconds (default: 3.0).
-        interval: Time between checks in seconds (default: 0.05).
-        error_message: Optional message to include in the exception if timeout
-                        reached.
-
-    Returns:
-        None when condition is met, raises an exception if timeout or cancelled.
-
-    Raises:
-        TimeoutError: If the condition is not met within the timeout period.
-    """
-    try:
-        start_time = time.time()
-        while True:
-            try:
-                if await condition_func():
-                    return None
-            except Exception as e:
-                logger.warning(f"Error checking condition: {e}")
-
-            # Check for timeout
-            if time.time() - start_time > timeout:
-                msg = "Condition not met within timeout period"
-                if error_message:
-                    msg = f"{error_message} - {msg}"
-                logger.warning(msg)
-                raise TimeoutError(msg)
-
-            try:
-                await asyncio.sleep(interval)
-            except asyncio.CancelledError as e:
-                logger.warning(
-                    f"wait_until cancelled while waiting for {error_message}"
-                )
-                raise e
-    except Exception as e:
-        logger.error(f"Unexpected error in wait_until: {e}")
-        raise e
 
 
 def generate_iso_timestamp() -> str:

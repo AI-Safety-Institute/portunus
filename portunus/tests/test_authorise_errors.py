@@ -2,7 +2,7 @@
 
 import base64
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -29,26 +29,19 @@ AUTHORISE_BODY = {
 }
 
 
-@pytest.fixture
-def mock_xray():
-    segment = MagicMock()
-    segment.trace_id = "test-trace-id"
-    with patch("portunus.app.xray_service") as xray:
-        xray.recorder.current_segment.return_value = segment
-        yield xray
-
-
 @pytest_asyncio.fixture
 async def client():
     async with AsyncClient(
-        transport=ASGITransport(app=portunus), base_url="http://test"
+        transport=ASGITransport(app=portunus),
+        base_url="http://test",
+        headers={"x-amzn-trace-id": "Root=test-trace-id"},
     ) as http_client:
         yield http_client
 
 
 class TestAuthoriseErrorMapping:
     @pytest.mark.asyncio
-    async def test_upstream_service_error_is_a_503(self, client, mock_xray):
+    async def test_upstream_service_error_is_a_503(self, client):
         with patch("portunus.app.auth_service") as auth_service:
             auth_service.authenticate = AsyncMock(
                 side_effect=UpstreamServiceError("STS is unavailable")
@@ -63,7 +56,7 @@ class TestAuthoriseErrorMapping:
         }
 
     @pytest.mark.asyncio
-    async def test_configuration_error_is_a_500(self, client, mock_xray):
+    async def test_configuration_error_is_a_500(self, client):
         with patch("portunus.app.auth_service") as auth_service:
             auth_service.authenticate = AsyncMock(
                 side_effect=ConfigurationError("AWS region is required")

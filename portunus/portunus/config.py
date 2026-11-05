@@ -118,32 +118,8 @@ class KinesisConfig(BaseModel):
 
 
 class AwsConfig(BaseModel):
-    """AWS-related configuration settings.
+    """AWS-related configuration settings."""
 
-    Attributes:
-        xray_daemon_address: AWS X-Ray daemon address
-        xray_log_group: AWS X-Ray log group
-        xray_extra_log_groups: Additional AWS X-Ray log groups,
-                               comma separated (optional)
-        xray_enabled: Whether AWS X-Ray tracing is enabled
-    """
-
-    xray_daemon_address: str = Field(
-        default="127.0.0.1:2000",
-        description="AWS X-Ray daemon address",
-    )
-    xray_log_group: str = Field(
-        default="/aws/xray/portunus",
-        description="AWS X-Ray log group",
-    )
-    xray_extra_log_groups: Optional[str] = Field(
-        default=None,
-        description="Additional AWS X-Ray log group, comma separated (optional)",
-    )
-    xray_enabled: bool = Field(
-        default=True,
-        description="Whether AWS X-Ray tracing is enabled",
-    )
     endpoint_url: str | None = Field(
         default=None,
         description="Intended for overriding client urls for testing with LocalStack",
@@ -317,10 +293,6 @@ def get_config() -> PortunusConfig:
     )
 
     aws = AwsConfig(
-        xray_daemon_address=os.environ.get("AWS_XRAY_DAEMON_ADDRESS", "127.0.0.1:2000"),
-        xray_log_group=os.environ.get("AWS_XRAY_LOG_GROUP", "/aws/xray/portunus"),
-        xray_extra_log_groups=os.environ.get("AWS_XRAY_EXTRA_LOG_GROUPS", None),
-        xray_enabled=os.environ.get("AWS_XRAY_SDK_ENABLED", "true").lower() != "false",
         endpoint_url=os.environ.get("AWS_ENDPOINT_URL", None),
     )
 

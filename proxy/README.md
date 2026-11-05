@@ -10,7 +10,6 @@ proxy/
 ├── lua.lua              # Main Lua filter script
 ├── entrypoint.sh        # Startup script (sets defaults, runs envsubst)
 ├── Dockerfile           # Proxy container image
-├── xray.json            # AWS X-Ray tracing config
 └── lib/                 # Lua library and tests
     ├── proxy_utils/     # Reusable Lua modules
     │   ├── init.lua

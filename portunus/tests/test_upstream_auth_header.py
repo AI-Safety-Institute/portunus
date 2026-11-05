@@ -180,15 +180,6 @@ class TestAuthenticateCacheHit:
         assert result is cached
 
 
-@pytest.fixture
-def mock_xray():
-    mock_segment = AsyncMock()
-    mock_segment.trace_id = "test-trace-id"
-    with patch("portunus.app.xray_service") as mock:
-        mock.recorder.current_segment.return_value = mock_segment
-        yield mock
-
-
 @pytest_asyncio.fixture
 async def client():
     async with AsyncClient(
@@ -199,7 +190,7 @@ async def client():
 
 class TestAuthoriseEndpoint:
     @pytest.mark.asyncio
-    async def test_static_key_omits_output_fields(self, client, mock_xray):
+    async def test_static_key_omits_output_fields(self, client):
         """Existing static-key results produce null output fields."""
         with (
             patch("portunus.app.auth_service") as auth_service,
@@ -217,7 +208,7 @@ class TestAuthoriseEndpoint:
         assert body["output_prefix"] is None
 
     @pytest.mark.asyncio
-    async def test_output_fields_pass_through(self, client, mock_xray):
+    async def test_output_fields_pass_through(self, client):
         """output_header/output_prefix on the auth result reach the response."""
         auth_result = _auth_result(output_header="x-goog-api-key", output_prefix="")
         with (
@@ -235,7 +226,7 @@ class TestAuthoriseEndpoint:
         assert body["output_prefix"] == ""
 
     @pytest.mark.asyncio
-    async def test_legacy_signable_request_is_ignored(self, client, mock_xray):
+    async def test_legacy_signable_request_is_ignored(self, client):
         """Proxies from before signing was removed still send signable_request."""
         body = {
             **AUTHORISE_BODY,
