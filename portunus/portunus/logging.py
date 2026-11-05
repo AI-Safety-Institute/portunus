@@ -11,7 +11,7 @@ import logging
 import sys
 import time
 import uuid
-from contextvars import ContextVar, Token
+from contextvars import Token
 from typing import Optional, Tuple
 
 from fastapi import Request
@@ -19,15 +19,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from portunus.config import config
+from portunus.request_context import request_id_var, trace_id_var
 
 logger = logging.getLogger("api.access")
-
-# The correlation id of the request being served, set by ``LoggingMiddleware``:
-# the ``Root=`` id of the inbound ``X-Amzn-Trace-Id`` header when there is one,
-# otherwise a fresh uuid4. ``/authorise`` returns it as the ``request_id`` that
-# ties every audit record for the proxied request together, so it must be
-# unique per request.
-trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
 
 
 def parse_trace_header(
@@ -107,8 +101,14 @@ class StructuredLogFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        # Add trace ID from context if available
-        trace_id = get_trace_id()
+        # Correlation ids, omitted (not placeholder-filled) when unset so
+        # their absence is queryable. request_id joins log lines to the
+        # audit records for the same request; trace_id joins them
+        # to whatever upstream set x-amzn-trace-id (ALB / Envoy).
+        request_id = request_id_var.get()
+        if request_id and "request_id" not in record.__dict__:
+            log_data["request_id"] = request_id
+        trace_id = trace_id_var.get()
         if trace_id:
             log_data["trace_id"] = trace_id
 

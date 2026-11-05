@@ -209,6 +209,18 @@ class RelayConfig(BaseModel):
     )
 
 
+class GrpcConfig(BaseModel):
+    """gRPC server config for Envoy ext_authz / ext_proc filters."""
+
+    proxy_api_key: str = Field(
+        default="",
+        description=(
+            "Pre-shared key the proxy presents as `x-portunus-proxy-key` "
+            "gRPC metadata. Empty disables validation (tests only)."
+        ),
+    )
+
+
 class FederationConfig(BaseModel):
     """Settings for minting short-lived upstream tokens via federation roles.
 
@@ -278,6 +290,10 @@ class PortunusConfig(BaseModel):
         default_factory=RelayConfig,
         description="WebSocket relay configuration",
     )
+    grpc: GrpcConfig = Field(
+        default_factory=GrpcConfig,
+        description="gRPC server configuration",
+    )
     auth_cache: AuthCacheConfig = Field(
         default_factory=AuthCacheConfig,
         description="In-process auth cache and full-auth fallback limits",
@@ -297,6 +313,13 @@ class PortunusConfig(BaseModel):
     api_key_prefix: str = Field(
         default="Bearer ",
         description="Prefix to use for the API key",
+    )
+    proxy_header_prefix: str = Field(
+        default="portunus",
+        description=(
+            "Prefix for proxy-emitted response headers (e.g. ``x-{prefix}-error``). "
+            "Must match the proxy container's PORTUNUS_HEADER_PREFIX."
+        ),
     )
 
     @field_validator("log_level")
@@ -379,6 +402,10 @@ def get_config() -> PortunusConfig:
         drain_timeout=int(os.environ.get("WS_DRAIN_TIMEOUT", "10")),
     )
 
+    grpc = GrpcConfig(
+        proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
+    )
+
     auth_cache = AuthCacheConfig(
         local_ttl_seconds=float(os.environ.get("AUTH_LOCAL_CACHE_TTL_SECONDS", "30")),
         local_max_entries=int(os.environ.get("AUTH_LOCAL_CACHE_MAX_ENTRIES", "10000")),
@@ -404,10 +431,12 @@ def get_config() -> PortunusConfig:
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         api_key_header=os.environ.get("API_KEY_HEADER", "authorization"),
         api_key_prefix=os.environ.get("API_KEY_PREFIX", "Bearer "),
+        proxy_header_prefix=os.environ.get("PORTUNUS_HEADER_PREFIX", "portunus"),
         redis=redis,
         aws=aws,
         kinesis=kinesis,
         relay=relay,
+        grpc=grpc,
         auth_cache=auth_cache,
         federation=federation,
     )

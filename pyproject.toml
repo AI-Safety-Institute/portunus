@@ -18,6 +18,8 @@ dev = [
     "types-requests>=2.33.0.20260712,<3",
     "types-pyyaml>=6.0.12.20260724,<7",
     "types-aiobotocore[kinesis]>=3.9.0,<4",
+    "types-grpcio>=1.0.0",
+    "types-protobuf>=4.24.0",
     "pre-commit>=4.6.1,<5",
     "pytest>=8.4.1,<10",
     "pytest-asyncio>=1.1.0,<2",
@@ -60,9 +62,15 @@ exclude = [
     "^\\.venv/.*",
 ]
 
+# Generated protobuf modules and grpcio's untyped sub-packages don't ship
+# stubs; their import-not-found / import-untyped errors are environmental,
+# not type errors we can fix in source.
 [[tool.mypy.overrides]]
-# Brotli ships no type stubs.
-module = ["brotli"]
+module = [
+    "envoy.*",
+    "google.rpc.*",
+    "brotli",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
