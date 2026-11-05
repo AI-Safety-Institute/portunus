@@ -212,11 +212,50 @@ class RelayConfig(BaseModel):
 class GrpcConfig(BaseModel):
     """gRPC server config for Envoy ext_authz / ext_proc filters."""
 
+    enabled: bool = Field(
+        default=False,
+        description="Whether to start the gRPC server",
+    )
+    host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Interface the gRPC server binds to. Defaults to loopback for "
+            "the sidecar topology where Envoy reaches Portunus on localhost. "
+            "Set to ``0.0.0.0`` for docker-compose where Envoy and Portunus "
+            "are separate containers reaching each other over a bridge "
+            "network. (In our docker-compose the portunus container shares "
+            "the proxy container's network namespace, so loopback works "
+            "there too — this knob exists for non-shared-netns topologies.)"
+        ),
+    )
+    port: int = Field(
+        default=9000,
+        description="TCP port the gRPC server binds to",
+        ge=1,
+        le=65535,
+    )
+    max_concurrent_streams: int = Field(
+        default=1000,
+        description="Per-connection HTTP/2 stream limit",
+        ge=1,
+    )
+    graceful_shutdown_seconds: int = Field(
+        default=30,
+        description="Grace period for in-flight RPCs on SIGTERM",
+        ge=0,
+    )
     proxy_api_key: str = Field(
         default="",
         description=(
             "Pre-shared key the proxy presents as `x-portunus-proxy-key` "
             "gRPC metadata. Empty disables validation (tests only)."
+        ),
+    )
+    proxy_api_key_optional: bool = Field(
+        default=False,
+        description=(
+            "Explicit opt-in to allow empty ``proxy_api_key``. Production "
+            "must leave this False so a missing key fails closed."
         ),
     )
 
@@ -403,7 +442,19 @@ def get_config() -> PortunusConfig:
     )
 
     grpc = GrpcConfig(
+        enabled=os.environ.get("GRPC_ENABLED", "false").lower() == "true",
+        host=os.environ.get("GRPC_HOST", "127.0.0.1"),
+        port=int(os.environ.get("GRPC_PORT", "9000")),
+        max_concurrent_streams=int(
+            os.environ.get("GRPC_MAX_CONCURRENT_STREAMS", "1000")
+        ),
+        graceful_shutdown_seconds=int(
+            os.environ.get("GRPC_GRACEFUL_SHUTDOWN_SECONDS", "30")
+        ),
         proxy_api_key=os.environ.get("GRPC_PROXY_API_KEY", ""),
+        proxy_api_key_optional=(
+            os.environ.get("GRPC_PROXY_API_KEY_OPTIONAL", "false").lower() == "true"
+        ),
     )
 
     auth_cache = AuthCacheConfig(
