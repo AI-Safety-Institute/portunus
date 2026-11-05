@@ -31,6 +31,7 @@ from portunus.services.cache_service import (
     CacheService,
 )
 from portunus.services.federation_service import MintedToken
+from portunus.services.secret_validation_service import SecretValidationService
 from portunus.services.state_service import StateService
 
 
@@ -594,6 +595,214 @@ class TestAuthenticateWithMintSecrets:
         assert exc_info.value is error
 
 
+class TestLocalAuthCache:
+    """The in-process L1 tier in front of Redis."""
+
+    @staticmethod
+    def _service(clock):
+        from portunus.services.local_auth_cache import LocalAuthCache
+
+        secrets_service = MagicMock()
+        secrets_service.boto_session = MagicMock()
+        secrets_service.fetch_secret = AsyncMock(return_value="sk-live")
+        cache_service = MagicMock()
+        cache_service.get_cached_auth_result = AsyncMock(return_value=None)
+        cache_service.cache_auth_result = AsyncMock(return_value=True)
+        cache_service.cache_duration = 86400
+        service = AuthService(
+            secrets_service=secrets_service,
+            cache_service=cache_service,
+            local_cache=LocalAuthCache(ttl_seconds=30, max_entries=100, clock=clock),
+        )
+        install_sts_client(service)
+        return service
+
+    @pytest.fixture
+    def clock(self):
+        class Clock:
+            now = 1000.0
+
+            def __call__(self):
+                return self.now
+
+        return Clock()
+
+    @pytest.mark.asyncio
+    async def test_second_request_served_from_memory(self, clock, payload):
+        service = self._service(clock)
+        first = await service.authenticate(payload, "r1", "api.openai.com")
+        second = await service.authenticate(payload, "r2", "api.openai.com")
+        assert first == second
+        assert service.cache_service.get_cached_auth_result.await_count == 1
+        assert service.secrets_service.fetch_secret.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_redis_hit_populates_memory(self, clock, payload):
+        service = self._service(clock)
+        cached = AuthResult(api_key="sk-cached", principal_info=PrincipalInfo())
+        service.cache_service.get_cached_auth_result.return_value = cached
+        await service.authenticate(payload, "r1", "api.openai.com")
+        result = await service.authenticate(payload, "r2", "api.openai.com")
+        assert result.api_key == "sk-cached"
+        assert service.cache_service.get_cached_auth_result.await_count == 1
+        service.secrets_service.fetch_secret.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_target_host_is_part_of_memory_key(self, clock, payload):
+        service = self._service(clock)
+        await service.authenticate(payload, "r1", "api.openai.com")
+        await service.authenticate(payload, "r2", "api.anthropic.com")
+        assert service.cache_service.get_cached_auth_result.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_refreshes_from_redis_after_ttl(self, clock, payload):
+        service = self._service(clock)
+        await service.authenticate(payload, "r1", "h")
+        clock.now += 31
+        await service.authenticate(payload, "r2", "h")
+        assert service.cache_service.get_cached_auth_result.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_redis_timeout_after_ttl_rejects_instead_of_serving_memory(
+        self, clock, payload
+    ):
+        service = self._service(clock)
+        await service.authenticate(payload, "r1", "h")
+        clock.now += 31
+        service.cache_service.get_cached_auth_result.side_effect = (
+            redis.exceptions.TimeoutError()
+        )
+        with pytest.raises(TimeoutError):
+            await service.authenticate(payload, "r2", "h")
+        assert service.secrets_service.fetch_secret.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_redis_error_after_ttl_runs_full_auth_under_the_cap(
+        self, clock, payload
+    ):
+        import asyncio
+
+        from portunus.exceptions import AuthOverloadedError
+
+        service = self._service(clock)
+        await service.authenticate(payload, "r1", "h")
+        clock.now += 31
+        service.cache_service.get_cached_auth_result.side_effect = (
+            redis.exceptions.ConnectionError()
+        )
+        # A free slot: full authentication runs again (STS + Secrets Manager).
+        await service.authenticate(payload, "r2", "h")
+        assert service.secrets_service.fetch_secret.await_count == 2
+
+        # No free slot: the same path is shed instead, proving it goes
+        # through the cap rather than around it.
+        clock.now += 31
+        service._fallback_slots = asyncio.Semaphore(0)
+        service._fallback_acquire_timeout_s = 0.01
+        with pytest.raises(AuthOverloadedError):
+            await service.authenticate(payload, "r3", "h")
+        assert service.secrets_service.fetch_secret.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_redis_timeout_on_a_cold_key_rejects(self, clock, payload):
+        service = self._service(clock)
+        service.cache_service.get_cached_auth_result.side_effect = (
+            redis.exceptions.TimeoutError()
+        )
+        with pytest.raises(TimeoutError):
+            await service.authenticate(payload, "r1", "h")
+        service.secrets_service.fetch_secret.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cold_requests_share_one_redis_read(self, clock, payload):
+        import asyncio
+
+        service = self._service(clock)
+        release = asyncio.Event()
+
+        async def slow_get(*_args):
+            await release.wait()
+            return None
+
+        service.cache_service.get_cached_auth_result.side_effect = slow_get
+        tasks = [
+            asyncio.create_task(service.authenticate(payload, f"r{i}", "h"))
+            for i in range(20)
+        ]
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.gather(*tasks)
+        assert len({r.api_key for r in results}) == 1
+        assert service.cache_service.get_cached_auth_result.await_count == 1
+        assert service.secrets_service.fetch_secret.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failures_not_cached(self, clock, payload):
+        service = self._service(clock)
+        service.secrets_service.fetch_secret.side_effect = CredentialsError("nope")
+        for _ in range(2):
+            with pytest.raises(CredentialsError):
+                await service.authenticate(payload, "r", "h")
+        assert service.secrets_service.fetch_secret.await_count == 2
+
+
+class TestBoundedFallback:
+    """Full authentication (STS + Secrets Manager) runs under a cap."""
+
+    @pytest.mark.asyncio
+    async def test_sheds_when_fallback_slots_exhausted(
+        self, auth_service, valid_credentials, monkeypatch
+    ):
+        import asyncio
+
+        from portunus.exceptions import AuthOverloadedError
+
+        auth_service._fallback_slots = asyncio.Semaphore(1)
+        auth_service._fallback_acquire_timeout_s = 0.05
+        auth_service.validation_service = SecretValidationService()
+        install_sts_client(auth_service)
+        release = asyncio.Event()
+
+        async def slow_fetch(_payload):
+            await release.wait()
+            return "sk-live"
+
+        auth_service.secrets_service.fetch_secret = AsyncMock(side_effect=slow_fetch)
+
+        def make_payload(raw):
+            return AuthPayload(
+                raw=raw,
+                credentials=valid_credentials,
+                secret_arn="arn:aws:secretsmanager:eu-west-2:1:secret:x",
+            )
+
+        first = asyncio.create_task(
+            auth_service.authenticate(make_payload("a"), "r1", "h")
+        )
+        await asyncio.sleep(0.01)
+        with pytest.raises(AuthOverloadedError):
+            await auth_service.authenticate(make_payload("b"), "r2", "h")
+        release.set()
+        assert (await first).api_key == "sk-live"
+        # Slot released: the next distinct key authenticates normally.
+        result = await auth_service.authenticate(make_payload("c"), "r3", "h")
+        assert result.api_key == "sk-live"
+
+    @pytest.mark.asyncio
+    async def test_slot_released_on_failure(self, auth_service, payload):
+        import asyncio
+
+        auth_service._fallback_slots = asyncio.Semaphore(1)
+        auth_service.secrets_service.fetch_secret = AsyncMock(
+            side_effect=CredentialsError("nope")
+        )
+        install_sts_client(auth_service)
+        for _ in range(3):
+            with pytest.raises(CredentialsError):
+                await auth_service.authenticate(payload, "r", "h")
+        assert not auth_service._fallback_slots.locked()
+
+
 class TestCacheLifetimeBounds:
     """No cache tier outlives the cache duration, credentials or minted token."""
 
@@ -635,3 +844,23 @@ class TestCacheLifetimeBounds:
 
         (key,) = await fake_redis.keys("*")
         assert 0 < await fake_redis.ttl(key) <= cache.cache_duration
+
+    @pytest.mark.asyncio
+    async def test_minted_token_bounds_the_in_process_entry_too(self, fake_redis):
+        cache = _cache_backed_by(fake_redis)
+        token_ttl = timedelta(minutes=10)
+        mint = AsyncMock(
+            return_value=MintedToken(
+                token="sk-ant-oat01-example",
+                expires_at=datetime.now(timezone.utc) + token_ttl,
+            )
+        )
+        service = _service_for(WIF_SECRET, cache, mint)
+        put = MagicMock(wraps=service.local_cache.put)
+        service.local_cache.put = put  # type: ignore[method-assign]
+
+        await service.authenticate(_payload(), "req", "api.example.com")
+
+        (_key, _result, l1_ttl), _ = put.call_args
+        limit = token_ttl.total_seconds() - TOKEN_EXPIRY_SAFETY_MARGIN_SECONDS
+        assert 0 < l1_ttl <= limit

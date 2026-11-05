@@ -170,6 +170,7 @@ class TestAuthenticateCacheHit:
         cached = _auth_result(output_header="x-goog-api-key", output_prefix="")
         cache_service = MagicMock()
         cache_service.get_cached_auth_result = AsyncMock(return_value=cached)
+        cache_service.cache_duration = 86400
         service = AuthService(
             secrets_service=MagicMock(boto_session=MagicMock()),
             cache_service=cache_service,
