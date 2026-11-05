@@ -7,11 +7,13 @@ import json
 import logging
 import struct
 import zlib
+from typing import Any
 
 import brotli
 import pytest
 
 from portunus.models import (
+    JoinedLogRecord,
     _decompress_b64_body,
 )
 
@@ -382,3 +384,108 @@ def test_eventstream_dropping_whole_trailing_frame_is_not_truncation():
     )
     assert not failed
     assert decoded == f"data: {json.dumps(_TEXT_DELTA, separators=(',', ':'))}\n"
+
+
+# --- JoinedLogRecord callers must thread content_type into the decoder ---
+#
+# Regression guard: a caller that omits content_type sends Bedrock eventstream
+# bodies down the plain .decode("utf-8") path, failing all Bedrock streaming
+# traffic. These exercise the real caller methods end-to-end.
+
+
+def _make_joined_record(**overrides: Any) -> JoinedLogRecord:
+    fields: dict[str, Any] = dict(
+        request_id="req-1",
+        timestamp="2026-07-09T00:00:00Z",
+        metadata_published_at="2026-07-09T00:00:00Z",
+        metadata_account_id="123456789012",
+        metadata_principal="principal",
+        metadata_principal_arn="arn:aws:iam::123456789012:role/r",
+        metadata_project="proj",
+        metadata_session_name="sess",
+        metadata_secret_arn="arn:aws:secretsmanager:eu-west-2:123456789012:secret:s",
+        request_headers_raw_headers={},
+        request_headers_timestamp="2026-07-09T00:00:00Z",
+        request_headers_content_type=None,
+        request_headers_method="POST",
+        request_headers_path="/v1/messages",
+        request_headers_authority="example.com",
+        request_headers_user_agent="ua",
+        request_headers_content_encoding=None,
+        request_body_body=_b64(b"{}"),
+        request_body_body_size=2,
+        request_body_num_chunks=0,
+        request_body_truncated=False,
+        request_body_timestamp="2026-07-09T00:00:00Z",
+        response_headers_raw_headers={},
+        response_headers_timestamp="2026-07-09T00:00:00Z",
+        response_headers_server="server",
+        response_headers_status="200",
+        response_headers_content_length=None,
+        response_headers_content_type=None,
+        response_headers_content_encoding=None,
+        response_body_body=_b64(b"{}"),
+        response_body_body_size=2,
+        response_body_num_chunks=0,
+        response_body_truncated=False,
+        response_body_timestamp="2026-07-09T00:00:00Z",
+    )
+    fields.update(overrides)
+    return JoinedLogRecord(**fields)
+
+
+def test_decompress_response_body_threads_content_type_for_eventstream():
+    """A real Bedrock-shaped frame decodes with its usage intact via the caller."""
+    es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
+    record = _make_joined_record(
+        response_body_body=_b64(es_bytes),
+        response_body_body_size=len(es_bytes),
+        response_headers_content_type="application/vnd.amazon.eventstream",
+    )
+
+    assert record.decompress_response_body() is True
+    assert record.response_body_decode_failure is False
+    assert record.response_body_decoded is not None
+    assert '"output_tokens":1234' in record.response_body_decoded
+
+
+def test_decompress_response_body_truncated_eventstream_marks_failure():
+    """A truncated trailing frame surfaces as decode_failure via the caller."""
+    es_bytes = _bedrock_event(_TEXT_DELTA) + _bedrock_event(_MESSAGE_DELTA)
+    truncated = es_bytes[:-7]
+    record = _make_joined_record(
+        response_body_body=_b64(truncated),
+        response_body_body_size=len(truncated),
+        response_headers_content_type="application/vnd.amazon.eventstream",
+    )
+
+    assert record.decompress_response_body() is False
+    assert record.response_body_decode_failure is True
+    assert record.response_body_decoded is None
+
+
+def test_decompress_request_body_threads_content_type_for_eventstream():
+    """The request-side caller passes content_type too (symmetric threading)."""
+    es_bytes = _bedrock_event({"type": "message_start"})
+    record = _make_joined_record(
+        request_body_body=_b64(es_bytes),
+        request_body_body_size=len(es_bytes),
+        request_headers_content_type="application/vnd.amazon.eventstream",
+    )
+
+    assert record.decompress_request_body() is True
+    assert record.request_body_decode_failure is False
+    assert record.request_body_decoded == 'data: {"type":"message_start"}\n'
+
+
+def test_decompress_response_body_gzip_still_works_via_caller():
+    """content_encoding path through the caller is unchanged by the threading."""
+    body = '{"usage": {"output_tokens": 5}}'
+    record = _make_joined_record(
+        response_body_body=_b64(gzip.compress(body.encode())),
+        response_headers_content_encoding="gzip",
+        response_headers_content_type="application/json",
+    )
+
+    assert record.decompress_response_body() is True
+    assert record.response_body_decoded == body
