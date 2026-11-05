@@ -32,6 +32,8 @@ import math
 from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional
 
+from portunus.metrics import DELIVERY_FAILED_RECORDS, DROPPED_RECORDS, metrics
+
 logger = logging.getLogger("api.access")
 
 # Ships one stream's built records; returns the count Kinesis did NOT accept.
@@ -348,12 +350,16 @@ class BoundedPublishQueue:
         self._queued_bytes += task.size_bytes
         return True
 
+    def _count_drop(self) -> None:
+        self._dropped_total += 1
+        metrics.incr(DROPPED_RECORDS)
+
     def _reject_submission(self, *, cancelled: bool = False) -> None:
         self._submitted_total += 1
         if cancelled:
             self._cancelled_total += 1
         else:
-            self._dropped_total += 1
+            self._count_drop()
 
     def submit_droppable(self, task: PublishTask) -> bool:
         """Submit with drop-on-full semantics — for body records.
@@ -365,18 +371,18 @@ class BoundedPublishQueue:
         """
         self._submitted_total += 1
         if self._closed or self._queue.qsize() >= self._body_capacity:
-            self._dropped_total += 1
+            self._count_drop()
             return False
         if (
             self._max_bytes is not None
             and self._queued_bytes + task.size_bytes > self._max_bytes
         ):
-            self._dropped_total += 1
+            self._count_drop()
             return False
         try:
             self._queue.put_nowait(task)
         except asyncio.QueueFull:
-            self._dropped_total += 1
+            self._count_drop()
             return False
         self._queued_bytes += task.size_bytes
         return True
@@ -481,6 +487,8 @@ class BoundedPublishQueue:
                     failed = len(records)
                 self._published_total += len(records) - failed
                 self._delivery_failed_total += failed
+                if failed:
+                    metrics.incr(DELIVERY_FAILED_RECORDS, failed)
                 unconfirmed -= len(records)
         except asyncio.CancelledError:
             # Cancelled mid-flight: count whatever the sender never confirmed

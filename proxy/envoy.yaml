@@ -22,8 +22,9 @@ static_resources:
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
           # No `tracing` provider: request correlation rides on
-          # x-request-id (below) and the JSON access log. There is no span
-          # exporter to configure.
+          # x-request-id (below) and the JSON access log, and aggregate
+          # timing comes from CloudWatch EMF metrics that Portunus emits on
+          # stdout. There is no span exporter to configure.
           generate_request_id: true
           # Decide whether a request comes from the edge by the connection
           # peer, not by client-supplied headers. Envoy only regenerates

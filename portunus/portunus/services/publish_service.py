@@ -18,6 +18,7 @@ import orjson
 
 from portunus.config import config
 from portunus.exceptions import ServiceError
+from portunus.metrics import KINESIS_PUT_ERRORS, KINESIS_THROTTLED_RECORDS, metrics
 from portunus.models import (
     MetadataRecord,
     RequestBodyRecord,
@@ -55,6 +56,18 @@ _PACK_MAX_RECORDS = 500
 # it to one (on-demand scaling can't split a hot key). Consumers reassemble by
 # request_id + chunk_id / frame_index, so KDS ordering isn't needed.
 _PARTITION_KEY_BYTES = 32
+
+# Per-record ErrorCodes that mean "the stream is over its quota", as opposed
+# to a malformed record. Counted separately so an under-provisioned stream is
+# distinguishable from a code bug in the CloudWatch metrics.
+_THROTTLE_ERROR_CODES = frozenset(
+    {
+        "ServiceUnavailableException",
+        "ProvisionedThroughputExceededException",
+        "ThrottlingException",
+    }
+)
+
 
 # A packed KDS record: data + the number of audit records it carries.
 Pack = Tuple[bytes, int]
@@ -475,6 +488,7 @@ class PublishService:
                     pending,
                     attempt,
                 )
+                metrics.incr(KINESIS_PUT_ERRORS, pending)
                 return pending
 
             failed_count = resp.get("FailedRecordCount")
@@ -498,10 +512,15 @@ class PublishService:
                     if code:
                         retry.append(pack)
                         last_error_codes[code] = last_error_codes.get(code, 0) + 1
+                        if code in _THROTTLE_ERROR_CODES:
+                            metrics.incr(KINESIS_THROTTLED_RECORDS, pack[1])
+                        else:
+                            metrics.incr(KINESIS_PUT_ERRORS, pack[1])
             else:
                 # A misaligned response cannot confirm which inputs succeeded.
                 # Retrying the whole group may duplicate records, but never hides loss.
                 retry = packs
+                metrics.incr(KINESIS_PUT_ERRORS, pending)
                 logger.warning(
                     "Inconsistent Kinesis response on %s; %d records unconfirmed",
                     stream_name,

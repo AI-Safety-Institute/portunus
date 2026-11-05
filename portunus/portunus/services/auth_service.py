@@ -8,6 +8,7 @@ API keys, and managing principal identities.
 
 import asyncio
 import logging
+import time
 import weakref
 from typing import Optional
 
@@ -21,6 +22,15 @@ from portunus.exceptions import (
     CredentialsError,
     PayloadError,
     ServiceError,
+)
+from portunus.metrics import (
+    AUTH_REDIS_ERROR,
+    AUTH_REDIS_HIT,
+    AUTH_REDIS_MISS,
+    FULL_AUTH,
+    FULL_AUTH_LATENCY,
+    FULL_AUTH_SHED,
+    metrics,
 )
 from portunus.models import (
     AuthPayload,
@@ -253,9 +263,12 @@ class AuthService:
                         payload.raw, target_host
                     )
                     if cached_result:
+                        metrics.incr(AUTH_REDIS_HIT)
                         self._remember(key, cached_result, payload)
                         return cached_result
+                    metrics.incr(AUTH_REDIS_MISS)
             except (TimeoutError, RedisTimeoutError) as e:
+                metrics.incr(AUTH_REDIS_ERROR)
                 logger.warning(
                     f"Cache read timed out during auth for {request_id} "
                     f"({type(e).__name__}); rejecting rather than falling back to "
@@ -263,6 +276,7 @@ class AuthService:
                 )
                 raise TimeoutError("Cache read timed out during authentication") from e
             except Exception as e:
+                metrics.incr(AUTH_REDIS_ERROR)
                 logger.error(f"Cache read error during auth: {type(e).__name__}: {e}")
 
         auth_result = await self._bounded_full_authenticate(
@@ -285,13 +299,19 @@ class AuthService:
             async with asyncio.timeout(self._fallback_acquire_timeout_s):
                 await self._fallback_slots.acquire()
         except TimeoutError:
+            metrics.incr(FULL_AUTH_SHED)
             logger.warning(
                 "Full-auth capacity exhausted; shedding (request_id=%s)", request_id
             )
             raise AuthOverloadedError() from None
+        metrics.incr(FULL_AUTH)
+        started = time.perf_counter()
         try:
             return await self._full_authenticate(payload, target_host)
         finally:
+            # Timed whatever the outcome: a slow FAILING STS is exactly the
+            # case the latency series has to show.
+            metrics.observe(FULL_AUTH_LATENCY, (time.perf_counter() - started) * 1000)
             self._fallback_slots.release()
 
     def _remember(

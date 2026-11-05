@@ -110,7 +110,7 @@ services:
     # namespace means portunus can't publish its own ports — the proxy service
     # publishes on its behalf for the bridged health probe.
     network_mode: "service:proxy"
-    # If you want to log docker to cloudwatch,
+    # If you want to log docker (and the EMF metric lines) to cloudwatch,
     # you must put credentials in /root/.aws/credentials default profile
     # in order to override aninstance profile.
     # It is not enough to paste them in as env vars.
@@ -132,6 +132,9 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: redis_secure_password
       CACHE_DURATION: 172800
+      # EMF metrics stay off locally: they would interleave with the
+      # structured logs for no benefit without a CloudWatch sink.
+      METRICS_ENABLED: "false"
       # Localstack endpoint. Unset to make real AWS requests
       AWS_ENDPOINT_URL: http://localstack:4566
       REDIS_USE_TLS: "false"
