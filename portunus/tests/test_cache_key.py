@@ -1,7 +1,7 @@
 """Tests for keying cached authorisation results on payload and target host."""
 
 import hashlib
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import fakeredis.aioredis
 import pytest
@@ -13,8 +13,11 @@ from portunus.services.state_service import StateService
 
 
 def _cache_backed_by(client: fakeredis.aioredis.FakeRedis) -> CacheService:
+    async def execute_redis(operation):
+        return await operation(client)
+
     state_service = MagicMock(spec=StateService)
-    state_service.acquire_redis_connection = AsyncMock(return_value=client)
+    state_service.execute_redis = execute_redis
     return CacheService(state_service=state_service)
 
 
@@ -87,3 +90,17 @@ class TestCacheIsKeyedByTarget:
         other = await cache.get_cached_auth_result("payload", "api.other.example")
         assert example is not None and example.api_key == "sk-a"
         assert other is not None and other.api_key == "sk-b"
+
+    @pytest.mark.asyncio
+    async def test_upstream_header_fields_round_trip(self, fake_redis):
+        cache = _cache_backed_by(fake_redis)
+        result = _result()
+        result.output_header = "x-goog-api-key"
+        result.output_prefix = ""
+
+        await cache.cache_auth_result("payload", "api.example.com", result, 60)
+
+        cached = await cache.get_cached_auth_result("payload", "api.example.com")
+        assert cached is not None
+        assert cached.output_header == "x-goog-api-key"
+        assert cached.output_prefix == ""

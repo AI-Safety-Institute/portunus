@@ -107,8 +107,11 @@ class TestAuthResultOutputFields:
 
 
 def _cache_backed_by(client: fakeredis.aioredis.FakeRedis) -> CacheService:
+    async def execute_redis(operation):
+        return await operation(client)
+
     state_service = MagicMock(spec=StateService)
-    state_service.acquire_redis_connection = AsyncMock(return_value=client)
+    state_service.execute_redis = execute_redis
     return CacheService(state_service=state_service)
 
 
