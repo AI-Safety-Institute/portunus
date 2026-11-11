@@ -908,7 +908,7 @@ class RequestHeadersRecord:
         project: Project of the caller, as the proxy learned it from /authorise.
             Firehose partitions the stream by it. "unknown" when the caller's
             role name carries no project; None only when no header arrived (an
-            older proxy image, or the WebSocket relay, which sends none).
+            older proxy image).
     """
 
     request_id: str
@@ -996,7 +996,7 @@ class RequestBodyRecord:
         project: Project of the caller, as the proxy learned it from /authorise.
             Firehose partitions the stream by it. "unknown" when the caller's
             role name carries no project; None only when no header arrived (an
-            older proxy image, or the WebSocket relay, which sends none).
+            older proxy image).
     """
 
     request_id: str
@@ -1055,7 +1055,7 @@ class RequestTrailersRecord:
         project: Project of the caller, as the proxy learned it from /authorise.
             Firehose partitions the stream by it. "unknown" when the caller's
             role name carries no project; None only when no header arrived (an
-            older proxy image, or the WebSocket relay, which sends none).
+            older proxy image).
     """
 
     request_id: str
@@ -1121,7 +1121,7 @@ class ResponseHeadersRecord:
         project: Project of the caller, as the proxy learned it from /authorise.
             Firehose partitions the stream by it. "unknown" when the caller's
             role name carries no project; None only when no header arrived (an
-            older proxy image, or the WebSocket relay, which sends none).
+            older proxy image).
     """
 
     request_id: str
@@ -1210,7 +1210,7 @@ class ResponseBodyRecord:
         project: Project of the caller, as the proxy learned it from /authorise.
             Firehose partitions the stream by it. "unknown" when the caller's
             role name carries no project; None only when no header arrived (an
-            older proxy image, or the WebSocket relay, which sends none).
+            older proxy image).
     """
 
     request_id: str
@@ -1270,7 +1270,7 @@ class ResponseTrailersRecord:
         project: Project of the caller, as the proxy learned it from /authorise.
             Firehose partitions the stream by it. "unknown" when the caller's
             role name carries no project; None only when no header arrived (an
-            older proxy image, or the WebSocket relay, which sends none).
+            older proxy image).
     """
 
     request_id: str

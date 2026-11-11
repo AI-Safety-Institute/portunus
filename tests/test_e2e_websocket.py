@@ -27,7 +27,7 @@ if portunus_path not in sys.path:
 os.environ["AWS_XRAY_SDK_ENABLED"] = "false"
 os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
 
-from conftest import encode_base64, read_kinesis_records
+from conftest import assume_role_credentials, encode_base64, read_kinesis_records
 
 # Envoy routes /ws/* to Portunus, which relays to ws-echo upstream.
 PROXY_WS_URL = "ws://localhost:8888/ws/echo"
@@ -232,6 +232,62 @@ class TestWebSocketRelay:
         ):
             assert time.time() < deadline, f"No request headers record has {tags}"
             await asyncio.sleep(1)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("role_name", "project"),
+        [
+            ("UserProfile_e2e_wsalpha", "wsalpha"),
+            ("e2e-ws-service-role", "unknown"),
+        ],
+    )
+    async def test_every_ws_record_carries_the_callers_project(
+        self, role_name, project, ws_docker_setup
+    ):
+        """All five records of a WebSocket connection name the caller's project.
+
+        The relay publishes these itself, so the project comes from its own
+        authentication of the upgrade request, not from a proxy header.
+        """
+        credentials = assume_role_credentials(role_name)
+        payload = encode_base64({"credentials": credentials, "secret_arn": ""})
+        ws = await websockets.connect(
+            PROXY_WS_URL,
+            additional_headers={"Authorization": f"Bearer {payload}"},
+            open_timeout=5,
+        )
+        try:
+            test_msg = f"project-test-{role_name}-{time.time()}"
+            await ws.send(test_msg)
+            await asyncio.wait_for(ws.recv(), timeout=5)
+        finally:
+            await ws.close()
+
+        async def wait_for(stream: str, matches) -> dict:
+            deadline = time.time() + 30
+            while True:
+                for record in read_kinesis_records(stream):
+                    if matches(record):
+                        return record
+                assert time.time() < deadline, f"No matching record in {stream}"
+                await asyncio.sleep(1)
+
+        # The client never sees the request id, so find it by the message body.
+        sent = await wait_for(
+            "portunus-stream-request-body",
+            lambda r: base64.b64decode(r["body"]).decode(errors="replace") == test_msg,
+        )
+        assert sent["project"] == project
+        request_id = sent["request_id"]
+
+        for stream in (
+            "portunus-stream-metadata",
+            "portunus-stream-request-headers",
+            "portunus-stream-response-body",
+            "portunus-stream-response-headers",
+        ):
+            record = await wait_for(stream, lambda r: r.get("request_id") == request_id)
+            assert record["project"] == project, stream
 
 
 @pytest.mark.slow

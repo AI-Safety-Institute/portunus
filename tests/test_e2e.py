@@ -2,7 +2,6 @@
 # ruff: noqa: E501
 import base64
 import json
-import subprocess
 import time
 import uuid
 
@@ -10,7 +9,12 @@ import pytest
 import requests
 
 # Import from conftest
-from conftest import X_API_KEY_PROXY_PORT, encode_base64, read_kinesis_records
+from conftest import (
+    X_API_KEY_PROXY_PORT,
+    assume_role_credentials,
+    encode_base64,
+    read_kinesis_records,
+)
 
 X_API_KEY_PROXY = f"http://localhost:{X_API_KEY_PROXY_PORT}"
 
@@ -430,45 +434,6 @@ def test_error_response_contains_trace_id(
     assert "X-Amzn-Trace-Id" in response.headers
 
 
-def _assume_role_credentials(role_name: str) -> dict:
-    """Return LocalStack credentials whose caller identity is the given role."""
-    base = ["docker", "exec", "localstack-main", "awslocal"]
-    subprocess.run(
-        base
-        + [
-            "iam",
-            "create-role",
-            "--role-name",
-            role_name,
-            "--assume-role-policy-document",
-            '{"Version": "2012-10-17", "Statement": []}',
-        ],
-        capture_output=True,
-    )
-    result = subprocess.run(
-        base
-        + [
-            "sts",
-            "assume-role",
-            "--role-arn",
-            f"arn:aws:iam::000000000000:role/{role_name}",
-            "--role-session-name",
-            "e2e",
-            "--region",
-            "eu-west-2",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    creds = json.loads(result.stdout)["Credentials"]
-    return {
-        "access_key_id": creds["AccessKeyId"],
-        "secret_access_key": creds["SecretAccessKey"],
-        "session_token": creds["SessionToken"],
-    }
-
-
 def test_log_records_carry_the_callers_project(
     api_key_prefix: str, api_key_header: str, docker_setup
 ):
@@ -478,7 +443,7 @@ def test_log_records_carry_the_callers_project(
     on the request-phase log calls and, via dynamic metadata, on the
     response-phase ones, so Firehose can partition each stream by it.
     """
-    credentials = _assume_role_credentials("UserProfile_e2e_alpha")
+    credentials = assume_role_credentials("UserProfile_e2e_alpha")
     payload = encode_base64({"credentials": credentials, "secret_arn": ""})
     response = requests.get(
         "http://localhost:8888/get",

@@ -51,6 +51,7 @@ This repo implements a secure API key proxy system with two main components:
    - Proxy captures request headers and body before forwarding
    - Makes async call to `/log` with metadata and type "request_headers", "request_body", or "request_trailers"
    - Each `/log` call carries the caller's project (from the `/authorise` response, held in Lua dynamic metadata beside `request_id`) as the `x-portunus-project` header; the handlers stamp it on the record so Firehose can partition by `project`
+   - The WebSocket relay publishes its records itself (no `/log` call) and stamps the project from its own authentication on the upgrade headers, each message and the closing summary
    - Payload is validated against appropriate Pydantic models (defined in `models.py`)
    - Binary data is base64-encoded by Lua before being sent to Portunus
    - Portunus publishes events directly to Kinesis Data Streams for long-term storage
