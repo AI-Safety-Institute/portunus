@@ -1436,6 +1436,17 @@ async def test_ws_summary_submit_times_out_on_wedged_queue(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _trailers_message(*, is_request: bool) -> proc_pb2.ProcessingRequest:
+    trailers = proc_pb2.HttpTrailers(
+        trailers=base_pb2.HeaderMap(
+            headers=[base_pb2.HeaderValue(key="grpc-status", value="0")]
+        )
+    )
+    if is_request:
+        return proc_pb2.ProcessingRequest(request_trailers=trailers)
+    return proc_pb2.ProcessingRequest(response_trailers=trailers)
+
+
 def _ext_authz_metadata(project: Optional[str]) -> struct_pb2.Struct:
     fields = {"arn": struct_pb2.Value(string_value="arn:aws:sts::1:assumed-role/x")}
     if project is not None:
@@ -1471,9 +1482,11 @@ async def test_every_http_record_carries_the_callers_project(project):
         stream = _stream_from(
             [
                 first,
-                _http_body_message(body=b"{}", is_request=True, end_of_stream=True),
+                _http_body_message(body=b"{}", is_request=True),
+                _trailers_message(is_request=True),
                 _http_headers_message(headers={":status": "200"}, is_request=False),
-                _http_body_message(body=b"ok", is_request=False, end_of_stream=True),
+                _http_body_message(body=b"ok", is_request=False),
+                _trailers_message(is_request=False),
             ]
         )
         async for _ in _process_responses(servicer, stream, _ctx_with_key()):
@@ -1485,8 +1498,10 @@ async def test_every_http_record_carries_the_callers_project(project):
             "metadata",
             "request_headers",
             "request_body",
+            "request_trailers",
             "response_headers",
             "response_body",
+            "response_trailers",
         } <= kinds, kinds
         for item in publish.items:
             if item.kind == "metadata":

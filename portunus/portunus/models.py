@@ -812,9 +812,9 @@ class RequestHeadersRecord:
         content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
             Indicates compression applied to request body. None if not present or
             decoding fails.
-        project: Caller's project, as ext_authz resolved it from the role name.
-            Firehose partitions the stream by it. None when the route ran without
-            ext_authz or the role name carried no project.
+        project: Caller's project, as ext_authz resolved it (``unknown`` when the
+            role name carried none). Firehose partitions the stream by it. None
+            only when the route ran without ext_authz.
     """
 
     request_id: str
@@ -900,12 +900,12 @@ class RequestBodyRecord:
             was split across multiple records. ETL jobs set a 'truncated' flag when
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Caller's project, as ext_authz resolved it (``unknown`` when the
+            role name carried none). Firehose partitions the stream by it. None
+            only when the route ran without ext_authz.
 
     A streamed body (``num_chunks=0``) is complete iff its chunk_ids are
     contiguous from 0 through the record with ``final_chunk=True``.
-        project: Caller's project, as ext_authz resolved it from the role name.
-            Firehose partitions the stream by it. None when the route ran without
-            ext_authz or the role name carried no project.
     """
 
     request_id: str
@@ -973,9 +973,9 @@ class RequestTrailersRecord:
             names. Values may be base64-encoded depending on implementation.
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
-        project: Caller's project, as ext_authz resolved it from the role name.
-            Firehose partitions the stream by it. None when the route ran without
-            ext_authz or the role name carried no project.
+        project: Caller's project, as ext_authz resolved it (``unknown`` when the
+            role name carried none). Firehose partitions the stream by it. None
+            only when the route ran without ext_authz.
     """
 
     request_id: str
@@ -1039,9 +1039,9 @@ class ResponseHeadersRecord:
         content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
             Indicates compression applied to response body. None if not present or
             decoding fails.
-        project: Caller's project, as ext_authz resolved it from the role name.
-            Firehose partitions the stream by it. None when the route ran without
-            ext_authz or the role name carried no project.
+        project: Caller's project, as ext_authz resolved it (``unknown`` when the
+            role name carried none). Firehose partitions the stream by it. None
+            only when the route ran without ext_authz.
     """
 
     request_id: str
@@ -1128,12 +1128,12 @@ class ResponseBodyRecord:
             be known until the final chunk. ETL jobs set a 'truncated' flag when
             num_chunks > 1 to indicate incomplete data.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Caller's project, as ext_authz resolved it (``unknown`` when the
+            role name carried none). Firehose partitions the stream by it. None
+            only when the route ran without ext_authz.
 
     A streamed body (``num_chunks=0``) is complete iff its chunk_ids are
     contiguous from 0 through the record with ``final_chunk=True``.
-        project: Caller's project, as ext_authz resolved it from the role name.
-            Firehose partitions the stream by it. None when the route ran without
-            ext_authz or the role name carried no project.
     """
 
     request_id: str
@@ -1202,9 +1202,9 @@ class ResponseTrailersRecord:
             names. Values may be base64-encoded depending on implementation.
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
-        project: Caller's project, as ext_authz resolved it from the role name.
-            Firehose partitions the stream by it. None when the route ran without
-            ext_authz or the role name carried no project.
+        project: Caller's project, as ext_authz resolved it (``unknown`` when the
+            role name carried none). Firehose partitions the stream by it. None
+            only when the route ran without ext_authz.
     """
 
     request_id: str
@@ -1245,9 +1245,11 @@ class WSSummaryRecord:
     A joinable, cheap view of connection-level shape (duration, frame
     counts per direction, close code) so analytics don't have to
     aggregate the body stream.
-        project: Caller's project, as ext_authz resolved it from the role name.
-            Firehose partitions the stream by it. None when the route ran without
-            ext_authz or the role name carried no project.
+
+    Attributes:
+        project: Caller's project, as ext_authz resolved it (``unknown`` when the
+            role name carried none). Firehose partitions the stream by it. None
+            only when the route ran without ext_authz.
     """
 
     request_id: str
