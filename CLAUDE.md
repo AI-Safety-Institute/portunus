@@ -42,7 +42,7 @@ This repo implements a secure API key proxy system with two main components:
 4. Proxy moves the credential into one upstream header
    - `portunus:apply_upstream_auth(request_handle, auth_response)` in `lua.lua`
    - The header is the response's optional `output_header` (else `API_KEY_HEADER`), the value is the optional `output_prefix` (else `API_KEY_PREFIX`) followed by the key
-   - Both accepted inbound headers (either may carry the caller's AWS credentials) are removed unless one is that header; every other header is forwarded untouched
+   - Both accepted inbound headers (either may carry the caller's AWS credentials) are removed unless one is that header; every other header is forwarded untouched, except `x-aisi-tags`, which is logged but never forwarded (removed by the default route's `request_headers_to_remove` in `envoy.yaml`, and by `_BLOCKED_HEADERS` in the relay)
 5. Proxy forwards the modified request to target API
 6. Target API processes request using the real API key
 

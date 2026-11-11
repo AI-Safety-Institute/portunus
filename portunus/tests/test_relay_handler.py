@@ -174,6 +174,7 @@ class TestBuildUpstreamHeaders:
             "authorization": "Bearer test_payload",
             "user-agent": "test-client",
             "x-portunus-target-host": "localhost",
+            "X-AISI-Tags": "session=abc",  # logged, never forwarded
         }
 
         headers = _build_upstream_headers(mock_websocket, auth_result)
@@ -267,6 +268,7 @@ class TestPublishConnectionMetadata:
             "api-key": "client-supplied",
             "x-portunus-target-host": "localhost",
             "user-agent": "test-client",
+            "x-aisi-tags": "session=abc",  # logged, never forwarded
         }
 
         with patch(
@@ -284,6 +286,7 @@ class TestPublishConnectionMetadata:
         logged_headers = log_mock.await_args_list[0].args[2]
         assert logged_headers == {
             "user-agent": "test-client",
+            "x-aisi-tags": "session=abc",
             "authority": "upstream.example.com",
         }
 

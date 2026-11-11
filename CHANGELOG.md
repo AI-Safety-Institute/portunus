@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- `x-aisi-tags`, the header clients tag requests with for log queries, is
+  logged but no longer forwarded upstream, over HTTP or WebSocket. See
+  [Request tags](README.md#request-tags).
+
 ### Added
 - Every request and response log record carries the caller's `project`, so
   Firehose can partition each stream by it instead of filing the six
