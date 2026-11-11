@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- `x-aisi-tags`, the header clients tag requests with for log queries, is
+  logged but no longer forwarded upstream, over HTTP or WebSocket: the
+  route configuration removes it after ext_proc has captured the request
+  headers. See [Request tags](README.md#request-tags). Mirrors #229 on the
+  legacy stack.
+
 ## [0.13.0] - 2026-10-30
 
 Envoy now delegates authentication and audit to Portunus over gRPC, and the
