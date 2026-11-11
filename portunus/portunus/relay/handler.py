@@ -61,6 +61,8 @@ _BLOCKED_HEADERS = frozenset(
         "x-forwarded-host",
         "x-forwarded-proto",
         "x-real-ip",
+        # Client tags: logged, never forwarded (Envoy strips them from HTTP)
+        "x-aisi-tags",
     }
 )
 _BLOCKED_HEADER_PREFIXES = ("x-portunus-",)

@@ -294,6 +294,35 @@ def test_x_api_key_proxy_rejects_wrong_bearer_prefix(docker_setup):
     assert "Invalid authorization format" in response.json()["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_aisi_tags_are_logged_but_not_forwarded(
+    api_key_prefix: str, api_key_header: str, docker_setup
+):
+    """x-aisi-tags lands raw on the request-headers record, not upstream."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    tags = "session=abc,experiment=e2e"
+    response = requests.get(
+        "http://localhost:8888/get",
+        headers={
+            api_key_header: f"{api_key_prefix}{payload}",
+            "x-aisi-tags": tags,
+            "x-not-a-tag": "kept",
+        },
+    )
+    assert response.status_code == 200, response.content
+
+    upstream = _upstream_headers(response)
+    assert upstream["x-not-a-tag"] == "kept"
+    assert "x-aisi-tags" not in upstream
+
+    logged = _logged_headers(response.headers["X-Amzn-Trace-Id"])
+    assert logged["x-aisi-tags"] == tags
+
+
 # Manually test with:
 # curl -X POST http://localhost:8888/post -H "Authorization: Bearer eyJjcmVkZW50aWFscyI6eyJhY2Nlc3Nfa2V5X2lkIjoiQUtJQVRFU1QiLCJzZWNyZXRfYWNjZXNzX2tleSI6IlNFQ1JFVFRFU1QiLCJzZXNzaW9uX3Rva2VuIjoiVEVTVFRPS0VOIn0sInNlY3JldF9hcm4iOiJhcm46YXdzOnNlY3JldHNtYW5hZ2VyOnVzLWVhc3QtMToxMjM0NTY3ODkwMTI6c2VjcmV0OnRlc3Qtc2VjcmV0In0=" -H "Content-Type: application/json" -d '{"key3":   "value3"   , "key1":"value1","key2" : "value2" }' # noqa: E501
 @pytest.mark.parametrize(

@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- `x-aisi-tags`, the header clients tag requests with for log queries, is
+  logged but no longer forwarded upstream, over HTTP or WebSocket. See
+  [Request tags](README.md#request-tags).
+
 ## [0.12.0] - 2026-10-27
 
 ### Security
