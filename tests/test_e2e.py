@@ -434,8 +434,21 @@ def test_error_response_contains_trace_id(
     assert "X-Amzn-Trace-Id" in response.headers
 
 
+@pytest.mark.parametrize(
+    ("role_name", "project"),
+    [
+        ("UserProfile_e2e_alpha", "alpha"),
+        # No UserProfile_ prefix, so the role name carries no project. "unknown"
+        # is the one partition the deletion tool refuses to touch.
+        ("e2e-service-role", "unknown"),
+    ],
+)
 def test_log_records_carry_the_callers_project(
-    api_key_prefix: str, api_key_header: str, docker_setup
+    role_name: str,
+    project: str,
+    api_key_prefix: str,
+    api_key_header: str,
+    docker_setup,
 ):
     """Every stream's record for a request names the caller's project.
 
@@ -443,7 +456,7 @@ def test_log_records_carry_the_callers_project(
     on the request-phase log calls and, via dynamic metadata, on the
     response-phase ones, so Firehose can partition each stream by it.
     """
-    credentials = assume_role_credentials("UserProfile_e2e_alpha")
+    credentials = assume_role_credentials(role_name)
     payload = encode_base64({"credentials": credentials, "secret_arn": ""})
     response = requests.get(
         "http://localhost:8888/get",
@@ -461,4 +474,4 @@ def test_log_records_carry_the_callers_project(
         "portunus-stream-response-body",
         "portunus-stream-response-trailers",
     ):
-        assert _wait_for_record(stream, request_id)["project"] == "alpha", stream
+        assert _wait_for_record(stream, request_id)["project"] == project, stream
