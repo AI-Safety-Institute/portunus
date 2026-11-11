@@ -68,11 +68,23 @@ Envoy reaches Portunus over gRPC and presents the proxy's `PORTUNUS_API_KEY` as 
 Portunus captures **full request and response data** and publishes it to Kinesis for the audit trail. This is deliberate: the logs are an audit record of everything that passed through the proxy. Be aware that this means:
 
 - **Request and response bodies are stored verbatim**, including prompts, completions, WebSocket messages, and any data (personal, commercial, or otherwise sensitive) that clients send or receive.
-- **Headers are captured in full except credential headers**: `KNOWN_AUTH_HEADERS` (a backend setting, default `authorization,x-api-key,x-goog-api-key,api-key`, matched case-insensitively), `API_KEY_HEADER`, and the header the upstream credential was written to are never captured; every other header, custom `x-aisi-*` headers included, is. Extend `KNOWN_AUTH_HEADERS` for any other credential header your clients send. Secrets embedded in a URL path or query, or in a body, **will be captured**.
+- **Headers are captured in full except credential headers**: `KNOWN_AUTH_HEADERS` (a backend setting, default `authorization,x-api-key,x-goog-api-key,api-key`, matched case-insensitively), `API_KEY_HEADER`, and the header the upstream credential was written to are never captured; every other header, custom `x-aisi-*` headers included, is. Extend `KNOWN_AUTH_HEADERS` for any other credential header your clients send. `x-aisi-tags` is captured like any other header but never forwarded to the provider (see [Request tags](#request-tags)). Secrets embedded in a URL path or query, or in a body, **will be captured**.
 
 For minted tokens, each mint writes one log line pairing the `jti` of the STS identity token (which providers record when they exchange it) with the federation role ARN and the caller's user, principal, session and project. A provider-side record is matched to the caller through that line, and to the caller's requests through the per-request logs for the token's lifetime; the tokens themselves are not logged.
 
 Portunus does **not** attempt to redact secrets or sensitive content from bodies. If you need redaction, filtering, or access tiering, do it downstream of the Kinesis streams (e.g. in the ETL/query layer that consumes the logs) and restrict who can read the raw stream output. Treat the raw log storage as containing everything your clients send and receive.
+
+### Request tags
+
+Clients can tag a request for log queries (agent session, experiment, user and so on) with one `x-aisi-tags` header. Portunus logs it like any other header but never forwards it: the route configuration's `request_headers_to_remove` drops it when Envoy builds the upstream request, after ext_proc has streamed the request headers to Portunus. The same rule covers WebSocket upgrades, which take the same route configuration.
+
+Portunus does not parse the value. Send comma-separated `key=value` pairs in the style of W3C [`baggage`](https://www.w3.org/TR/baggage/), with no spaces: each key once, in lowercase letters, digits, `_`, `.` and `-`, and each value percent-encoded (Python's `urllib.parse.quote(value, safe="")`):
+
+```
+x-aisi-tags: session=abc,experiment=xyz,agent=foo
+```
+
+Baggage parsers already read this, and Athena's `split_to_map(tags, ',', '=')` turns it into a map, so Glue could parse it into columns later.
 
 ## Configuration
 

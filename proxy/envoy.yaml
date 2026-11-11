@@ -103,10 +103,15 @@ static_resources:
             name: local_route
             # Strip internal x-portunus-* inbound so clients can't forge them
             # (authoritative values arrive via gRPC initial_metadata below).
+            # x-aisi-tags (README "Request tags") is logged but never reaches
+            # the provider: the router removes it when it builds the upstream
+            # request, after ext_proc has streamed the request headers to
+            # Portunus. Route-config level, so it covers the WS upgrade too.
             request_headers_to_remove:
               - x-portunus-debug-id
               - x-portunus-proxy-key
               - x-portunus-target-host
+              - x-aisi-tags
             virtual_hosts:
             - name: local_service
               domains: ["*"]

@@ -458,6 +458,56 @@ def test_request_response(
         )
 
 
+
+def _request_headers_record_with_tag(tags: str, timeout: float = 10.0) -> dict | None:
+    """Return the request-headers audit record carrying ``tags``, if one lands.
+
+    ext_proc base64-encodes every captured header value (``_headers_to_dict``
+    in ``proc_servicer.py``), so the record is matched on the encoded form.
+    """
+    encoded = base64.b64encode(tags.encode()).decode("ascii")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for record in _read_audit_s3_records("request-headers", timeout=0.1):
+            if record.get("raw_headers", {}).get("x-aisi-tags") == encoded:
+                return record
+        time.sleep(0.5)
+    return None
+
+
+def test_aisi_tags_are_logged_but_not_forwarded(
+    seeded_secrets: dict[str, str],
+    api_key_header: str,
+    api_key_prefix: str,
+    clean_audit_pipeline,
+) -> None:
+    """x-aisi-tags lands on the request-headers audit record, not upstream.
+
+    The route configuration's ``request_headers_to_remove`` drops the header
+    when Envoy builds the upstream request, after ext_proc has streamed the
+    request headers to Portunus. A control header proves other headers still
+    pass.
+    """
+    tags = f"session={int(time.time() * 1000)},experiment=e2e"
+    scenario = Scenario(
+        name="aisi tags",
+        request=RequestSpec(
+            path="/get",
+            headers={"x-aisi-tags": tags, "x-not-a-tag": "kept"},
+        ),
+        expected=ExpectedResponse(status=200),
+    )
+    response = _fire_scenario(scenario, seeded_secrets, api_key_header, api_key_prefix)
+    assert response.status_code == 200, response.text[:500]
+
+    # httpbun echoes the request headers it received, Title-Cased.
+    upstream = {k.lower(): v for k, v in response.json()["headers"].items()}
+    assert upstream["x-not-a-tag"] == "kept"
+    assert "x-aisi-tags" not in upstream
+
+    record = _request_headers_record_with_tag(tags)
+    assert record is not None, f"no request-headers audit record carries {tags!r}"
+
 # ---------------------------------------------------------------------------
 # Telemetry arm — shares the same corpus, asserts on the number of metadata
 # records that land in LocalStack S3. Scenarios without an
