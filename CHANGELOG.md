@@ -11,6 +11,12 @@ backend images must be deployed together, with the configuration changes
 below. Request signing was already removed in 0.11.0.
 
 ### Added
+- Every record ext_proc publishes carries the caller's `project`: request and
+  response headers, bodies and trailers, and the WebSocket summary, stamped
+  from the `principal_info` ext_authz forwards for the stream. Firehose can
+  partition each stream by it instead of filing those records under
+  `project=unknown`, where the deletion tool never looks. The Glue schemas gain
+  a trailing `project` column. Routes without ext_authz (`/ping`) stamp None.
 - The ext_authz servicer accepts the payload as `Authorization: Bearer
   <payload>` on every proxy, as the Lua filter did from 0.12.0 (#217), so one
   deployment serves clients on `anthropic` SDK 1.x (`X-Api-Key`) and 2.x

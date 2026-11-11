@@ -1429,3 +1429,118 @@ async def test_ws_summary_submit_times_out_on_wedged_queue(monkeypatch):
 
     assert state.summary_emitted is True
     assert queue.dropped_total == 1  # the summary was shed, counted, logged
+
+
+# ---------------------------------------------------------------------------
+# Project stamping: every record of a stream carries ext_authz's project
+# ---------------------------------------------------------------------------
+
+
+def _ext_authz_metadata(project: Optional[str]) -> struct_pb2.Struct:
+    fields = {"arn": struct_pb2.Value(string_value="arn:aws:sts::1:assumed-role/x")}
+    if project is not None:
+        fields["project"] = struct_pb2.Value(string_value=project)
+    return struct_pb2.Struct(
+        fields={
+            "principal_info": struct_pb2.Value(
+                struct_value=struct_pb2.Struct(fields=fields)
+            )
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project", ["alpha", None])
+async def test_every_http_record_carries_the_callers_project(project):
+    """Headers and bodies carry what ext_authz resolved, or None when it had none.
+
+    Firehose partitions each stream by project, so one missing stamp leaves a
+    record under ``unknown`` where the deletion tool never looks.
+    """
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        first = _http_headers_message(
+            headers={"content-type": "application/json"},
+            is_request=True,
+            request_id="req-project",
+        )
+        first.metadata_context.filter_metadata["envoy.filters.http.ext_authz"].CopyFrom(
+            _ext_authz_metadata(project)
+        )
+        stream = _stream_from(
+            [
+                first,
+                _http_body_message(body=b"{}", is_request=True, end_of_stream=True),
+                _http_headers_message(headers={":status": "200"}, is_request=False),
+                _http_body_message(body=b"ok", is_request=False, end_of_stream=True),
+            ]
+        )
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        kinds = set(publish.kinds())
+        assert {
+            "metadata",
+            "request_headers",
+            "request_body",
+            "response_headers",
+            "response_body",
+        } <= kinds, kinds
+        for item in publish.items:
+            if item.kind == "metadata":
+                assert item.payload["principal_info"].get("project") == project
+            else:
+                assert item.payload["project"] == project, item
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_route_without_ext_authz_stamps_no_project():
+    """/ping-style routes forward no ext_authz metadata; records say None."""
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        stream = _stream_from(
+            [
+                _http_headers_message(headers={}, is_request=True, request_id="r"),
+                _http_headers_message(headers={":status": "200"}, is_request=False),
+            ]
+        )
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+        assert "metadata" not in publish.kinds()
+        assert all(item.payload["project"] is None for item in publish.items)
+    finally:
+        await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_frames_and_summary_carry_the_callers_project():
+    servicer, publish, queue = _make_servicer()
+    await queue.start()
+    try:
+        first = _http_headers_message(
+            headers={}, is_request=True, websocket_metadata=True, request_id="ws-p"
+        )
+        first.metadata_context.filter_metadata["envoy.filters.http.ext_authz"].CopyFrom(
+            _ext_authz_metadata("alpha")
+        )
+        stream = _stream_from(
+            [
+                first,
+                _http_headers_message(headers={":status": "101"}, is_request=False),
+                _http_body_message(body=_ws_frame(b"hello"), is_request=False),
+            ]
+        )
+        async for _ in _process_responses(servicer, stream, _ctx_with_key()):
+            pass
+        await _drain_queue(queue)
+
+        assert publish.of_kind("response_body")[0].payload["project"] == "alpha"
+        assert publish.of_kind("ws_summary")[0].payload["record"].project == "alpha"
+    finally:
+        await queue.stop()

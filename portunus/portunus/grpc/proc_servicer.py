@@ -116,6 +116,9 @@ class _StreamState:
     response_complete: bool = False
     summary_emitted: bool = False
     audit_metadata_published: bool = False
+    # Caller's project from ext_authz, stamped on every record of the stream
+    # so Firehose partitions them with the metadata record.
+    project: Optional[str] = None
 
 
 class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
@@ -313,6 +316,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                 _extract_auth_metadata(request)
             )
             if principal_info is not None:
+                state.project = principal_info.get("project")
                 await self._queue.submit_blocking(
                     PublishTask(
                         build=lambda: self._publish.build_metadata(
@@ -337,6 +341,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     request_id=state.request_id,
                     headers=headers,
                     timestamp=timestamp,
+                    project=state.project,
                 ),
                 label="request_headers",
                 request_id=state.request_id,
@@ -359,6 +364,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     request_id=state.request_id,
                     trailers=trailers,
                     timestamp=timestamp,
+                    project=state.project,
                 ),
                 label="request_trailers",
                 request_id=state.request_id,
@@ -403,6 +409,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     request_id=state.request_id,
                     headers=headers,
                     timestamp=timestamp,
+                    project=state.project,
                 ),
                 label="response_headers",
                 request_id=state.request_id,
@@ -425,6 +432,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     request_id=state.request_id,
                     trailers=trailers,
                     timestamp=timestamp,
+                    project=state.project,
                 ),
                 label="response_trailers",
                 request_id=state.request_id,
@@ -711,6 +719,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
                     truncated=truncated,
                     final_chunk=final_chunk,
                     frame_index=frame_index,
+                    project=state.project,
                 ),
                 label=label,
                 request_id=state.request_id,
@@ -766,6 +775,7 @@ class PortunusProcessServicer(proc_grpc.ExternalProcessorServicer):
             dropped_server_frames=state.dropped_server_frames,
             truncated_client_frames=state.truncated_client_frames,
             truncated_server_frames=state.truncated_server_frames,
+            project=state.project,
         )
         task = PublishTask(
             build=lambda: self._publish.build_ws_summary(record=record),
