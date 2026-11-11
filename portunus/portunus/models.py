@@ -812,6 +812,9 @@ class RequestHeadersRecord:
         content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
             Indicates compression applied to request body. None if not present or
             decoding fails.
+        project: Caller's project, as ext_authz resolved it from the role name.
+            Firehose partitions the stream by it. None when the route ran without
+            ext_authz or the role name carried no project.
     """
 
     request_id: str
@@ -824,6 +827,8 @@ class RequestHeadersRecord:
     authority: Optional[str] = None
     user_agent: Optional[str] = None
     content_encoding: Optional[str] = None
+
+    project: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Decode headers from base64 after initialization."""
@@ -848,6 +853,7 @@ class RequestHeadersRecord:
             "authority": self.authority,
             "user_agent": self.user_agent,
             "content_encoding": self.content_encoding,
+            "project": self.project,
         }
 
     @classmethod
@@ -865,6 +871,7 @@ class RequestHeadersRecord:
             {"name": "authority", "type": "string"},
             {"name": "user_agent", "type": "string"},
             {"name": "content_encoding", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -896,6 +903,9 @@ class RequestBodyRecord:
 
     A streamed body (``num_chunks=0``) is complete iff its chunk_ids are
     contiguous from 0 through the record with ``final_chunk=True``.
+        project: Caller's project, as ext_authz resolved it from the role name.
+            Firehose partitions the stream by it. None when the route ran without
+            ext_authz or the role name carried no project.
     """
 
     request_id: str
@@ -911,6 +921,8 @@ class RequestBodyRecord:
     # by (request_id, frame_index) to reassemble and disambiguate frames.
     frame_index: Optional[int] = None
 
+    project: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
         return {
@@ -925,6 +937,7 @@ class RequestBodyRecord:
             "truncated": self.truncated,
             "final_chunk": self.final_chunk,
             "frame_index": self.frame_index,
+            "project": self.project,
         }
 
     @classmethod
@@ -942,6 +955,7 @@ class RequestBodyRecord:
             {"name": "truncated", "type": "boolean"},
             {"name": "final_chunk", "type": "boolean"},
             {"name": "frame_index", "type": "bigint"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -959,12 +973,17 @@ class RequestTrailersRecord:
             names. Values may be base64-encoded depending on implementation.
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Caller's project, as ext_authz resolved it from the role name.
+            Firehose partitions the stream by it. None when the route ran without
+            ext_authz or the role name carried no project.
     """
 
     request_id: str
     trailers: Dict[str, str]
     timestamp: str
     published_at: str
+
+    project: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -974,6 +993,7 @@ class RequestTrailersRecord:
             "trailers": self.trailers,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "project": self.project,
         }
 
     @classmethod
@@ -985,6 +1005,7 @@ class RequestTrailersRecord:
             {"name": "trailers", "type": "map<string,string>"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1018,6 +1039,9 @@ class ResponseHeadersRecord:
         content_encoding: Decoded content-encoding header (e.g., "gzip", "deflate").
             Indicates compression applied to response body. None if not present or
             decoding fails.
+        project: Caller's project, as ext_authz resolved it from the role name.
+            Firehose partitions the stream by it. None when the route ran without
+            ext_authz or the role name carried no project.
     """
 
     request_id: str
@@ -1029,6 +1053,8 @@ class ResponseHeadersRecord:
     content_length: Optional[str] = None
     content_type: Optional[str] = None
     content_encoding: Optional[str] = None
+
+    project: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Decode headers from base64 after initialization."""
@@ -1051,6 +1077,7 @@ class ResponseHeadersRecord:
             "content_length": self.content_length,
             "content_type": self.content_type,
             "content_encoding": self.content_encoding,
+            "project": self.project,
         }
 
     @classmethod
@@ -1067,6 +1094,7 @@ class ResponseHeadersRecord:
             {"name": "content_length", "type": "string"},
             {"name": "content_type", "type": "string"},
             {"name": "content_encoding", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1103,6 +1131,9 @@ class ResponseBodyRecord:
 
     A streamed body (``num_chunks=0``) is complete iff its chunk_ids are
     contiguous from 0 through the record with ``final_chunk=True``.
+        project: Caller's project, as ext_authz resolved it from the role name.
+            Firehose partitions the stream by it. None when the route ran without
+            ext_authz or the role name carried no project.
     """
 
     request_id: str
@@ -1118,6 +1149,8 @@ class ResponseBodyRecord:
     # by (request_id, frame_index) to reassemble and disambiguate frames.
     frame_index: Optional[int] = None
 
+    project: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
         return {
@@ -1132,6 +1165,7 @@ class ResponseBodyRecord:
             "truncated": self.truncated,
             "final_chunk": self.final_chunk,
             "frame_index": self.frame_index,
+            "project": self.project,
         }
 
     @classmethod
@@ -1149,6 +1183,7 @@ class ResponseBodyRecord:
             {"name": "truncated", "type": "boolean"},
             {"name": "final_chunk", "type": "boolean"},
             {"name": "frame_index", "type": "bigint"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1167,12 +1202,17 @@ class ResponseTrailersRecord:
             names. Values may be base64-encoded depending on implementation.
         timestamp: ISO-8601 formatted timestamp when trailers were captured.
         published_at: ISO-8601 timestamp when this record was published to Kinesis.
+        project: Caller's project, as ext_authz resolved it from the role name.
+            Firehose partitions the stream by it. None when the route ran without
+            ext_authz or the role name carried no project.
     """
 
     request_id: str
     trailers: Dict[str, str]
     timestamp: str
     published_at: str
+
+    project: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for Kinesis publishing."""
@@ -1182,6 +1222,7 @@ class ResponseTrailersRecord:
             "trailers": self.trailers,
             "timestamp": self.timestamp,
             "published_at": self.published_at,
+            "project": self.project,
         }
 
     @classmethod
@@ -1193,6 +1234,7 @@ class ResponseTrailersRecord:
             {"name": "trailers", "type": "map<string,string>"},
             {"name": "timestamp", "type": "string"},
             {"name": "published_at", "type": "string"},
+            {"name": "project", "type": "string"},
         ]
 
 
@@ -1203,6 +1245,9 @@ class WSSummaryRecord:
     A joinable, cheap view of connection-level shape (duration, frame
     counts per direction, close code) so analytics don't have to
     aggregate the body stream.
+        project: Caller's project, as ext_authz resolved it from the role name.
+            Firehose partitions the stream by it. None when the route ran without
+            ext_authz or the role name carried no project.
     """
 
     request_id: str
@@ -1230,6 +1275,8 @@ class WSSummaryRecord:
     truncated_client_frames: int = 0
     truncated_server_frames: int = 0
 
+    project: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for publishing."""
         return {
@@ -1254,6 +1301,7 @@ class WSSummaryRecord:
             "dropped_server_frames": self.dropped_server_frames,
             "truncated_client_frames": self.truncated_client_frames,
             "truncated_server_frames": self.truncated_server_frames,
+            "project": self.project,
         }
 
     @classmethod
@@ -1281,6 +1329,7 @@ class WSSummaryRecord:
             {"name": "dropped_server_frames", "type": "bigint"},
             {"name": "truncated_client_frames", "type": "bigint"},
             {"name": "truncated_server_frames", "type": "bigint"},
+            {"name": "project", "type": "string"},
         ]
 
 
