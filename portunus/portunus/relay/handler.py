@@ -204,7 +204,12 @@ async def _publish_connection_metadata(
     # Include upstream authority so downstream consumers can identify
     # which API provider handled the request.
     upgrade_headers["authority"] = upstream_host
-    await log_ws_headers(publish_service, request_id, upgrade_headers)
+    await log_ws_headers(
+        publish_service,
+        request_id,
+        upgrade_headers,
+        ws_auth.auth_result.principal_info.project,
+    )
 
     # Publish metadata
     try:
@@ -224,6 +229,7 @@ async def _relay(
     publish_service: PublishService,
     request_id: str,
     max_lifetime: int,
+    project: str | None,
 ) -> tuple[int, int, WsCloseCode]:
     """Run bidirectional message relay with per-message logging.
 
@@ -259,6 +265,7 @@ async def _relay(
                     "client_to_upstream",
                     message_bytes,
                     client_msg_index,
+                    project,
                 )
                 client_msg_index += 1
         except WebSocketDisconnect:
@@ -283,6 +290,7 @@ async def _relay(
                     "upstream_to_client",
                     message_bytes,
                     upstream_msg_index,
+                    project,
                 )
                 upstream_msg_index += 1
         except websockets.exceptions.ConnectionClosed:
@@ -374,12 +382,14 @@ async def handle_ws_connection(
         return
 
     # Relay messages
+    project = ws_auth.auth_result.principal_info.project
     client_msgs, upstream_msgs, close_code = await _relay(
         websocket,
         upstream,
         publish_service,
         request_id,
         relay_config.max_connection_lifetime,
+        project,
     )
 
     # Log summary and clean up
@@ -390,6 +400,7 @@ async def handle_ws_connection(
         client_msgs,
         upstream_msgs,
         duration,
+        project,
     )
 
     try:

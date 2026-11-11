@@ -9,7 +9,12 @@ import pytest
 import requests
 
 # Import from conftest
-from conftest import X_API_KEY_PROXY_PORT, encode_base64, read_kinesis_records
+from conftest import (
+    X_API_KEY_PROXY_PORT,
+    assume_role_credentials,
+    encode_base64,
+    read_kinesis_records,
+)
 
 X_API_KEY_PROXY = f"http://localhost:{X_API_KEY_PROXY_PORT}"
 
@@ -140,16 +145,21 @@ def test_client_credential_headers_are_forwarded(
         assert upstream_headers[name] == "client-supplied"
 
 
-def _wait_for_request_headers_record(request_id: str, timeout: float = 30) -> dict:
-    """Poll the request-headers stream until the record for request_id appears."""
+def _wait_for_record(stream_name: str, request_id: str, timeout: float = 30) -> dict:
+    """Poll a Kinesis stream until the record for request_id appears."""
     deadline = time.time() + timeout
     while True:
-        for record in read_kinesis_records("portunus-stream-request-headers"):
+        for record in read_kinesis_records(stream_name):
             if record.get("request_id") == request_id:
                 return record
         if time.time() > deadline:
-            pytest.fail(f"No request headers record for {request_id} in Kinesis")
+            pytest.fail(f"No record for {request_id} in {stream_name}")
         time.sleep(1)
+
+
+def _wait_for_request_headers_record(request_id: str, timeout: float = 30) -> dict:
+    """Poll the request-headers stream until the record for request_id appears."""
+    return _wait_for_record("portunus-stream-request-headers", request_id, timeout)
 
 
 @pytest.mark.parametrize(
@@ -422,3 +432,46 @@ def test_error_response_contains_trace_id(
 
     # Verify trace ID header is also set
     assert "X-Amzn-Trace-Id" in response.headers
+
+
+@pytest.mark.parametrize(
+    ("role_name", "project"),
+    [
+        ("UserProfile_e2e_alpha", "alpha"),
+        # No UserProfile_ prefix, so the role name carries no project. "unknown"
+        # is the one partition the deletion tool refuses to touch.
+        ("e2e-service-role", "unknown"),
+    ],
+)
+def test_log_records_carry_the_callers_project(
+    role_name: str,
+    project: str,
+    api_key_prefix: str,
+    api_key_header: str,
+    docker_setup,
+):
+    """Every stream's record for a request names the caller's project.
+
+    The project comes from the role name on /authorise. The proxy must echo it
+    on the request-phase log calls and, via dynamic metadata, on the
+    response-phase ones, so Firehose can partition each stream by it.
+    """
+    credentials = assume_role_credentials(role_name)
+    payload = encode_base64({"credentials": credentials, "secret_arn": ""})
+    response = requests.get(
+        "http://localhost:8888/get",
+        headers={api_key_header: f"{api_key_prefix}{payload}"},
+    )
+    assert response.status_code == 200, response.content
+    request_id = response.headers["X-Amzn-Trace-Id"]
+
+    for stream in (
+        "portunus-stream-metadata",
+        "portunus-stream-request-headers",
+        "portunus-stream-request-body",
+        "portunus-stream-request-trailers",
+        "portunus-stream-response-headers",
+        "portunus-stream-response-body",
+        "portunus-stream-response-trailers",
+    ):
+        assert _wait_for_record(stream, request_id)["project"] == project, stream

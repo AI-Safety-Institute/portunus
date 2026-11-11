@@ -175,22 +175,27 @@ function envoy_on_request(request_handle)
 			:dynamicMetadata()
 			:set("envoy.filters.http.lua", "request_id", auth_response.request_id)
 
+		-- The project travels the same way so the response-phase log calls can carry it.
+		-- Warns when /authorise returned none.
+		portunus:remember_project(request_handle, auth_response)
+
 		local upstream_auth_header = portunus:apply_upstream_auth(request_handle, auth_response)
 
 		-- Log the request body
-		portunus:log_request_body(request_handle, auth_response.request_id, full_request_body)
+		portunus:log_request_body(request_handle, auth_response.request_id, full_request_body, auth_response.project)
 
 		-- Log request headers, excluding every header that can carry a credential
 		local request_headers = portunus:strip_credential_headers(request_handle:headers(), upstream_auth_header)
 		portunus:log_request_headers(
 			request_handle,
 			auth_response.request_id,
-			utils.convert_pairs_to_table(request_handle, request_headers)
+			utils.convert_pairs_to_table(request_handle, request_headers),
+			auth_response.project
 		)
 
 		-- Log request trailers
 		local req_trailers = utils.convert_pairs_to_table(request_handle, request_handle:trailers() or {})
-		portunus:log_request_trailers(request_handle, auth_response.request_id, req_trailers)
+		portunus:log_request_trailers(request_handle, auth_response.request_id, req_trailers, auth_response.project)
 	end)
 
 	if not ok then
@@ -211,9 +216,11 @@ function envoy_on_response(response_handle)
 		-- Get metadata stored during request processing
 		local metadata = response_handle:streamInfo():dynamicMetadata():get("envoy.filters.http.lua")
 		local request_id = nil
+		local project = nil
 		local cors_origin = nil
 		if metadata then
 			request_id = metadata["request_id"]
+			project = metadata["project"]
 			cors_origin = metadata["cors_origin"]
 		end
 
@@ -242,15 +249,15 @@ function envoy_on_response(response_handle)
 
 		-- Log the complete response body (after chunking)
 		logging.info(response_handle, "Logging complete response body of size:" .. #complete_response_body, request_id)
-		portunus:log_response_body(response_handle, request_id, complete_response_body)
+		portunus:log_response_body(response_handle, request_id, complete_response_body, project)
 
 		-- Log response headers
 		local response_headers = utils.convert_pairs_to_table(response_handle, response_handle:headers() or {})
-		portunus:log_response_headers(response_handle, request_id, response_headers)
+		portunus:log_response_headers(response_handle, request_id, response_headers, project)
 
 		-- Log response trailers
 		local response_trailers = utils.convert_pairs_to_table(response_handle, response_handle:trailers() or {})
-		portunus:log_response_trailers(response_handle, request_id, response_trailers)
+		portunus:log_response_trailers(response_handle, request_id, response_trailers, project)
 	end)
 
 	if not ok then
