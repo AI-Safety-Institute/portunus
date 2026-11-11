@@ -130,6 +130,49 @@ describe("proxy_utils.portunus", function()
 		end)
 	end)
 
+	-- The request filter keeps the project for the response-phase log calls.
+	-- A 200 with no project is expected while an older Portunus is still
+	-- deployed and a regression after that, so it must reach the proxy log.
+	describe("remember_project", function()
+		local function metadata_handle()
+			local metadata = { set = spy.new(function() end) }
+			return {
+				logWarn = spy.new(function() end),
+				streamInfo = function()
+					return {
+						dynamicMetadata = function()
+							return metadata
+						end,
+					}
+				end,
+			},
+				metadata
+		end
+
+		it("should store a known project and not warn", function()
+			local handle, metadata = metadata_handle()
+
+			portunus_client:remember_project(handle, { request_id = "req-1", project = "alpha" })
+
+			assert.spy(metadata.set).was.called_with(match._, "envoy.filters.http.lua", "project", "alpha")
+			assert.spy(handle.logWarn).was_not.called()
+		end)
+
+		it("should warn with the request id and store nothing when the project is missing or empty", function()
+			for _, project in ipairs({ false, "" }) do
+				local handle, metadata = metadata_handle()
+
+				portunus_client:remember_project(handle, { request_id = "req-1", project = project or nil })
+
+				assert.spy(metadata.set).was_not.called()
+				assert.spy(handle.logWarn).was.called(1)
+				local message = handle.logWarn.calls[1].vals[2]
+				assert.is_truthy(message:find("[req-1]", 1, true))
+				assert.is_truthy(message:find("no project", 1, true))
+			end
+		end)
+	end)
+
 	describe("parse_authorization_response - JSON parsing", function()
 		it("should parse response with required fields only", function()
 			local body = '{"api_key": "sk-test-456", "request_id": "req-def"}'

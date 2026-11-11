@@ -176,13 +176,8 @@ function envoy_on_request(request_handle)
 			:set("envoy.filters.http.lua", "request_id", auth_response.request_id)
 
 		-- The project travels the same way so the response-phase log calls can carry it.
-		-- Only set when known: dynamic metadata cannot hold nil.
-		if auth_response.project then
-			request_handle
-				:streamInfo()
-				:dynamicMetadata()
-				:set("envoy.filters.http.lua", "project", auth_response.project)
-		end
+		-- Warns when /authorise returned none.
+		portunus:remember_project(request_handle, auth_response)
 
 		local upstream_auth_header = portunus:apply_upstream_auth(request_handle, auth_response)
 

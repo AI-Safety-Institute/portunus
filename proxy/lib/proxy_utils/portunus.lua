@@ -2,6 +2,7 @@
 -- Handles all HTTP communication with the Portunus service
 local dkjson = require("dkjson")
 local utils = require("proxy_utils.utils")
+local logging = require("proxy_utils.logging")
 
 local portunus = {}
 local portunus_client = {}
@@ -331,6 +332,26 @@ function portunus_client:apply_upstream_auth(request_handle, auth_response)
 	end
 	headers:replace(header, value)
 	return header
+end
+
+--- Keeps the caller's project in dynamic metadata for the response-phase log calls
+-- A successful /authorise response with no project is expected while an older
+-- Portunus is still deployed and a regression after that. Either way the request's
+-- log records go out without one, so warn rather than let it pass silently.
+-- @param request_handle The Envoy request handle
+-- @param auth_response Parsed AuthorizationResponse
+function portunus_client:remember_project(request_handle, auth_response)
+	local project = auth_response.project
+	if project and project ~= "" then
+		-- Dynamic metadata cannot hold nil, so it is only set when known
+		request_handle:streamInfo():dynamicMetadata():set("envoy.filters.http.lua", "project", project)
+		return
+	end
+	logging.warn(
+		request_handle,
+		"Portunus /authorise returned no project; this request's log records will carry none",
+		auth_response.request_id
+	)
 end
 
 --- Copies headers, dropping every credential header and the upstream auth header
