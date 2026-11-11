@@ -282,6 +282,7 @@ class PublishService:
         request_id: str,
         headers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> Optional[BuiltRecord]:
         """Build a request-headers record."""
         if not config.kinesis.request_headers_stream_name:
@@ -293,6 +294,7 @@ class PublishService:
             raw_headers=headers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
         return config.kinesis.request_headers_stream_name, _serialize(record.to_dict())
 
@@ -307,6 +309,7 @@ class PublishService:
         truncated: bool = False,
         final_chunk: bool = False,
         frame_index: Optional[int] = None,
+        project: Optional[str] = None,
     ) -> Optional[BuiltRecord]:
         """Build one request-body chunk record.
 
@@ -334,6 +337,7 @@ class PublishService:
             truncated=truncated,
             final_chunk=final_chunk,
             frame_index=frame_index,
+            project=project,
         )
         return config.kinesis.request_body_stream_name, _serialize(record.to_dict())
 
@@ -342,6 +346,7 @@ class PublishService:
         request_id: str,
         trailers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> Optional[BuiltRecord]:
         """Build a request-trailers record."""
         if not config.kinesis.request_trailers_stream_name:
@@ -353,6 +358,7 @@ class PublishService:
             trailers=trailers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
         return config.kinesis.request_trailers_stream_name, _serialize(record.to_dict())
 
@@ -361,6 +367,7 @@ class PublishService:
         request_id: str,
         headers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> Optional[BuiltRecord]:
         """Build a response-headers record."""
         if not config.kinesis.response_headers_stream_name:
@@ -372,6 +379,7 @@ class PublishService:
             raw_headers=headers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
         return config.kinesis.response_headers_stream_name, _serialize(record.to_dict())
 
@@ -386,6 +394,7 @@ class PublishService:
         truncated: bool = False,
         final_chunk: bool = False,
         frame_index: Optional[int] = None,
+        project: Optional[str] = None,
     ) -> Optional[BuiltRecord]:
         """Build one response-body chunk record.
 
@@ -408,6 +417,7 @@ class PublishService:
             truncated=truncated,
             final_chunk=final_chunk,
             frame_index=frame_index,
+            project=project,
         )
         return config.kinesis.response_body_stream_name, _serialize(record.to_dict())
 
@@ -416,6 +426,7 @@ class PublishService:
         request_id: str,
         trailers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> Optional[BuiltRecord]:
         """Build a response-trailers record."""
         if not config.kinesis.response_trailers_stream_name:
@@ -427,6 +438,7 @@ class PublishService:
             trailers=trailers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
         return config.kinesis.response_trailers_stream_name, _serialize(
             record.to_dict()
