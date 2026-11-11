@@ -138,3 +138,42 @@ class TestLogHandlersProject:
 
         assert resp.status_code == 200
         assert publish.await_args.kwargs["project"] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("path", "publish_name", "payload"), LOG_ENDPOINTS)
+    async def test_rejected_header_is_warned_about_and_still_published(
+        self, mock_segment, caplog, path, publish_name, payload
+    ):
+        """A rejected header keeps the record and leaves a warning to find it by.
+
+        The warning names the request id and the value's length, never the
+        value, which is caller-controlled.
+        """
+        publish = AsyncMock(return_value=True)
+        with (
+            caplog.at_level("WARNING", logger="api.access"),
+            patch(f"portunus.app.publish_service.{publish_name}", new=publish),
+        ):
+            resp = await _post_log(path, payload, {"x-portunus-project": "a/b/secret"})
+
+        assert resp.status_code == 200
+        assert publish.await_args.kwargs["project"] is None
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert REQUEST_ID in warnings[0]
+        assert "length 10" in warnings[0]
+        assert "secret" not in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_valid_or_missing_header_logs_no_warning(self, mock_segment, caplog):
+        publish = AsyncMock(return_value=True)
+        with (
+            caplog.at_level("WARNING", logger="api.access"),
+            patch("portunus.app.publish_service.publish_request_headers", new=publish),
+        ):
+            for headers in ({"x-portunus-project": "alpha"}, {}):
+                await _post_log(
+                    f"/log/{REQUEST_ID}/request/headers", HEADERS_PAYLOAD, headers
+                )
+
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]

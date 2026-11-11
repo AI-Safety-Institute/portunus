@@ -14,8 +14,8 @@ from typing import Annotated, Optional
 
 # aws_xray_sdk.core is imported via XRayService
 from aws_xray_sdk.core.utils import stacktrace
-from fastapi import APIRouter, FastAPI, Header, Request, Response, WebSocket
-from pydantic import BaseModel, BeforeValidator, Field
+from fastapi import APIRouter, Depends, FastAPI, Header, Request, Response, WebSocket
+from pydantic import BaseModel, Field
 
 from portunus.config import config  # noqa: E402 — also used by XRayService
 from portunus.exceptions import (
@@ -96,19 +96,29 @@ class AuthorizationResponse(BaseModel):
 _PROJECT_PATTERN = re.compile(r"[\w+=,.@-]{1,64}", re.ASCII)
 
 
-def _project_or_none(value: object) -> Optional[str]:
-    if isinstance(value, str) and _PROJECT_PATTERN.fullmatch(value):
-        return value
+def _project_from_header(
+    request_id: str,
+    project: Annotated[Optional[str], Header(alias="x-portunus-project")] = None,
+) -> Optional[str]:
+    """Return the project the proxy sent on a /log call, or None.
+
+    A value outside the role-name charset is dropped with a warning and the
+    record is still published: the proxy's log calls are async, so a 400 here
+    would lose the record. Only a direct /log caller, or a proxy that disagrees
+    with Portunus about the header, reaches that branch.
+    """
+    if project is None or _PROJECT_PATTERN.fullmatch(project):
+        return project
+    logger.warning(
+        f"{request_id}: x-portunus-project value rejected (length {len(project)}), "
+        "publishing the record without a project"
+    )
     return None
 
 
 # The proxy sends the project back on each /log call; the header name is fixed
 # because Portunus and the Lua client must agree on it without shared config.
-ProjectHeader = Annotated[
-    Optional[str],
-    BeforeValidator(_project_or_none),
-    Header(alias="x-portunus-project"),
-]
+ProjectHeader = Annotated[Optional[str], Depends(_project_from_header)]
 
 
 @portunus_router.post("/authorise")
@@ -245,7 +255,7 @@ async def log_request_headers(
     request_id: str,
     content: HeadersPayload,
     response: Response,
-    project: ProjectHeader = None,
+    project: ProjectHeader,
 ) -> Optional[ErrorResponse]:
     """Store request headers."""
     segment = xray_service.recorder.current_segment()
@@ -274,7 +284,7 @@ async def log_request_body(
     request_id: str,
     request: Request,
     response: Response,
-    project: ProjectHeader = None,
+    project: ProjectHeader,
 ) -> Optional[ErrorResponse]:
     """Store request body as raw bytes."""
     segment = xray_service.recorder.current_segment()
@@ -325,7 +335,7 @@ async def log_request_trailers(
     request_id: str,
     content: TrailersPayload,
     response: Response,
-    project: ProjectHeader = None,
+    project: ProjectHeader,
 ) -> Optional[ErrorResponse]:
     """Store request trailers."""
     segment = xray_service.recorder.current_segment()
@@ -356,7 +366,7 @@ async def log_response_headers(
     request_id: str,
     content: HeadersPayload,
     response: Response,
-    project: ProjectHeader = None,
+    project: ProjectHeader,
 ) -> Optional[ErrorResponse]:
     """Store response headers."""
     segment = xray_service.recorder.current_segment()
@@ -387,7 +397,7 @@ async def log_response_body(
     request_id: str,
     request: Request,
     response: Response,
-    project: ProjectHeader = None,
+    project: ProjectHeader,
 ) -> Optional[ErrorResponse]:
     """Store response body as raw bytes."""
     segment = xray_service.recorder.current_segment()
@@ -438,7 +448,7 @@ async def log_response_trailers(
     request_id: str,
     content: TrailersPayload,
     response: Response,
-    project: ProjectHeader = None,
+    project: ProjectHeader,
 ) -> Optional[ErrorResponse]:
     """Store response trailers."""
     segment = xray_service.recorder.current_segment()
