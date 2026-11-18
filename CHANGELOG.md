@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-18
+
 ### Security
 - A payload that cannot be decoded is no longer repeated in the 401 response
   or in the WebSocket relay's warning log. The message used to end with the
@@ -320,7 +322,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.8.0...v0.9.0
