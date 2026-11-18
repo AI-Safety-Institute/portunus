@@ -316,3 +316,51 @@ class TestRelayIntegration:
 
         # Summary should still be published even on timeout
         publish_service.publish_response_headers.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_every_record_carries_the_callers_project(
+        self, echo_server, publish_service
+    ):
+        """Upgrade headers, both body directions and the summary name the project.
+
+        The metadata record already carries it; the other four must agree so
+        Firehose files one connection's records under one project.
+        """
+        ws_auth = WsAuthResult(
+            auth_result=AuthResult(
+                api_key="sk-test-key",
+                principal_info=PrincipalInfo(
+                    arn="arn:aws:sts::123:assumed-role/UserProfile_x_alpha/session",
+                    account_id="123",
+                    project="alpha",
+                ),
+            ),
+            api_key="sk-test-key",
+        )
+        client_ws = _make_client_ws(echo_server)
+        await client_ws._messages_to_send.put(
+            {"type": "websocket.receive", "text": "hello"}
+        )
+
+        async def send_text_then_disconnect(text):
+            await client_ws._messages_to_send.put(
+                {"type": "websocket.disconnect", "code": 1000}
+            )
+
+        client_ws.send_text = send_text_then_disconnect
+
+        with patch("portunus.relay.handler.authenticate_ws", return_value=ws_auth):
+            await handle_ws_connection(
+                client_ws, "echo", AsyncMock(), publish_service, "test-req-project"
+            )
+
+        metadata = publish_service.publish_metadata.call_args.kwargs
+        assert metadata["principal_info"]["project"] == "alpha"
+        for publish in (
+            publish_service.publish_request_headers,
+            publish_service.publish_request_body,
+            publish_service.publish_response_body,
+            publish_service.publish_response_headers,
+        ):
+            assert publish.call_count == 1
+            assert publish.call_args.kwargs["project"] == "alpha"

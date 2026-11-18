@@ -130,6 +130,49 @@ describe("proxy_utils.portunus", function()
 		end)
 	end)
 
+	-- The request filter keeps the project for the response-phase log calls.
+	-- A 200 with no project is expected while an older Portunus is still
+	-- deployed and a regression after that, so it must reach the proxy log.
+	describe("remember_project", function()
+		local function metadata_handle()
+			local metadata = { set = spy.new(function() end) }
+			return {
+				logWarn = spy.new(function() end),
+				streamInfo = function()
+					return {
+						dynamicMetadata = function()
+							return metadata
+						end,
+					}
+				end,
+			},
+				metadata
+		end
+
+		it("should store a known project and not warn", function()
+			local handle, metadata = metadata_handle()
+
+			portunus_client:remember_project(handle, { request_id = "req-1", project = "alpha" })
+
+			assert.spy(metadata.set).was.called_with(match._, "envoy.filters.http.lua", "project", "alpha")
+			assert.spy(handle.logWarn).was_not.called()
+		end)
+
+		it("should warn with the request id and store nothing when the project is missing or empty", function()
+			for _, project in ipairs({ false, "" }) do
+				local handle, metadata = metadata_handle()
+
+				portunus_client:remember_project(handle, { request_id = "req-1", project = project or nil })
+
+				assert.spy(metadata.set).was_not.called()
+				assert.spy(handle.logWarn).was.called(1)
+				local message = handle.logWarn.calls[1].vals[2]
+				assert.is_truthy(message:find("[req-1]", 1, true))
+				assert.is_truthy(message:find("no project", 1, true))
+			end
+		end)
+	end)
+
 	describe("parse_authorization_response - JSON parsing", function()
 		it("should parse response with required fields only", function()
 			local body = '{"api_key": "sk-test-456", "request_id": "req-def"}'
@@ -149,6 +192,24 @@ describe("proxy_utils.portunus", function()
 			assert.is_nil(err)
 			assert.is_nil(data.output_header)
 			assert.is_nil(data.output_prefix)
+		end)
+
+		it("should keep project and treat a null or missing one as absent", function()
+			local data, err = portunus_client:parse_authorization_response(
+				'{"api_key": "sk", "request_id": "req", "project": "alpha"}'
+			)
+			assert.is_nil(err)
+			assert.equals("alpha", data.project)
+
+			data, err = portunus_client:parse_authorization_response(
+				'{"api_key": "sk", "request_id": "req", "project": null}'
+			)
+			assert.is_nil(err)
+			assert.is_nil(data.project)
+
+			data, err = portunus_client:parse_authorization_response('{"api_key": "sk", "request_id": "req"}')
+			assert.is_nil(err)
+			assert.is_nil(data.project)
 		end)
 
 		it("should return error for invalid responses", function()
@@ -607,6 +668,43 @@ describe("proxy_utils.portunus", function()
 			assert.is_not_nil(decoded.headers["content-type"])
 		end)
 
+		-- Each of the six log calls must stamp the project on its own outgoing
+		-- headers, and must send no project header when none is known, so
+		-- Portunus's optional header stays absent rather than empty.
+		local log_calls = {
+			{ "log_request_body", "body", "/log/req-p/request/body" },
+			{ "log_request_headers", {}, "/log/req-p/request/headers" },
+			{ "log_request_trailers", {}, "/log/req-p/request/trailers" },
+			{ "log_response_body", "body", "/log/req-p/response/body" },
+			{ "log_response_headers", {}, "/log/req-p/response/headers" },
+			{ "log_response_trailers", {}, "/log/req-p/response/trailers" },
+		}
+
+		for _, case in ipairs(log_calls) do
+			local method, payload, path = case[1], case[2], case[3]
+
+			it(method .. " should send x-portunus-project when the project is known", function()
+				local handle = { httpCall = spy.new() }
+
+				portunus_client[method](portunus_client, handle, "req-p", payload, "alpha")
+
+				local headers = handle.httpCall.calls[1].vals[3]
+				assert.equals(path, headers[":path"])
+				assert.equals("alpha", headers["x-portunus-project"])
+				assert.equals("test-api-key-123", headers["x-api-key"])
+			end)
+
+			it(method .. " should send no project header when the project is nil or empty", function()
+				local handle = { httpCall = spy.new() }
+
+				portunus_client[method](portunus_client, handle, "req-p", payload)
+				portunus_client[method](portunus_client, handle, "req-p", payload, "")
+
+				assert.spy(handle.httpCall).was.called(2)
+				assert.is_nil(handle.httpCall.calls[1].vals[3]["x-portunus-project"])
+				assert.is_nil(handle.httpCall.calls[2].vals[3]["x-portunus-project"])
+			end)
+		end
 	end)
 
 	-- ========================================

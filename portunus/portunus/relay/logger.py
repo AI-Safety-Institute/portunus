@@ -5,6 +5,9 @@ response-body Kinesis streams, reusing the same PublishService methods
 as HTTP logging. Client-to-upstream messages go to request-body,
 upstream-to-client messages go to response-body.
 
+Every helper takes the caller's project as a required argument, so each record
+lands in the same Firehose partition as the connection's metadata record.
+
 Uses a bounded asyncio queue with a fixed worker pool to decouple the
 relay loop from Kinesis publish latency. The relay enqueues log items
 without blocking; workers drain the queue in the background.
@@ -32,6 +35,7 @@ class _LogItem:
     direction: WsDirection
     message_data: bytes
     message_index: int
+    project: str | None
 
 
 class LogQueue:
@@ -134,6 +138,7 @@ async def _publish_message(item: _LogItem) -> None:
                 timestamp=timestamp,
                 chunk_id=chunk_id,
                 num_chunks=num_chunks,
+                project=item.project,
             )
         except Exception as e:
             logger.error(
@@ -148,6 +153,7 @@ async def log_ws_message(
     direction: WsDirection,
     message_data: bytes,
     message_index: int,
+    project: str | None,
 ) -> None:
     """Log a WebSocket message to the appropriate Kinesis body stream.
 
@@ -161,6 +167,7 @@ async def log_ws_message(
             direction=direction,
             message_data=message_data,
             message_index=message_index,
+            project=project,
         )
     )
 
@@ -169,6 +176,7 @@ async def log_ws_headers(
     publish_service: PublishService,
     request_id: str,
     headers: dict[str, str],
+    project: str | None,
 ) -> None:
     """Log WebSocket upgrade request headers to the request-headers Kinesis stream.
 
@@ -181,6 +189,7 @@ async def log_ws_headers(
             request_id=request_id,
             headers=headers,
             timestamp=timestamp,
+            project=project,
         )
     except Exception as e:
         logger.error(f"WS {request_id}: Failed to log request headers: {e}")
@@ -192,6 +201,7 @@ async def log_ws_summary(
     client_messages: int,
     upstream_messages: int,
     duration_seconds: float,
+    project: str | None,
 ) -> None:
     """Log WebSocket connection summary to the response-headers Kinesis stream.
 
@@ -210,6 +220,7 @@ async def log_ws_summary(
             request_id=request_id,
             headers=summary,
             timestamp=timestamp,
+            project=project,
         )
     except Exception as e:
         logger.error(f"WS {request_id}: Failed to log connection summary: {e}")
@@ -221,6 +232,7 @@ async def enqueue_log(
     direction: WsDirection,
     message_data: bytes,
     message_index: int,
+    project: str | None,
 ) -> None:
     """Enqueue message logging.
 
@@ -236,9 +248,15 @@ async def enqueue_log(
                 direction=direction,
                 message_data=message_data,
                 message_index=message_index,
+                project=project,
             )
         )
     else:
         await log_ws_message(
-            publish_service, request_id, direction, message_data, message_index
+            publish_service,
+            request_id,
+            direction,
+            message_data,
+            message_index,
+            project,
         )
