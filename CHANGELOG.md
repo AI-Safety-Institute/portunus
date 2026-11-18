@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-18
+
+### Security
+- A payload that cannot be decoded is no longer repeated in the 401 response
+  or in the WebSocket relay's warning log. The message used to end with the
+  whole payload, which holds the caller's AWS credentials. It now names only
+  the kind of decoding error, for example
+  `Failed to decode authorization payload: JSONDecodeError`.
+- `/authorise` no longer logs the first ten characters of each payload, and
+  the warning for an unparseable credential expiry no longer logs the value.
+
 ### Changed
 - `x-aisi-tags`, the header clients tag requests with for log queries, is
   logged but no longer forwarded upstream, over HTTP or WebSocket. See
@@ -21,6 +32,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   a `/log` call's `x-portunus-project` value fails the role-name charset check
   (the record is still published), and the proxy logs one when a 200 from
   `/authorise` has no project.
+
+### Fixed
+- Portunus's own authentication errors, such as "API key is not valid for
+  target host", keep their message instead of being re-wrapped as
+  "Authentication failed: …".
+- Joined log records decode request bodies with the request content type, as
+  response bodies already did, so `application/vnd.amazon.eventstream` request
+  bodies decode.
 
 ## [0.12.0] - 2026-10-27
 
@@ -305,7 +324,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Full unit and integration test suite.
 - ARN parsing utilities for principal identity extraction.
 
-[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/AI-Safety-Institute/portunus/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AI-Safety-Institute/portunus/compare/v0.8.0...v0.9.0

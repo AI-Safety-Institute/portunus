@@ -338,7 +338,7 @@ class AwsCredentials:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse credential expiration: {expiration_str}")
+            logger.warning("Could not parse credential expiration")
             return None
 
     @classmethod
@@ -461,8 +461,12 @@ class AuthPayload:
         except InputValidationError as e:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
+        except PayloadError:
+            raise
         except Exception as e:
-            msg = f"Failed to decode authorization payload: {e}, payload: {raw_payload}"
+            # The payload holds AWS credentials and this message reaches the
+            # client, so it carries nothing derived from the payload.
+            msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1430,7 +1434,9 @@ class JoinedLogRecord:
             True if decoding succeeded, False otherwise
         """
         decoded, failed = _decompress_b64_body(
-            self.request_body_body, self.request_headers_content_encoding
+            self.request_body_body,
+            self.request_headers_content_encoding,
+            self.request_headers_content_type,
         )
         self.request_body_decoded = decoded
         self.request_body_decode_failure = failed
