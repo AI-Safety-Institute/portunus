@@ -142,6 +142,8 @@ class TestGlueJobTransformations:
     2. Drops 'published_at' from headers/trailers (but keeps metadata_published_at)
     3. Adds prefixes: metadata_, request_headers_, request_body_, response_headers_,
        response_body_
+    3a. Drops 'project' from the non-metadata streams: it is the Firehose partition
+       key, and the joined row already carries it as metadata_project
     4. Keeps 'request_id' and 'timestamp' unprefixed (used for joins)
     5. For body records: drops body_size, chunk_id, num_chunks (only keeps first chunk)
     6. Adds etl_processed_at
@@ -168,6 +170,7 @@ class TestGlueJobTransformations:
         req_headers_fields = {col["name"] for col in RequestHeadersRecord.glue_schema()}
         req_headers_fields.remove("record_type")
         req_headers_fields.remove("published_at")
+        req_headers_fields.remove("project")
         for field in req_headers_fields:
             if field != "request_id":  # Skip join key
                 expected.add(f"request_headers_{field}")
@@ -188,6 +191,7 @@ class TestGlueJobTransformations:
         }
         resp_headers_fields.remove("record_type")
         resp_headers_fields.remove("published_at")
+        resp_headers_fields.remove("project")
         for field in resp_headers_fields:
             if field != "request_id":  # Skip join key
                 expected.add(f"response_headers_{field}")
@@ -550,7 +554,7 @@ class TestGlueSimulation:
             RequestHeadersRecord,
             prefix="request_headers_",
             skip_fields={"request_id"},
-            drop_fields={"record_type", "published_at"},
+            drop_fields={"record_type", "published_at", "project"},
         )
         # Add decoded field that's added during ETL
         expected.add("request_headers_decoded")
@@ -574,7 +578,7 @@ class TestGlueSimulation:
             ResponseHeadersRecord,
             prefix="response_headers_",
             skip_fields={"request_id"},
-            drop_fields={"record_type", "published_at"},
+            drop_fields={"record_type", "published_at", "project"},
         )
         # Add decoded field that's added during ETL
         expected.add("response_headers_decoded")

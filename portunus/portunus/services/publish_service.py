@@ -150,6 +150,7 @@ class PublishService:
         request_id: str,
         headers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> bool:
         """Publish request headers to Kinesis stream with ISO-8601 timestamps.
 
@@ -157,6 +158,8 @@ class PublishService:
             request_id: Unique request ID
             headers: Request headers dictionary
             timestamp: ISO-8601 formatted timestamp
+            project: Caller's project from /authorise, so Firehose can partition
+                the record by it. None when the proxy did not know it.
         """
         if not config.kinesis.request_headers_stream_name:
             logger.warning("Request headers stream not configured, skipping publish")
@@ -167,6 +170,7 @@ class PublishService:
             raw_headers=headers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream
@@ -183,6 +187,7 @@ class PublishService:
         timestamp: str,
         chunk_id: int,
         num_chunks: int,
+        project: Optional[str] = None,
     ) -> bool:
         """Publish request body to Kinesis stream with ISO-8601 timestamps.
 
@@ -192,6 +197,8 @@ class PublishService:
             timestamp: ISO-8601 formatted timestamp
             chunk_id: Index of this chunk (0-based)
             num_chunks: Total number of chunks
+            project: Caller's project from /authorise, so Firehose can partition
+                the record by it. None when the proxy did not know it.
         """
         if not config.kinesis.request_body_stream_name:
             logger.warning("Request body stream not configured, skipping publish")
@@ -209,6 +216,7 @@ class PublishService:
             chunk_id=chunk_id,
             num_chunks=num_chunks,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream
@@ -223,6 +231,7 @@ class PublishService:
         request_id: str,
         trailers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> bool:
         """Publish request trailers to Kinesis stream with ISO-8601 timestamps.
 
@@ -230,6 +239,8 @@ class PublishService:
             request_id: Unique request ID
             trailers: Request trailers dictionary
             timestamp: ISO-8601 formatted timestamp
+            project: Caller's project from /authorise, so Firehose can partition
+                the record by it. None when the proxy did not know it.
         """
         if not config.kinesis.request_trailers_stream_name:
             logger.warning("Request trailers stream not configured, skipping publish")
@@ -240,6 +251,7 @@ class PublishService:
             trailers=trailers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream
@@ -254,6 +266,7 @@ class PublishService:
         request_id: str,
         headers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> bool:
         """Publish response headers to Kinesis stream with ISO-8601 timestamps.
 
@@ -261,6 +274,8 @@ class PublishService:
             request_id: Unique request ID
             headers: Response headers dictionary
             timestamp: ISO-8601 formatted timestamp
+            project: Caller's project from /authorise, so Firehose can partition
+                the record by it. None when the proxy did not know it.
         """
         if not config.kinesis.response_headers_stream_name:
             logger.warning("Response headers stream not configured, skipping publish")
@@ -271,6 +286,7 @@ class PublishService:
             raw_headers=headers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream
@@ -287,6 +303,7 @@ class PublishService:
         timestamp: str,
         chunk_id: int,
         num_chunks: int,
+        project: Optional[str] = None,
     ) -> bool:
         """Publish response body to Kinesis stream with ISO-8601 timestamps.
 
@@ -296,6 +313,8 @@ class PublishService:
             timestamp: ISO-8601 formatted timestamp
             chunk_id: Index of this chunk (0-based)
             num_chunks: Total number of chunks
+            project: Caller's project from /authorise, so Firehose can partition
+                the record by it. None when the proxy did not know it.
         """
         if not config.kinesis.response_body_stream_name:
             logger.warning("Response body stream not configured, skipping publish")
@@ -313,6 +332,7 @@ class PublishService:
             chunk_id=chunk_id,
             num_chunks=num_chunks,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream
@@ -327,6 +347,7 @@ class PublishService:
         request_id: str,
         trailers: Dict[str, str],
         timestamp: str,
+        project: Optional[str] = None,
     ) -> bool:
         """Publish response trailers to Kinesis stream with ISO-8601 timestamps.
 
@@ -334,6 +355,8 @@ class PublishService:
             request_id: Unique request ID
             trailers: Response trailers dictionary
             timestamp: ISO-8601 formatted timestamp
+            project: Caller's project from /authorise, so Firehose can partition
+                the record by it. None when the proxy did not know it.
         """
         if not config.kinesis.response_trailers_stream_name:
             logger.warning("Response trailers stream not configured, skipping publish")
@@ -344,6 +367,7 @@ class PublishService:
             trailers=trailers,
             timestamp=timestamp,
             published_at=generate_iso_timestamp(),
+            project=project,
         )
 
         # Use the stream name without prefix for the Kinesis Data Stream

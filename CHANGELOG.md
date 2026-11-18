@@ -5,9 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Security
+- A payload that cannot be decoded is no longer repeated in the 401 response
+  or in the WebSocket relay's warning log. The message used to end with the
+  whole payload, which holds the caller's AWS credentials. It now names only
+  the kind of decoding error, for example
+  `Failed to decode authorization payload: JSONDecodeError`.
+
+### Changed
+- `x-aisi-tags`, the header clients tag requests with for log queries, is
+  logged but no longer forwarded upstream, over HTTP or WebSocket. See
+  [Request tags](README.md#request-tags).
+
+### Added
+- Every request and response log record carries the caller's `project`, so
+  Firehose can partition each stream by it instead of filing the six
+  non-metadata streams under `project=unknown`. `/authorise` returns it and
+  the proxy echoes it on each `/log` call as `x-portunus-project`. The
+  WebSocket relay stamps it on the records it publishes itself. The Glue
+  schemas gain a trailing `project` column.
+- Two warnings for records that will carry no project: Portunus logs one when
+  a `/log` call's `x-portunus-project` value fails the role-name charset check
+  (the record is still published), and the proxy logs one when a 200 from
+  `/authorise` has no project.
+
 ### Fixed
-- An authorization payload that fails to decode is no longer included in the
-  error message; the decode error is still chained for debugging.
 - Portunus's own authentication errors, such as "API key is not valid for
   target host", keep their message instead of being re-wrapped as
   "Authentication failed: …".

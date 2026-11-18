@@ -129,6 +129,11 @@ static_resources:
               # Default HTTP route through Lua filter
               - match:
                   prefix: "/"
+                # Client tags (README "Request tags"): the router drops them after
+                # the Lua filter logs them. Not on the WS route or virtual host:
+                # the relay must see them to log them, and drops them itself.
+                request_headers_to_remove:
+                - x-aisi-tags
                 route:
                   cluster: ${TARGET_HOST}
                   timeout: 0s # no timeout

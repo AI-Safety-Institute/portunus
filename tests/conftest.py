@@ -181,6 +181,45 @@ def encode_base64(data: dict, secret_name: str = "test-api-key") -> str:
     return b64encode(json.dumps(data).encode("utf-8")).decode("utf-8")
 
 
+def assume_role_credentials(role_name: str) -> dict:
+    """Return LocalStack credentials whose caller identity is the given role."""
+    base = ["docker", "exec", "localstack-main", "awslocal"]
+    subprocess.run(
+        base
+        + [
+            "iam",
+            "create-role",
+            "--role-name",
+            role_name,
+            "--assume-role-policy-document",
+            '{"Version": "2012-10-17", "Statement": []}',
+        ],
+        capture_output=True,
+    )
+    result = subprocess.run(
+        base
+        + [
+            "sts",
+            "assume-role",
+            "--role-arn",
+            f"arn:aws:iam::000000000000:role/{role_name}",
+            "--role-session-name",
+            "e2e",
+            "--region",
+            "eu-west-2",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    creds = json.loads(result.stdout)["Credentials"]
+    return {
+        "access_key_id": creds["AccessKeyId"],
+        "secret_access_key": creds["SecretAccessKey"],
+        "session_token": creds["SessionToken"],
+    }
+
+
 def read_kinesis_records(stream_name: str) -> list[dict]:
     """Read all records from a Kinesis stream in localstack."""
     shard_result = subprocess.run(

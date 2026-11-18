@@ -42,7 +42,7 @@ This repo implements a secure API key proxy system with two main components:
 4. Proxy moves the credential into one upstream header
    - `portunus:apply_upstream_auth(request_handle, auth_response)` in `lua.lua`
    - The header is the response's optional `output_header` (else `API_KEY_HEADER`), the value is the optional `output_prefix` (else `API_KEY_PREFIX`) followed by the key
-   - Both accepted inbound headers (either may carry the caller's AWS credentials) are removed unless one is that header; every other header is forwarded untouched
+   - Both accepted inbound headers (either may carry the caller's AWS credentials) are removed unless one is that header; every other header is forwarded untouched, except `x-aisi-tags`, which is logged but never forwarded (removed by the default route's `request_headers_to_remove` in `envoy.yaml`, and by `_BLOCKED_HEADERS` in the relay)
 5. Proxy forwards the modified request to target API
 6. Target API processes request using the real API key
 
@@ -50,6 +50,8 @@ This repo implements a secure API key proxy system with two main components:
 1. Request logging:
    - Proxy captures request headers and body before forwarding
    - Makes async call to `/log` with metadata and type "request_headers", "request_body", or "request_trailers"
+   - Each `/log` call carries the caller's project (from the `/authorise` response, held in Lua dynamic metadata beside `request_id`) as the `x-portunus-project` header; the handlers stamp it on the record so Firehose can partition by `project`
+   - The WebSocket relay publishes its records itself (no `/log` call) and stamps the project from its own authentication on the upgrade headers, each message and the closing summary
    - Payload is validated against appropriate Pydantic models (defined in `models.py`)
    - Binary data is base64-encoded by Lua before being sent to Portunus
    - Portunus publishes events directly to Kinesis Data Streams for long-term storage
