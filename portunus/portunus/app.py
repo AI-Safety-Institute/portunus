@@ -167,11 +167,7 @@ async def authorise(
             body = await request.json()
             raw_payload = body.get("payload", "")
             target_host = body.get("target_host")
-            logger.info(
-                f"Received authorization request with payload: {
-                    raw_payload[:10]
-                }... for target: {target_host}"
-            )
+            logger.info(f"Received authorization request for target: {target_host}")
 
             # Get API key and principal info (from cache or AWS)
             payload = AuthPayload.from_contents(raw_payload, target_host=None)

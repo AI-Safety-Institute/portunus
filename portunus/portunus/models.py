@@ -338,7 +338,7 @@ class AwsCredentials:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except (ValueError, TypeError):
-            logger.warning(f"Could not parse credential expiration: {expiration_str}")
+            logger.warning("Could not parse credential expiration")
             return None
 
     @classmethod

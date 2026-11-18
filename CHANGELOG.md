@@ -13,6 +13,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   whole payload, which holds the caller's AWS credentials. It now names only
   the kind of decoding error, for example
   `Failed to decode authorization payload: JSONDecodeError`.
+- `/authorise` no longer logs the first ten characters of each payload, and
+  the warning for an unparseable credential expiry no longer logs the value.
 
 ### Changed
 - `x-aisi-tags`, the header clients tag requests with for log queries, is

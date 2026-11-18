@@ -1,4 +1,4 @@
-"""A payload that cannot be decoded is never repeated back or logged.
+"""A payload that Portunus rejects is never repeated back or logged.
 
 The payload carries the caller's AWS credentials, and the error response
 travels back to wherever the request came from.
@@ -81,6 +81,23 @@ UNDECODABLE = {
         _b64(json.dumps({"credentials": {"secret_access_key": SECRET_KEY}}).encode()),
         (SECRET_KEY,),
     ),
+    "a bare key sent where the payload belongs": UndecodablePayload(
+        SECRET_KEY, (SECRET_KEY[:8],)
+    ),
+    "an expiry that is not a timestamp": UndecodablePayload(
+        _b64(
+            json.dumps(
+                {
+                    "credentials": {
+                        "access_key_id": "AKIATEST",
+                        "secret_access_key": "x",
+                        "expiration": SESSION_TOKEN,
+                    }
+                }
+            ).encode()
+        ),
+        (SESSION_TOKEN,),
+    ),
 }
 
 undecodable = pytest.mark.parametrize(
@@ -107,16 +124,31 @@ async def client():
 
 @undecodable
 @pytest.mark.asyncio
-async def test_authorise_rejects_without_repeating_the_payload(
-    case: UndecodablePayload, client, mock_xray
+async def test_authorise_rejects_without_logging_or_sending_the_payload(
+    case: UndecodablePayload, client, mock_xray, caplog
+):
+    with caplog.at_level(logging.DEBUG):
+        response = await client.post(
+            "/authorise",
+            json={"payload": case.payload, "target_host": "api.example.com"},
+        )
+
+    assert response.status_code == 401
+    said = caplog.text + response.text
+    for secret in case.sensitive:
+        assert secret not in said
+
+
+@pytest.mark.asyncio
+async def test_a_payload_that_is_not_an_object_is_called_an_invalid_format(
+    client, mock_xray
 ):
     response = await client.post(
-        "/authorise", json={"payload": case.payload, "target_host": "api.example.com"}
+        "/authorise", json={"payload": _b64(b'["not", "an", "object"]')}
     )
 
     assert response.status_code == 401
-    for secret in case.sensitive:
-        assert secret not in response.text
+    assert response.json()["message"] == "Invalid payload format"
 
 
 @undecodable
