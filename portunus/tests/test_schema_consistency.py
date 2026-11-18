@@ -168,6 +168,9 @@ class TestGlueJobTransformations:
         req_headers_fields = {col["name"] for col in RequestHeadersRecord.glue_schema()}
         req_headers_fields.remove("record_type")
         req_headers_fields.remove("published_at")
+        # Project is the Firehose partition key; the joined row carries it as
+        # metadata_project, so the Glue job drops it from the other streams.
+        req_headers_fields.remove("project")
         for field in req_headers_fields:
             if field != "request_id":  # Skip join key
                 expected.add(f"request_headers_{field}")
@@ -188,6 +191,7 @@ class TestGlueJobTransformations:
         }
         resp_headers_fields.remove("record_type")
         resp_headers_fields.remove("published_at")
+        resp_headers_fields.remove("project")
         for field in resp_headers_fields:
             if field != "request_id":  # Skip join key
                 expected.add(f"response_headers_{field}")
@@ -550,7 +554,7 @@ class TestGlueSimulation:
             RequestHeadersRecord,
             prefix="request_headers_",
             skip_fields={"request_id"},
-            drop_fields={"record_type", "published_at"},
+            drop_fields={"record_type", "published_at", "project"},
         )
         # Add decoded field that's added during ETL
         expected.add("request_headers_decoded")
@@ -574,7 +578,7 @@ class TestGlueSimulation:
             ResponseHeadersRecord,
             prefix="response_headers_",
             skip_fields={"request_id"},
-            drop_fields={"record_type", "published_at"},
+            drop_fields={"record_type", "published_at", "project"},
         )
         # Add decoded field that's added during ETL
         expected.add("response_headers_decoded")
