@@ -461,10 +461,12 @@ class AuthPayload:
         except InputValidationError as e:
             msg = f"Validation error in payload: {e.message}"
             raise PayloadError(msg) from e
+        except PayloadError:
+            raise
         except Exception as e:
-            # raw_payload holds temporary AWS credentials, so it stays out of
-            # the message.
-            msg = f"Failed to decode authorization payload: {e}"
+            # The payload holds AWS credentials and this message reaches the
+            # client, so it carries nothing derived from the payload.
+            msg = f"Failed to decode authorization payload: {type(e).__name__}"
             raise PayloadError(msg) from e
 
     def to_dict(self) -> Dict[str, Any]:
