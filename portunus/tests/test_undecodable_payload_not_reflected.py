@@ -67,7 +67,11 @@ UNDECODABLE = {
     ),
     "a JSON list instead of an object": UndecodablePayload(
         _b64(json.dumps([SECRET_KEY, SESSION_TOKEN]).encode()),
-        (SECRET_KEY, SESSION_TOKEN),
+        (
+            _b64(json.dumps([SECRET_KEY, SESSION_TOKEN]).encode()),
+            SECRET_KEY,
+            SESSION_TOKEN,
+        ),
     ),
     "credentials given as a string": UndecodablePayload(
         _b64(json.dumps({"credentials": SECRET_KEY}).encode()),
